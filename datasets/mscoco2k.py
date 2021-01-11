@@ -119,11 +119,16 @@ class Preprocessor:
       tokens.update(ex['text'])
     self.tokens = sorted(tokens)
     self.tokens = [UNK] + self.tokens 
+    with open('{data_path}/tokens.json', 'w') as fid:
+      print('{data_path}/tokens.json') # XXX
+      json.dump(self.tokens, fid, indent=4)
+
 
     # Build the token-to-index and index-to-token maps:
     if tokens_path is not None:
       with open(tokens_path, 'r') as fid:
         self.tokens = [l.strip() for l in fid]
+
     
     if lexicon_path is not None:
       with open(lexicon_path, "r") as fid:
@@ -180,10 +185,10 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   with open(wav_scp_file, 'r') as wav_scp_f,\
