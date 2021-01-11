@@ -5,6 +5,7 @@ import torch
 import torchaudio
 import torchvision 
 
+UNK = '###UNK###'
 def log_normalize(x):
     x.add_(1e-6).log_()
     mean = x.mean()
@@ -13,18 +14,20 @@ def log_normalize(x):
 
 
 class Dataset(torch.utils.data.Dataset):
-  splits = {
-      "train": ["train"], # Prefix of the training metainfo
-      "validation": ["val"], # Prefix of the test metainfo
-      "test": ["val"], # Prefix of the test metainfo 
-    }
-  sample_rate = 16000
-
   def __init__(
       self, data_path,
       preprocessor, split,
-      augmentation=None
+      splits = {
+        "train": ["train"], # Prefix of the training metainfo
+        "validation": ["val"], # Prefix of the test metainfo
+        "test": ["val"], # Prefix of the test metainfo 
+      },
+      augment=True,
+      sample_rate = 16000
   ):
+    self.splits = splits
+    self.sample_rate = sample_rate
+
     data = []
     for sp in self.splits[split]:
       data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))
@@ -33,14 +36,21 @@ class Dataset(torch.utils.data.Dataset):
     # Set up transforms
     self.transforms = [
         torchaudio.transforms.MelSpectrogram(
-          sample_rate=sample_rate, sample_rate * 25 // 1000,
+          sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
           n_mels=preprocessor.num_features,
           hop_length=sample_rate * 10 // 1000,
         ),
         torchvision.transforms.Lambda(log_normalize),
     ]
-    if augmentation is not None:
-      self.transforms.extend(augmentation)
+    if augment:
+        augmentation = [
+                torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
+                torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
+                torchaudio.transforms.TimeMasking(100, iid_masks=True),
+                torchaudio.transforms.TimeMasking(100, iid_masks=True),
+            ]
+        # self.transforms.extend(augmentation)
+
     self.transforms = torchvision.transforms.Compose(self.transforms)
 
     # Load each audio file 
@@ -70,7 +80,7 @@ class Dataset(torch.utils.data.Dataset):
  
 class Preprocessor:
   """
-  A preprocessor for the SpeechCOCO dataset.
+  A preprocessor for the MSCOCO 2k dataset.
   Args:
       data_path (str) : Path to the top level data directory.
       num_features (int) : Number of audio features in transform.
@@ -84,10 +94,16 @@ class Preprocessor:
     self,
     data_path,
     num_features,
-    splits,
+    splits = {
+        "train": ["train"], # Prefix of the training metainfo
+        "validation": ["val"], # Prefix of the test metainfo
+        "test": ["val"], # Prefix of the test metainfo 
+      },
     tokens_path=None,
     lexicon_path=None,
-    prepend_wordsep=False
+    use_words=False,
+    prepend_wordsep=False,
+    sample_rate = 16000
   ):
     self.wordsep = ' '
     self._prepend_wordsep = prepend_wordsep
@@ -95,13 +111,14 @@ class Preprocessor:
 
     data = []
     for sp in splits['train']:
-      data.extend(load_data_split(data_path, sp, self.wordsep))
+      data.extend(load_data_split(data_path, sp, self.wordsep, sample_rate))
 
     # Load the set of graphemes:
     tokens = set()
     for ex in data:
       tokens.update(ex['text'])
     self.tokens = sorted(tokens)
+    self.tokens = [UNK] + self.tokens 
 
     # Build the token-to-index and index-to-token maps:
     if tokens_path is not None:
@@ -133,8 +150,8 @@ class Preprocessor:
                   for t in self.lexicon.get(w, self.wordsep + w)
               ]
           tok_to_idx = self.tokens_to_index
-      # In some cases we require the target to start with self.wordsep, for
-      return torch.LongTensor([tok_to_idx[t] for t in line])
+      
+      return torch.LongTensor([tok_to_idx.get(t, 0) for t in line])
 
   def to_text(self, indices):
       # Roughly the inverse of `to_index`
@@ -163,14 +180,16 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)]
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
+    print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)]
-  
-  with open(wav_scp_file, 'r') as wav_scp_f,
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
+    print('Number of test examples={}'.format(len(select_idxs)))  
+
+  with open(wav_scp_file, 'r') as wav_scp_f,\
        open(text_file, 'r') as text_f:
     filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
-    texts = [l.split()[:-1] for idx, l in enumerate(text_f) if idx in select_idxs]
+    texts = [l.split()[1:] for idx, l in enumerate(text_f) if idx in select_idxs]
     durations = [torchaudio.load(fn)[0].size()[0] / float(sample_rate) for fn in filenames]
     examples = [{'audio': fn, 'text':text, 'duration':dur} for text, fn, dur in zip(texts, filenames, durations)]  
   return examples
