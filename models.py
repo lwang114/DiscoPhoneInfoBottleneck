@@ -245,6 +245,60 @@ class TDS(torch.nn.Module):
         # outputs shape: [B, W, output_size]
         return self.linear(outputs.permute(0, 2, 1))
 
+class TDSTransducer(torch.nn.Module):
+    def __init__(
+            self, input_size, output_size, tokens, kernel_size, stride, tds1, tds2, wfst=True, **kwargs,
+    ):
+        super(TDSTransducer, self).__init__()
+        # TDS -> ConvTransducer
+
+        # Setup lexicon for transducer layer:
+        with open(tokens, 'r') as fid:
+            output_tokens = [l.strip() for l in fid]
+        input_tokens = set(t for token in output_tokens for t in token)
+        input_tokens = {t: e for e, t in enumerate(sorted(input_tokens))}
+        lexicon = [tuple(input_tokens[t] for t in token)
+                    for token in output_tokens]
+        in_token_size = len(input_tokens) + 1
+        blank_idx = len(input_tokens)
+
+        # output size of tds1 is number of input tokens + 1 for blank
+        self.tds1 = TDS2d(input_size, in_token_size, **tds1)
+        stride_h = np.prod([grp["stride"][0] for grp in tds1["tds_groups"]])
+        inner_size = input_size // stride_h
+
+        # output size of conv is the size of the lexicon
+        if wfst:
+            self.conv = transducer.ConvTransduce1D(
+                lexicon, kernel_size, stride, blank_idx, **kwargs)
+        else:
+            # For control, use "dumb" conv with the same parameters as the WFST conv:
+            self.conv = torch.nn.Conv1d(
+                in_channels=in_token_size,
+                out_channels=len(lexicon),
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                stride=stride)
+        self.wfst = wfst
+
+        # in_channels should be set to out_channels of prevous tds group * depth
+        in_channels = tds1["tds_groups"][-1]["channels"] * tds1["depth"]
+        tds2["in_channels"] = in_channels
+        self.linear = torch.nn.Linear(len(lexicon), output_size) # in_channels * inner_size)
+        # self.tds2 = TDS2d(inner_size, output_size, **tds2)
+
+    def forward(self, inputs):
+        # inputs shape: [B, H, W]
+        outputs = self.tds1(inputs)
+        # outputs shape: [B, W, C]
+        if self.wfst:
+            outputs = self.conv(outputs)
+        else:
+            outputs = self.conv(outputs.permute(0, 2, 1)).permute(0, 2, 1)
+        # outputs shape: [B, W, C']
+        outputs = self.linear(outputs)
+        return outputs
+        # return self.tds2(outputs.permute(0, 2, 1))
 
 class RNN(torch.nn.Module):
     def __init__(

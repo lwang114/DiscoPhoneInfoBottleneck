@@ -1,0 +1,39 @@
+{
+  "seed" : 0,
+  "data" : {
+    "dataset" : "mscoco2k",
+    "data_path" : "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k",
+    "num_features" : 80
+  },
+  "model_type" : "tds2d_transducer",
+  "model" : {
+    "tokens": "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k/tokens.json",
+    "tds1" : {
+      "tds_groups" : [
+      { "channels" : 4, "num_blocks" : 5, "stride" : [1, 1] },
+      { "channels" : 8, "num_blocks" : 5, "stride": [1, 1] },
+      { "channels" : 16, "num_blocks" : 5, "stride": [1, 1] }
+      ],
+      "kernel_size" : [1, 5], 
+      "depth" : 1, 
+      "dropout" : 0.2
+    },
+    "tds2": {
+      "tds_groups" : [
+      { "channels" : 16, "num_blocks" : 5, "stride": [1, 2], "kernel_size" : [1, 5], "depth" : 1, "dropout" : 0.1 }
+      ],
+      "kernel_size" : [1, 5], 
+      "depth" : 1, 
+      "dropout" : 0.1
+    },
+    "kernel_size" : 15,
+    "stride": 1
+  },
+  "optim" : {
+    "batch_size" : 32,
+    "epochs" : 400,
+    "learning_rate" : 2e-1,
+    "step_size" : 100,
+    "max_grad_norm" : 5
+  }
+}
