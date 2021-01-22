@@ -3,7 +3,8 @@
   "data" : {
     "dataset" : "mscoco2k",
     "data_path" : "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k",
-    "num_features" : 80
+    "num_features" : 80,
+    "supervised": false
   },
   "model_type" : "tds",
   "model" : {

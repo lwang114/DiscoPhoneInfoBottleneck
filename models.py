@@ -456,6 +456,8 @@ def load_model(model_type, input_size, output_size, config):
         return RNN(input_size, output_size, **config)
     elif model_type == "tds":
         return TDS(input_size, output_size, **config)
+    elif model_type == "tds_transducer":
+        return TDSTransducer(input_size, output_size, **config)
     elif model_type == "tds2d":
         return TDS2d(input_size, output_size, **config)
     elif model_type == "tds2d_transducer":

@@ -103,42 +103,49 @@ class Preprocessor:
     lexicon_path=None,
     use_words=False,
     prepend_wordsep=False,
-    sample_rate = 16000
+    sample_rate = 16000,
+    supervised = True
   ):
     self.wordsep = ' '
     self._prepend_wordsep = prepend_wordsep
     self.num_features = num_features
+    self.supervised = supervised
 
     data = []
     for sp in splits['train']:
       data.extend(load_data_split(data_path, sp, self.wordsep, sample_rate))
 
-    # Load the set of graphemes:
+    # lexicon is a mapping from word to its corresponding token ids 
     tokens = set()
+    lexicon = {} 
     for ex in data:
-      tokens.update(ex['text'])
+      for w in ex['text'].split(self.wordsep):
+        if not w in lexicon:
+          if supervised: # Use graphemes in supervised setting 
+            lexicon[w] = [t for t in w]
+          else: # Use five states per word in unsupervised setting 
+            lexicon[w] = ['{:03d}'.format(5 * len(lexicon) + i) for i in range(5)]
+          tokens.update(lexicon[w])
+    
     self.tokens = sorted(tokens)
-    self.tokens = [UNK] + self.tokens 
-    with open('{data_path}/tokens.json', 'w') as fid:
-      print('{data_path}/tokens.json') # XXX
+    with open(os.path.join(data_path, 'tokens.json'), 'w') as fid:
       json.dump(self.tokens, fid, indent=4)
-
 
     # Build the token-to-index and index-to-token maps:
     if tokens_path is not None:
       with open(tokens_path, 'r') as fid:
         self.tokens = [l.strip() for l in fid]
 
-    
     if lexicon_path is not None:
       with open(lexicon_path, "r") as fid:
         lexicon = (l.strip().split() for l in fid)
         lexicon = {l[0]: l[1:] for l in lexicon}
         self.lexicon = lexicon
     else:
-      self.lexicon = None
+      self.lexicon = lexicon
 
     self.tokens_to_index = {t: i for i, t in enumerate(self.tokens)}
+    self.tokens_to_lexicon = {t: w for w in lexicon for t in lexicon[w]}
 
   @property
   def num_tokens(self):
@@ -161,10 +168,26 @@ class Preprocessor:
   def to_text(self, indices):
       # Roughly the inverse of `to_index`
       encoding = self.tokens
-      return self._post_process(encoding[i] for i in indices)
+      text = [self.tokens_to_lexicon[encoding[i]] for i in indices]
+      text = []
+      prev_word = None
+      for i in indices:
+        word = self.tokens_to_lexicon[encoding[i]]
+        if not prev_word or prev_word != word:
+          prev_word = word
+          text.append(word)
+      return self._post_process(text)
 
   def tokens_to_text(self, indices):
-      return self._post_process(self.tokens[i] for i in indices)
+      text = []
+      prev_word = None
+      for i in indices:
+        word = self.tokens_to_lexicon[self.tokens[i]]
+        if not prev_word or prev_word != word:
+          prev_word = word
+          text.append(word)
+      return self._post_process(text)
+      # return self._post_process(self.tokens[i] for i in indices)
 
   def _post_process(self, indices):
       # ignore preceding and trailling spaces
@@ -185,16 +208,16 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   with open(wav_scp_file, 'r') as wav_scp_f,\
        open(text_file, 'r') as text_f:
     filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
-    texts = [l.split()[1:] for idx, l in enumerate(text_f) if idx in select_idxs]
+    texts = [' '.join(l.split()[1:]) for idx, l in enumerate(text_f) if idx in select_idxs]
     durations = [torchaudio.load(fn)[0].size()[0] / float(sample_rate) for fn in filenames]
     examples = [{'audio': fn, 'text':text, 'duration':dur} for text, fn, dur in zip(texts, filenames, durations)]  
   return examples

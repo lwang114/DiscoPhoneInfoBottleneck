@@ -17,19 +17,28 @@ import sys
 import time
 import torch
 
-def data_loader(dataset, config, world_rank=0, world_size=1):
+def data_loader(dataset, config, world_rank=0, world_size=1, split='train'):
     num_samples = config["data"].get("num_samples", None)
     if num_samples is not None:
         logging.info(f"Using {num_samples} of {len(dataset)}.")
-        dataset = Subset(dataset, torch.randperm(len(dataset))[:num_samples])
+        if split == 'train':
+          dataset = Subset(dataset, torch.randperm(len(dataset))[:num_samples])
+        else:
+          dataset = Subset(dataset, torch.arange(len(dataset))[:num_samples])
+
+    batch_size = config['optim']['batch_size'] 
     return torch.utils.data.DataLoader(
-        dataset,
-        batch_sampler=BatchSortedSampler(
-            dataset, config["optim"]["batch_size"], world_rank, world_size
-        ),
-        collate_fn=padding_collate,
-        num_workers=int(world_size > 1),
+          dataset,
+          # batch_sampler=BatchSortedSampler(
+          #  dataset, config["optim"]["batch_size"], world_rank, world_size
+          # ),
+          batch_size,
+          collate_fn=padding_collate,
+          num_workers=int(world_size > 1),
+          shuffle=False
     )
+
+
 
 def module_from_file(module_name, file_path):
     spec = importlib.util.spec_from_file_location(module_name, file_path)

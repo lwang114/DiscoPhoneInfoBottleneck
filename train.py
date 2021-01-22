@@ -89,12 +89,23 @@ def compute_edit_distance(predictions, targets, preprocessor):
 
 
 @torch.no_grad()
-def test(model, criterion, data_loader, preprocessor, device, world_size):
+def test(model, criterion, data_loader, preprocessor, device, world_size, checkpoint_path='./'):
     model.eval()
     criterion.eval()
     meters = utils.Meters()
-    for inputs, targets in data_loader:
+    predictions = []
+
+    B = 0
+    for b_idx, (inputs, targets) in enumerate(data_loader):
+        if b_idx == 0:
+          B = inputs.size(0)
         outputs = model(inputs.to(device))
+        prediction = outputs.topk(3, dim=-1)[-1].permute(0, 2, 1).cpu().detach().numpy().tolist()
+        for idx in range(inputs.size(0)):
+          global_idx = b_idx * B + idx 
+          example_id = data_loader.dataset.dataset[global_idx][0]
+          text = data_loader.dataset.dataset[global_idx][1]
+          predictions.append({example_id: prediction[idx], 'text': text})
         meters.loss += criterion(outputs, targets).item() * len(targets)
         meters.num_samples += len(targets)
         tokens_dist, words_dist, n_tokens, n_words = compute_edit_distance(
@@ -106,6 +117,10 @@ def test(model, criterion, data_loader, preprocessor, device, world_size):
         meters.num_words += n_words
     if world_size > 1:
         meters.sync()
+
+    if not os.path.exists(checkpoint_path):
+        os.mkdir(checkpoint_path)
+    json.dump(predictions, open(os.path.join(checkpoint_path, 'predictions.json'), 'w'), indent=2)
     return meters.avg_loss, meters.cer, meters.wer
 
 
@@ -169,11 +184,12 @@ def train(world_rank, args):
         lexicon_path=config["data"].get("lexicon", None),
         use_words=config["data"].get("use_words", False),
         prepend_wordsep=config["data"].get("prepend_wordsep", False),
+        supervised=config["data"].get("supervised", True) 
     )
     trainset = dataset.Dataset(data_path, preprocessor, split="train", augment=True)
     valset = dataset.Dataset(data_path, preprocessor, split="validation")
-    train_loader = utils.data_loader(trainset, config, world_rank, args.world_size)
-    val_loader = utils.data_loader(valset, config, world_rank, args.world_size)
+    train_loader = utils.data_loader(trainset, config, world_rank, args.world_size, split='train')
+    val_loader = utils.data_loader(valset, config, world_rank, args.world_size, split='validation')
 
     # setup criterion, model:
     logging.info("Loading model ...")
@@ -304,7 +320,7 @@ def train(world_rank, args):
         logging.info("Evaluating validation set..")
         timers.start("test_total")
         val_loss, val_cer, val_wer = test(
-            model, base_criterion, val_loader, preprocessor, device, args.world_size
+            model, base_criterion, val_loader, preprocessor, device, args.world_size, checkpoint_path=args.checkpoint_path
         )
         timers.stop("test_total")
         if world_rank == 0:
