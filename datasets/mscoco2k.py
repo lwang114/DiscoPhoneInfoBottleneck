@@ -221,3 +221,65 @@ def load_data_split(data_path, split, wordsep, sample_rate):
     durations = [torchaudio.load(fn)[0].size()[0] / float(sample_rate) for fn in filenames]
     examples = [{'audio': fn, 'text':text, 'duration':dur} for text, fn, dur in zip(texts, filenames, durations)]  
   return examples
+
+def create_gold_file(data_path, sample_rate, frame_rate=10):
+  """
+  Returns:
+      gold_dicts : a list of mappings
+          {"sentence_id" : str,
+           "units" : a list of ints representing phoneme id for each feature frame,
+           "text" : a list of strs representing phoneme tokens for each feature frame}       
+  """
+  wav_scp_file = os.path.join(data_path, "mscoco2k_wav.scp")
+  split_file = os.path.join(data_path, "mscoco2k_retrieval_split.txt")
+  select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)]
+
+  phone_info_dict = json.load(open(os.path.join(data_path, "mscoco2k_phone_info.json"), "r"))
+  phone_to_index = {}
+  gold_dicts = []
+
+  # Extract audio file names as sentence ids
+  with open(wav_scp_file, 'r') as wav_scp_f:
+    filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
+
+  # Extract utterance duration
+  durations = [torchaudio.load(fn)[0].size()[0] * 1000 / (frame_rate * float(sample_rate)) for fn in filenames]
+
+  # Extract phone mapping
+  phone_path = os.path.join(data_path, "phone2id.json")
+  if os.path.exists(phone_path):
+    phone_to_index = json.load(open(phone_path, "r"))
+  else:
+    phones = set()
+    for idx, phone_info in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
+      for word_token in phone_info["data_ids"]:
+        for phone_token in word_token[2]:
+          token = phone_token[0]
+          phones.update(token)
+    phone_to_index = {x:i for i, x enumerate(sorted(phones))}
+    phone_to_index[UNK] = len(phone_to_index) 
+    json.dump(phone_to_index, open(phone_path, "w"), indent=2)  
+
+  # Extract phone units
+  for idx, phone_info in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
+    if not idx in select_idxs:
+      continue
+
+    gold_dict = {"sentence_id": filenames[idx],
+                 "units" = [-1]*durations[idx],
+                 "text" = [UNK]*durations[idx]
+    }
+    start_phone = 0
+    for word_token in phone_info["data_ids"]:
+      for phone_token in word_token[2]:
+        token, begin, end = phone_token[0], float(phone_token[1]), float(phone_token[2])
+        begin_frame = start_phone // frame_rate
+        end_frame = (start_phone + end - start) // frame_rate
+        gold_dict["units"][start_frame:end_frame+1] = phone_to_index[token]
+        gold_dict["text"][start_frame:end_frame+1] = token
+        start_phone += end - start
+    gold_dicts.append(gold_dict)
+
+  with open("gold_units.json", "w") as gold_f:
+    json.dump(gold_dict, gold_f, indent=2) 
+
