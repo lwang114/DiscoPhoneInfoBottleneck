@@ -31,6 +31,7 @@ class Dataset(torch.utils.data.Dataset):
     data = []
     for sp in self.splits[split]:
       data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))
+    
     self.preprocessor = preprocessor
     
     # Set up transforms
@@ -58,6 +59,10 @@ class Dataset(torch.utils.data.Dataset):
     text = [example['text'] for example in data]
     duration = [example['duration'] for example in data]
     self.dataset = list(zip(audio, text, duration))
+    
+    # Create gold unit file
+    if not os.path.exists(os.path.join(data_path, "gold_units.json")):
+      create_gold_file(data_path, sample_rate) 
 
   def sample_sizes(self):
     """
@@ -208,21 +213,21 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   with open(wav_scp_file, 'r') as wav_scp_f,\
        open(text_file, 'r') as text_f:
     filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
     texts = [' '.join(l.split()[1:]) for idx, l in enumerate(text_f) if idx in select_idxs]
-    durations = [torchaudio.load(fn)[0].size()[0] / float(sample_rate) for fn in filenames]
+    durations = [torchaudio.load(fn)[0].size(-1) / float(sample_rate) for fn in filenames]
     examples = [{'audio': fn, 'text':text, 'duration':dur} for text, fn, dur in zip(texts, filenames, durations)]  
   return examples
 
-def create_gold_file(data_path, sample_rate, frame_rate=10):
+def create_gold_file(data_path, sample_rate):
   """
   Returns:
       gold_dicts : a list of mappings
@@ -240,10 +245,10 @@ def create_gold_file(data_path, sample_rate, frame_rate=10):
 
   # Extract audio file names as sentence ids
   with open(wav_scp_file, 'r') as wav_scp_f:
-    filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
+    filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f)]
 
   # Extract utterance duration
-  durations = [torchaudio.load(fn)[0].size()[0] * 1000 / (frame_rate * float(sample_rate)) for fn in filenames]
+  durations = [int(torchaudio.load(fn)[0].size(-1) * 1000 // (10 * sample_rate)) for fn in filenames]
 
   # Extract phone mapping
   phone_path = os.path.join(data_path, "phone2id.json")
@@ -251,35 +256,42 @@ def create_gold_file(data_path, sample_rate, frame_rate=10):
     phone_to_index = json.load(open(phone_path, "r"))
   else:
     phones = set()
-    for idx, phone_info in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
+    for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))): # XXX
       for word_token in phone_info["data_ids"]:
         for phone_token in word_token[2]:
           token = phone_token[0]
-          phones.update(token)
-    phone_to_index = {x:i for i, x enumerate(sorted(phones))}
+          phones.update([token])
+    phone_to_index = {x:i for i, x in enumerate(sorted(phones))}
     phone_to_index[UNK] = len(phone_to_index) 
     json.dump(phone_to_index, open(phone_path, "w"), indent=2)  
 
   # Extract phone units
-  for idx, phone_info in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
+  for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))): # XXX
     if not idx in select_idxs:
       continue
-
     gold_dict = {"sentence_id": filenames[idx],
-                 "units" = [-1]*durations[idx],
-                 "text" = [UNK]*durations[idx]
+                 "units": [-1]*durations[idx],
+                 "text": [UNK]*durations[idx]
     }
-    start_phone = 0
+    begin_phone = 0
     for word_token in phone_info["data_ids"]:
       for phone_token in word_token[2]:
         token, begin, end = phone_token[0], float(phone_token[1]), float(phone_token[2])
-        begin_frame = start_phone // frame_rate
-        end_frame = (start_phone + end - start) // frame_rate
-        gold_dict["units"][start_frame:end_frame+1] = phone_to_index[token]
-        gold_dict["text"][start_frame:end_frame+1] = token
-        start_phone += end - start
+        begin_frame = int(begin_phone // 10)
+        end_frame = int((begin_phone + end - begin) // 10)
+        if end_frame > durations[idx]:
+          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], end_frame, durations[idx]))
+          break
+        for t in range(begin_frame, end_frame):
+          gold_dict["units"][t] = phone_to_index[token]
+          gold_dict["text"][t] = token
+        begin_phone += end - begin
     gold_dicts.append(gold_dict)
 
-  with open("gold_units.json", "w") as gold_f:
-    json.dump(gold_dict, gold_f, indent=2) 
+  with open(os.path.join(data_path, "gold_units.json"), "w") as gold_f:
+    json.dump(gold_dicts, gold_f, indent=2) 
 
+if __name__ == "__main__":
+  data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
+  preproc = Preprocessor(data_path, 80) 
+  dataset = Dataset(data_path, preproc, "train")
