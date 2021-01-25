@@ -9,7 +9,7 @@ sns.set(style="darkgrid")
 np.random.seed(2)
 EPS = 1e-40
 
-class DiscreteInfoBottleneck:
+class GeneralDiscreteInfoBottleneck:
   '''
   Information bottleneck for discrete random variables
 
@@ -108,11 +108,11 @@ class DiscreteInfoBottleneck:
     P_X_Y /= np.sum(P_X_Y) + EPS
     return P_X_Y
   
-  def fit(self, max_epochs=100, beta=1., tol=1e-2, prefix='discrete_ib'):
+  def fit(self, max_epochs=100, alpha=1., beta=1., tol=1e-2, prefix='discrete_ib'):
     self.initialize()
     losses = []
     mutual_infos = [[], []]
-    bit_rates = []
+    nat_rates = []
     prev_loss = np.inf
     P_X_Y = self.P_X[:, np.newaxis] * self.P_XY
     H_X = entropy(self.P_X)
@@ -125,7 +125,7 @@ class DiscreteInfoBottleneck:
         KL[:, k] = kl_divergence(self.P_XY, self.P_ZY[k])
 
       # Update clusterer
-      P_XZ = self.P_Z * np.exp(-beta * KL)
+      P_XZ = self.P_Z ** (1. / alpha) * np.exp(- (beta / alpha) * KL)
       P_XZ /= np.sum(P_XZ, axis=-1, keepdims=-1) + EPS
 
       # Update predictor
@@ -139,13 +139,13 @@ class DiscreteInfoBottleneck:
       self.P_ZY = deepcopy(P_ZY)
       self.P_Z = deepcopy(P_Z)
       
-      loss, I_ZX, I_ZY = self.bottleneck_objective(beta)
+      loss, I_ZX, I_ZY = self.bottleneck_objective(alpha, beta)
       H_Z = entropy(self.P_Z)
 
       losses.append(loss)
       mutual_infos[0].append(I_ZX)
       mutual_infos[1].append(I_ZY)
-      bit_rates.append(H_Z)
+      nat_rates.append(H_Z)
 
       if epoch % 1 == 0:
         print('Epoch {}'.format(epoch))
@@ -156,18 +156,22 @@ class DiscreteInfoBottleneck:
         np.save(prefix+'_predictor.npy', self.P_ZY)
 
       if epoch > 0 and abs(loss - prev_loss) <= abs(tol * prev_loss):
-        return losses, mutual_infos, bit_rates
+        return losses, mutual_infos, nat_rates
       else:
         prev_loss = loss  
      
-    return losses, mutual_infos, bit_rates
+    return losses, mutual_infos, nat_rates
 
-  def bottleneck_objective(self, beta):
+  def bottleneck_objective(self, alpha, beta):
     P_Z_X = self.P_X[:, np.newaxis] * self.P_XZ 
     P_Z_Y = self.P_Z[:, np.newaxis] * self.P_ZY
-    I_ZX = kl_divergence(P_Z_X.flatten(), (self.P_X[:, np.newaxis] * self.P_Z[np.newaxis, :]).flatten())
+    # I_ZX = kl_divergence(P_Z_X.flatten(), (self.P_X[:, np.newaxis] * self.P_Z[np.newaxis, :]).flatten())
+    H_Z = entropy(self.P_Z)
+    H_XZ = entropy(P_Z_X) - entropy(self.P_X) 
+    
+    I_ZX = H_Z - H_XZ
     I_ZY = kl_divergence(P_Z_Y.flatten(), (self.P_Z[:, np.newaxis] * self.P_Y[np.newaxis, :]).flatten())
-    IB = I_ZX - beta * I_ZY
+    IB = H_Z - alpha * H_XZ - beta * I_ZY
     return IB, I_ZX, I_ZY 
 
   def plot_IB_tradeoff(self, prefix='discrete_ib'):
@@ -175,24 +179,27 @@ class DiscreteInfoBottleneck:
                  'Nats': [],
                  'Name': [],
                  r'$\beta$': []}
-    data_tradeoff_dict = {r'$I(Z;X)$': [],
+    data_tradeoff_dict = {r'$\alpha$': [],
+                          r'$I(Z;X)$': [],
                           r'$H(Z)$': [],
                           r'$I(Z;Y)$': []}
 
     if not os.path.exists(prefix+'_tradeoff.csv'):
-      for beta in np.linspace(1, 50, 100):
-        losses, mutual_infos, bit_rates = self.fit(beta=beta, prefix=prefix)
-        n_epochs = len(losses)
-        data_dict['Epoch'].extend([i for i in range(n_epochs) for _ in range(4)])
-        data_dict['Nats'].extend([losses + mutual_infos[0] + mutual_infos[1] + bit_rates])
-        data_dict['Name'].extend([r'$I(Z;X) - \beta I(Z;Y)$']*n_epochs +\
-                                 [r'$I(Z;X)$']*n_epochs +\
-                                 [r'$I(Z;Y)$']*n_epochs +\
-                                 [r'$H(Z)$']*n_epochs)
-        data_dict[r'$\beta$'].extend([beta]*(4*n_epochs))
-        data_tradeoff_dict[r'$H(Z)$'].append(bit_rates[-1])
-        data_tradeoff_dict[r'$I(Z;X)$'].append(mutual_infos[0][-1])
-        data_tradeoff_dict[r'$I(Z;Y)$'].append(mutual_infos[1][-1])
+      for alpha in 10**(np.linspace(-4, 0, 5)):
+        for beta in np.linspace(1, 50, 100):
+          losses, mutual_infos, nat_rates = self.fit(alpha=alpha, beta=beta, prefix=prefix)
+          n_epochs = len(losses)
+          data_dict['Epoch'].extend([i for i in range(n_epochs) for _ in range(4)])
+          data_dict['Nats'].extend([losses + mutual_infos[0] + mutual_infos[1] + nat_rates])
+          data_dict['Name'].extend([r'$I(Z;X) - \beta I(Z;Y)$']*n_epochs +\
+                                   [r'$I(Z;X)$']*n_epochs +\
+                                   [r'$I(Z;Y)$']*n_epochs +\
+                                   [r'$H(Z)$']*n_epochs)
+          data_dict[r'$\beta$'].extend([beta]*(4*n_epochs))
+          data_tradeoff_dict[r'$\alpha$'].append(alpha)
+          data_tradeoff_dict[r'$H(Z)$'].append(nat_rates[-1])
+          data_tradeoff_dict[r'$I(Z;X)$'].append(mutual_infos[0][-1])
+          data_tradeoff_dict[r'$I(Z;Y)$'].append(mutual_infos[1][-1])
 
       df_tradeoff = pd.DataFrame(data_tradeoff_dict)
       df_tradeoff.to_csv(prefix+'_tradeoff.csv')
@@ -203,16 +210,16 @@ class DiscreteInfoBottleneck:
     plt.rc('ytick', labelsize=15)
     plt.rc('axes', labelsize=20)
     plt.rc('figure', titlesize=30)
-    plt.rc('font', size=50)
+    plt.rc('font', size=20)
 
     plt.figure(figsize=(8, 6))
-    sns.scatterplot(data=df_tradeoff, x=r'$H(Z)$', y=r'$I(Z;Y)$')
+    sns.scatterplot(data=df_tradeoff, x=r'$H(Z)$', y=r'$I(Z;Y)$', style=r'$\alpha$') # TODO
     plt.savefig(prefix+'_tradeoff_deterministic.png')
     plt.show()
     plt.close()
 
     plt.figure(figsize=(8, 6))
-    sns.scatterplot(data=df_tradeoff, x=r'$I(Z;X)$', y=r'$I(Z;Y)$')
+    sns.scatterplot(data=df_tradeoff, x=r'$I(Z;X)$', y=r'$I(Z;Y)$', style=r'$\alpha$')
     plt.savefig(prefix+'_tradeoff.png')
     plt.show()    
     plt.close()
@@ -244,7 +251,6 @@ def kl_divergence(p, qs):
 
 if __name__ == '__main__':
   # Create synthetic data
-  '''
   K_x = 256
   K_y = 32
   alpha_x = 1000
@@ -258,11 +264,10 @@ if __name__ == '__main__':
   H_X = entropy(P_X)
   P_Y = P_X @ P_XY
   H_Y = entropy(P_Y)
-  print(H_X, H_Y, H_X + H_Y - H_X_Y) # XXX
 
-  bottleneck = DiscreteInfoBottleneck('', '', P_X_Y=P_X_Y)
+  bottleneck = GeneralDiscreteInfoBottleneck('', P_X_Y=P_X_Y)
   bottleneck.plot_IB_tradeoff()
-  ''' 
-  checkpoint_path = 'ctc_unsupervised'
-  bottleneck = DiscreteInfoBottleneck(os.path.join(checkpoint_path, 'predictions.json'))
-  bottleneck.plot_IB_tradeoff()
+   
+  # checkpoint_path = 'ctc_unsupervised'
+  # bottleneck = GeneralDiscreteInfoBottleneck(os.path.join(checkpoint_path, 'predictions.json'))
+  # bottleneck.plot_IB_tradeoff()
