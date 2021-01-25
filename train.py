@@ -105,7 +105,7 @@ def test(model, criterion, data_loader, preprocessor, device, world_size, checkp
           global_idx = b_idx * B + idx 
           example_id = data_loader.dataset.dataset[global_idx][0]
           text = data_loader.dataset.dataset[global_idx][1]
-          predictions.append({example_id: prediction[idx], 'text': text})
+          predictions.append({'sent_id': example_id, 'units': prediction[idx], 'text': text})
         meters.loss += criterion(outputs, targets).item() * len(targets)
         meters.num_samples += len(targets)
         tokens_dist, words_dist, n_tokens, n_words = compute_edit_distance(
