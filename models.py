@@ -12,7 +12,7 @@ import os
 import torch
 import utils
 import transducer
-
+import json
 
 class TDSBlock2d(torch.nn.Module):
     def __init__(self, in_channels, img_depth, kernel_size, dropout):
@@ -118,12 +118,10 @@ class TDS2dTransducer(torch.nn.Module):
         # TDS2d -> ConvTransducer -> TDS2d
 
         # Setup lexicon for transducer layer:
-        with open(tokens, 'r') as fid:
-            output_tokens = [l.strip() for l in fid]
-        input_tokens = set(t for token in output_tokens for t in token)
-        input_tokens = {t: e for e, t in enumerate(sorted(input_tokens))}
-        lexicon = [tuple(input_tokens[t] for t in token)
-                    for token in output_tokens]
+        output_tokens = json.load(open(tokens))
+        lexicon = [tuple(5 * token_idx + i for i in range(5))
+                   for token_idx, token in enumerate(output_tokens)]
+        input_tokens = set(t for token in lexicon for t in token)
         in_token_size = len(input_tokens) + 1
         blank_idx = len(input_tokens)
 
@@ -251,14 +249,11 @@ class TDSTransducer(torch.nn.Module):
     ):
         super(TDSTransducer, self).__init__()
         # TDS -> ConvTransducer
-
         # Setup lexicon for transducer layer:
-        with open(tokens, 'r') as fid:
-            output_tokens = [l.strip() for l in fid]
-        input_tokens = set(t for token in output_tokens for t in token)
-        input_tokens = {t: e for e, t in enumerate(sorted(input_tokens))}
-        lexicon = [tuple(input_tokens[t] for t in token)
-                    for token in output_tokens]
+        output_tokens = json.load(open(tokens))
+        lexicon = [tuple(5 * token_idx + i for i in range(5))
+                   for token_idx, token in enumerate(output_tokens)]
+        input_tokens = set(t for token in lexicon for t in token)
         in_token_size = len(input_tokens) + 1
         blank_idx = len(input_tokens)
 
@@ -484,7 +479,7 @@ def load_criterion(criterion_type, preprocessor, config):
         if transitions is not None:
             transitions = gtn.load(transitions)
         criterion = transducer.Transducer(
-            preprocessor.tokens,
+            preprocessor.lexicon.values(), # preprocessor.tokens,
             preprocessor.graphemes_to_index,
             ngram=config.get("ngram", 0),
             transitions=transitions,

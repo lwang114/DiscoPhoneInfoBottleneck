@@ -100,7 +100,7 @@ def test(model, criterion, data_loader, preprocessor, device, world_size, checkp
         if b_idx == 0:
           B = inputs.size(0)
         outputs = model(inputs.to(device))
-        prediction = outputs.topk(3, dim=-1)[-1].permute(0, 2, 1).cpu().detach().numpy().tolist()
+        prediction = outputs.topk(10, dim=-1)[-1].permute(0, 2, 1).cpu().detach().numpy().tolist()
         for idx in range(inputs.size(0)):
           global_idx = b_idx * B + idx 
           example_id = data_loader.dataset.dataset[global_idx][0]
@@ -184,7 +184,8 @@ def train(world_rank, args):
         lexicon_path=config["data"].get("lexicon", None),
         use_words=config["data"].get("use_words", False),
         prepend_wordsep=config["data"].get("prepend_wordsep", False),
-        supervised=config["data"].get("supervised", True) 
+        supervised=config["data"].get("supervised", True),
+        level=config["data"].get("level", "phone") 
     )
     trainset = dataset.Dataset(data_path, preprocessor, split="train", augment=True)
     valset = dataset.Dataset(data_path, preprocessor, split="validation")
