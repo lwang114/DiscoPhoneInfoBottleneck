@@ -1,8 +1,12 @@
 import gtn
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import json
+from models import TDS
+from transducer import ConvTransduce1D
 
-class AudioVisualInfomationBottleneck(torch.nn.Module):
+class AudioVisualInformationBottleneck(torch.nn.Module):
   '''
   Information bottleneck model for multimoda phone discovery.
 
@@ -11,13 +15,22 @@ class AudioVisualInfomationBottleneck(torch.nn.Module):
       output_size: int, number of word types 
       hidden_size: int, number of phone types
   '''
-  def __init__(self, input_size, output_size, in_token_size, out_token_size, tds_groups, kernel_size, dropout, wfst=False, beta=1., **kwargs): 
-    self.bottleneck = TDS(input_size, in_token_size, tds_groups, kernel_size, dropout) 
+  def __init__(self, input_size, output_size, 
+               in_token_size, out_token_size,
+               tds_groups, kernel_size, 
+               stride, dropout, wfst=False, 
+               beta=1., **kwargs): 
+    super(AudioVisualInformationBottleneck, self).__init__()
+    self.bottleneck = TDS(input_size,\
+                          in_token_size,\
+                          tds_groups,\
+                          kernel_size,\
+                          dropout) 
 
     if wfst: # TODO Add normalization; allow phoneme inputs
       lexicon = [tuple(5 * token_idx + i for i in range(5))
                  for token_idx, token in enumerate(out_token_size)]
-      self.transducer = transducer.ConvTransduce1D(
+      self.transducer = ConvTransduce1D(
           lexicon, kernel_size, stride, blank_idx, **kwargs) 
     else:
       self.transducer = torch.nn.Conv1d(
@@ -43,14 +56,15 @@ class AudioVisualInfomationBottleneck(torch.nn.Module):
     in_scores = self.bottleneck(audio_inputs)
     
     # Input token scores shape: [B, W, in_token_size]
-    in_probs = F.softmax(in_scores)
+    in_probs = F.softmax(in_scores, dim=-1)
 
     # Output token scores shape: [B, W, out_token_size]
-    out_scores = self.transducer(in_scores)
     if self.wfst:
+      out_scores = self.transducer(in_scores) 
       out_probs = out_scores
     else:
-      out_probs = F.softmax(out_scores)
+      out_scores = self.transducer(in_scores.permute(0, 2, 1)).permute(0, 2, 1)
+      out_probs = F.softmax(out_scores, dim=-1) 
 
     # Predictor scores shape: [B, L, out_token_size]
     pred_scores = self.predictor(image_inputs)
@@ -66,7 +80,7 @@ class AudioVisualInfomationBottleneck(torch.nn.Module):
     return in_scores,\
            in_probs,\
            out_scores,\
-           out_probs,
+           out_probs,\
            outputs
 
   def calculate_loss(self, audio_inputs, image_inputs):
@@ -74,7 +88,7 @@ class AudioVisualInfomationBottleneck(torch.nn.Module):
     m = nn.LogSoftmax(dim=-1) 
     device = audio_inputs.device
     S = torch.zeros((n, n), dtype=torch.float, device=device)
-    beta = torch.tensor(self.beta, device=x.device)
+    beta = torch.tensor(self.beta, device=audio_inputs.device)
     
     in_log_posteriors = []
     in_posteriors = []
@@ -86,8 +100,8 @@ class AudioVisualInfomationBottleneck(torch.nn.Module):
         in_probs,\
         out_scores,\
         out_probs,\
-        outputs = self(audio_inputs.unsqueeze(0),\
-                       image_inputs.unsqueeze(0))
+        outputs = self(audio_inputs[i].unsqueeze(0),\
+                       image_inputs[j].unsqueeze(0))
         S[i][j] = outputs.squeeze(0)
     
         in_log_posteriors.append(m(in_scores))
@@ -116,5 +130,6 @@ if __name__ == '__main__':
   
   audio_inputs = torch.randn(4, 80, 100)
   image_inputs = torch.randn(4, 8, 4096)
-  in_scores, in_probs, out_scores, out_probs, outputs = model(audio_inputs, image_inputs)
-  print('in_scores.size(), out_scores.size(), outputs.size(): ', in_scores.size(), out_scores.size(), outputs.size()) 
+  # in_scores, in_probs, out_scores, out_probs, outputs = model(audio_inputs, image_inputs)
+  # print('in_scores.size(), out_scores.size(), outputs.size(): ', in_scores.size(), out_scores.size(), outputs.size())
+  print(model.calculate_loss(audio_inputs, image_inputs))
