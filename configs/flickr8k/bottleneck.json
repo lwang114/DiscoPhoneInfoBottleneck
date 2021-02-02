@@ -1,0 +1,31 @@
+{
+  "seed" : 0,
+  "data" : {
+    "dataset" : "mscoco2k",
+    "data_path" : "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k",
+    "num_features" : 80,
+    "num_visual_features" : 4096, 
+    "supervised": false
+  },
+  "model_type" : "tds",
+  "model" : {
+    "tds_groups" : [
+      { "channels" : 4, "num_blocks" : 5 },
+      { "channels" : 8, "num_blocks" : 5 },
+      { "channels" : 16, "num_blocks" : 5 }
+    ],
+    "kernel_size" : 5,
+    "in_token_size" : 49,
+    "out_token_size" : 200,
+    "dropout" : 0.2,
+    "wfst" : false,
+    "beta" : 1.0
+  },
+  "optim" : {
+    "batch_size" : 16,
+    "epochs" : 400,
+    "learning_rate" : 2e-1,
+    "step_size" : 100,
+    "max_grad_norm" : 5
+  }
+}
