@@ -72,6 +72,7 @@ def make_lexicon_graph(word_pieces, graphemes_to_idx):
             prev = n
         graph.add_arc(prev, 0, graphemes_to_idx[wp[-1]], i)
     graph.arc_sort()
+    gtn.draw(graph, 'lexicon_graph.pdf')
     return graph
 
 
@@ -120,6 +121,7 @@ def make_token_graph(token_list, blank="none", allow_repeats=True):
             for j in range(ntoks):
                 if i != j:
                     graph.add_arc(i + 1, j + 1, j, j)
+    gtn.draw(graph, 'token_graph.pdf')
     return graph
 
 

@@ -81,6 +81,7 @@ class AudioVisualInformationBottleneck(torch.nn.Module):
            in_probs,\
            out_scores,\
            out_probs,\
+           pred_scores,\
            outputs
 
   def calculate_loss(self, audio_inputs, image_inputs):
@@ -100,6 +101,7 @@ class AudioVisualInformationBottleneck(torch.nn.Module):
         in_probs,\
         out_scores,\
         out_probs,\
+        pred_scores,\
         outputs = self(audio_inputs[i].unsqueeze(0),\
                        image_inputs[j].unsqueeze(0))
         S[i][j] = outputs.squeeze(0)
@@ -116,10 +118,32 @@ class AudioVisualInformationBottleneck(torch.nn.Module):
     in_log_prior = m(self.in_logit_prior)
     out_log_prior = m(self.out_logit_prior)
 
-    I_ZX = (in_posteriors * (in_log_posteriors - in_log_prior)).sum(dim=-1).mean()
-    I_WX = (out_posteriors * (out_log_posteriors - out_log_prior)).sum(dim=-1).mean() 
+    I_ZX = (in_posteriors * (in_log_posteriors - in_log_prior)).sum(dim=-1).sum()
+    I_WX = (out_posteriors * (out_log_posteriors - out_log_prior)).sum(dim=-1).sum() 
     I_WY = torch.sum(m(S).diag()) + torch.sum(m(S.transpose(0, 1)).diag())
+    I_ZX = I_ZX / n
+    I_WX = I_WX / n
+    I_WY = I_WY / n
     return I_ZX + I_WX - beta * I_WY, I_ZX, I_WX, I_WY
+
+  def retrieve(self, audio_scores, image_scores):
+    n = audio_scores.size(0)
+    device = audio_scores.device
+    S = torch.zeros((n, n), dtype=torch.float, device=device)
+    for i in range(n):
+      for j in range(n):
+        # Attention scores shape: [B, W, L]
+        att_scores = torch.matmul(audio_scores[i].unsqueeze(0), image_scores[j].t().unsqueeze(0))
+        att_first = F.softmax(att_scores, dim=-1) # TODO Apply mask  
+        att_second = F.softmax(att_scores, dim=-2)
+
+        # Outputs shape: [B,]
+        outputs = ((att_first + att_second) * att_scores).sum(dim=-1).sum(dim=-1)
+        S[i][j] = outputs.squeeze(0) 
+    
+    _, A2I_idxs = S.topk(10, 1)
+    _, I2A_idxs = S.topk(10, 0)
+    return A2I_idxs, I2A_idxs.t() 
 
 if __name__ == '__main__':
   config_path = 'configs/flickr8k/bottleneck.json' 

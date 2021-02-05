@@ -14,14 +14,14 @@ import os
 import sys
 import time
 import torch
-
+import torch.nn as nn
 import models
 import utils
-
+from audio_visual_information_bottlenecks import AudioVisualInformationBottleneck
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train a handwriting recognition model."
+        description="Train a visually-grounded phoneme discovery model."
     )
     parser.add_argument(
         "--config", type=str, help="A json configuration file for experiment."
@@ -36,71 +36,48 @@ def parse_args():
         type=str,
         help="Checkpoint path for saving models",
     )
-    parser.add_argument(
-        "--world_size", default=1, type=int, help="world size for distributed training"
-    )
-    parser.add_argument(
-        "--dist_url",
-        default="tcp://localhost:23146",
-        type=str,
-        help="url used to set up distributed training. This should be"
-        "the IP address and open port number of the master node",
-    )
-    parser.add_argument(
-        "--dist_backend", default="nccl", type=str, help="distributed backend"
-    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
     use_cpu = args.disable_cuda or not torch.cuda.is_available()
-    if args.world_size > 1 and use_cpu:
-        logging.fatal("CPU distributed training not supported.")
-        sys.exit(1)
 
-    logging.info("World size is : " + str(args.world_size))
     if args.restore:
         logging.info(f"Restoring model from epoch {args.last_epoch}")
-
-    if not use_cpu and torch.cuda.device_count() < args.world_size:
-        logging.fatal(
-            "At least {} cuda devices required. {} found".format(
-                args.world_size, torch.cuda.device_count()
-            )
-        )
-        sys.exit(1)
 
     return args
 
 
 @torch.no_grad()
-def test(model, data_loader, checkpoint_path='./'):
+def test(model, data_loader, device, checkpoint_path='./'):
     model.eval()
-    meters = utils.Meters()
-    # predictions = []
 
     I_outputs = []
     A_outputs = []
-    I_embeddings = []
-    A_embeddings = []
+
     with torch.no_grad():
-      for b_idx, (inputs, targets) in enumerate(data_loader):
-        if b_idx == 0:
-          batch_size = inputs.size(0)
-        
-        outputs = model(inputs.to(device))
-        meters.loss += model.module.calculate_loss(outputs, targets).item() * len(targets)
-        meters.num_samples += len(targets)
-        tokens_dist, words_dist, n_tokens, n_words = compute_edit_distance(
-            criterion.viterbi(outputs), targets, preprocessor
-        )
-        meters.edit_distance_tokens += tokens_dist
-        meters.num_tokens += n_tokens
-        meters.edit_distance_words += words_dist
-        meters.num_words += n_words
+      for inputs, targets in data_loader:
+        _, _, _, audio_scores, image_scores, _ = model(inputs.to(device), targets.to(device)) 
+        audio_scores = audio_scores.cpu().detach() 
+        image_scores = image_scores.cpu().detach()
+
+        I_outputs.append(image_scores)
+        A_outputs.append(audio_scores)
+    I_outputs = torch.cat(I_outputs)
+    A_outputs = torch.cat(A_outputs)
+
+    A2I_idxs, I2A_idxs = model.module.retrieve(A_outputs, I_outputs)
+    A2I_eval = utils.RetrievalEvaluation(A2I_idxs)
+    I2A_eval = utils.RetrievalEvaluation(I2A_idxs)
+    recalls = {'A_r1': A2I_eval.get_recall_at_k(1),
+               'A_r5': A2I_eval.get_recall_at_k(5),
+               'A_r10': A2I_eval.get_recall_at_k(10),
+               'I_r1': I2A_eval.get_recall_at_k(1),
+               'I_r5': I2A_eval.get_recall_at_k(5),
+               'I_r10': I2A_eval.get_recall_at_k(10)}
 
     if not os.path.exists(checkpoint_path):
         os.mkdir(checkpoint_path)
-    return meter.avg_loss, recalls
+    return recalls
 
 def checkpoint(model, checkpoint_path, save_best=False):
     if not os.path.exists(checkpoint_path):
@@ -113,11 +90,15 @@ def checkpoint(model, checkpoint_path, save_best=False):
         torch.save(model.state_dict(), model_checkpoint + ".best")
         # torch.save(criterion.state_dict(), criterion_checkpoint + ".best")
 
-
 def train(args):
     # setup logging
     level = logging.INFO
     logging.getLogger().setLevel(level)
+
+    if not args.disable_cuda:
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
 
     with open(args.config, "r") as fid:
         config = json.load(fid)
@@ -138,11 +119,11 @@ def train(args):
     input_size = config["data"]["num_features"]
     output_size = config["data"]["num_visual_features"]
     data_path = config["data"]["data_path"]
-    batch_size = config["data"]["batch_size"]
+    batch_size = config["optim"]["batch_size"]
     
+    trainset = dataset.Dataset(data_path, split="train", config=config["data"])
+    valset = dataset.Dataset(data_path, split="test", config=config["data"])
 
-    trainset = dataset.Dataset(data_path, split="train") # TODO
-    valset = dataset.Dataset(data_path, split="validation")
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, drop_last=True, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(valset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -150,8 +131,10 @@ def train(args):
     logging.info("Loading model ...")
     model = AudioVisualInformationBottleneck(input_size, output_size, **config['model'])
 
-    # if args.restore: # TODO
-    #     load_from_checkpoint(model, args.checkpoint_path, True)
+    if args.restore:
+        model_checkpoint = os.path.join(args.checkpoint_path, "model.checkpoint")
+        model.load_state_dict(torch.load(model_checkpoint))
+
     n_params = sum(p.numel() for p in model.parameters())
     logging.info(
         "Training {} model with {:,} parameters.".format(config["model_type"], n_params)
@@ -179,7 +162,6 @@ def train(args):
         optimizer, step_size=step_size, gamma=0.5,
         last_epoch=args.last_epoch,
     )
-    min_val_loss = float("inf")
     max_val_acc = float("-inf")
 
     Timer = utils.CudaTimer if device.type == "cuda" else utils.Timer
@@ -200,22 +182,21 @@ def train(args):
         logging.info("Epoch {} started. ".format(epoch + 1))
         model.train()
         start_time = time.time()
-        meters = utils.Meters()
-        # TODO Token F1 meter
+        meters = utils.IBMeters()
+        # TODO Token F1 meter, tradeoff between beta and MI
         timers.reset()
         timers.start("train_total").start("ds_fetch")
-        for inputs, targets in train_loader:
+        for i, (inputs, targets) in enumerate(train_loader):
             timers.stop("ds_fetch").start("model_fwd")
             optimizer.zero_grad()
-            outputs = model(inputs.to(device))
+            loss, I_ZX, I_WX, I_WY = model.module.calculate_loss(inputs.to(device), targets.to(device))
             timers.stop("model_fwd").start("crit_fwd")
-            loss = model.module.calculate_loss(outputs, targets)
             timers.stop("crit_fwd").start("bwd")
             loss.backward()
             timers.stop("bwd").start("optim")
             if max_grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
-                    itertools.chain(model.parameters(), criterion.parameters()),
+                    model.parameters(),
                     max_grad_norm,
                 )
             optimizer.step()
@@ -223,45 +204,52 @@ def train(args):
             timers.stop("optim").start("metrics")
             meters.loss += loss.item() * len(targets)
             meters.num_samples += len(targets)
+            meters.I_ZX += I_ZX.item() * len(targets)
+            meters.I_WX += I_WX.item() * len(targets)
+            meters.I_WY += I_WY.item() * len(targets)
+            meters.num_tokens += inputs.size(1) # TODO Use mask
             timers.stop("metrics").start("ds_fetch")
+            if i % 1000 == 0:
+                info = 'Itr {} {meters.loss:.3f} ({meters.avg_loss:.3f}), {meters.I_WY:.3f} ({meters.avg_I_WY:.3f})'.format(i, meters=meters)
+                print(info)
         timers.stop("ds_fetch").stop("train_total")
         epoch_time = time.time() - start_time
-        if args.world_size > 1:
-            meters.sync()
+
         logging.info(
             "Epoch {} complete. "
-            "nUpdates {}, Loss {:.3f},"
+            "nUpdates {}, Loss {:.3f}, I_ZX {:.3f}, I_WX {:.3f}, I_WY {:.3f} "
             " Time {:.3f} (s), LR {:.3f}".format(
                 epoch + 1,
                 num_updates,
                 meters.avg_loss,
+                meters.avg_I_ZX,
+                meters.avg_I_WX,
+                meters.avg_I_WY,
                 epoch_time,
                 scheduler.get_last_lr()[0],
             ),
         )
+
         if epoch % 5 == 0:
           logging.info("Evaluating validation set..")
           timers.start("test_total")
-          # TODO
-          val_loss, recalls = test(
-             model, val_loader, args.checkpoint_path
+          recalls = test(
+             model, val_loader, device, args.checkpoint_path
           )
           val_acc = (recalls['A_r10'] + recalls['I_r10']) / 2
 
           timers.stop("test_total")
           checkpoint(
                   base_model,
-                  base_criterion,
                   args.checkpoint_path,
                   (val_acc > max_val_acc),
           )
 
-          min_val_loss = min(val_loss, min_val_loss)
           max_val_acc = max(val_acc, max_val_acc) 
           logging.info(
-            "Validation Set: Loss {:.3f}, A2I R@1 {:.3f}, R@5 {:.3f}, R@10 {:.3f}, I2A R@1 {:.3f}, R@5 {:.3f}, R@10 {:.3f}"
-            "Best Loss {:.3f}, Best Avg R@10 {:.3f}".format(
-                val_loss, recalls['A_r1'], recalls['A_r5'], recalls['A_r10'], recalls['I_r1'], recalls['I_r5'], recalls['I_r10'], min_val_loss, max_val_acc
+            "Validation Set: A2I R@1 {:.3f}, R@5 {:.3f}, R@10 {:.3f}, I2A R@1 {:.3f}, R@5 {:.3f}, R@10 {:.3f}, "
+            "Best Avg R@10 {:.3f}".format(
+                recalls['A_r1'], recalls['A_r5'], recalls['A_r10'], recalls['I_r1'], recalls['I_r5'], recalls['I_r10'], max_val_acc
             ),
           )
           logging.info(
@@ -278,12 +266,7 @@ def train(args):
 
 def main():
     args = parse_args()
-    if args.world_size > 1:
-        torch.multiprocessing.spawn(
-            train, args=(args,), nprocs=args.world_size, join=True
-        )
-    else:
-        train(0, args)
+    train(args)
 
 
 if __name__ == "__main__":
