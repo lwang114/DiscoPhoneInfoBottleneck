@@ -4,6 +4,7 @@ import re
 import torch
 import torchaudio
 import torchvision 
+import collections
 
 UNK = '###UNK###'
 def log_normalize(x):
@@ -272,6 +273,7 @@ def create_gold_file(data_path, sample_rate):
     json.dump(phone_to_index, open(phone_path, "w"), indent=2)  
 
   # Extract phone units
+  phone_to_word_counts = collections.defaultdict(collections.defaultdict(int))
   for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))): # XXX
     if not idx in select_idxs:
       continue
@@ -282,6 +284,8 @@ def create_gold_file(data_path, sample_rate):
     begin_phone = 0
     for word_token in phone_info["data_ids"]:
       for phone_token in word_token[2]:
+        phone_to_word_counts[phone_token][word_token] += 1
+        
         token, begin, end = phone_token[0], float(phone_token[1]), float(phone_token[2])
         begin_frame = int(begin_phone // 10)
         end_frame = int((begin_phone + end - begin) // 10)
@@ -294,10 +298,16 @@ def create_gold_file(data_path, sample_rate):
         begin_phone += end - begin
     gold_dicts.append(gold_dict)
 
+  with open('phone_token_top_10_words.txt', 'w') as f:
+    f.write('Phone\tWord\tCounts\n')
+    for p in phone_to_word_counts:
+      for w in sorted(phone_to_word_counts[p], key=lambda x:phone_to_word_counts[p][x], reverse=True):
+        f.write('{}\t{}\t{}\n'.format(p, w, phone_to_word_counts[p][w]))
+
   with open(os.path.join(data_path, "gold_units.json"), "w") as gold_f:
     json.dump(gold_dicts, gold_f, indent=2) 
 
 if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
   preproc = Preprocessor(data_path, 80) 
-  dataset = Dataset(data_path, preproc, "train")
+  dataset = Dataset(data_path, preproc, "test")
