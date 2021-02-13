@@ -237,9 +237,9 @@ class AlignmentInfoBottleneck:
 
       # Update aligner
       P_XYA = np.zeros((self.K_x+1, self.K_y, 2))
-      gamma = beta # TODO Try different gammas
-      P_XYA[:, :, 1] = 1./(1+gamma) * np.log(self.P_A[1] + EPS) + beta/(1+gamma) * self.P_XZ @ np.log(self.P_ZY + EPS)
-      P_XYA[:, :, 0] = 1./(1+gamma) * np.log(self.P_A[0] + EPS) + beta/(1+gamma) * np.log(self.P_Y + EPS)  
+      gamma = 10. # TODO Try different gamma
+      P_XYA[:, :, 1] = (np.log(self.P_A[1] + EPS) + beta * self.P_XZ @ np.log(self.P_ZY + EPS)) / gamma
+      P_XYA[:, :, 0] = (np.log(self.P_A[0] + EPS) + beta * np.log(self.P_Y + EPS)) / gamma 
       P_XYA -= logsumexp(P_XYA, axis=-1)[:, :, np.newaxis]
       P_XYA = np.exp(P_XYA)
       
@@ -289,7 +289,6 @@ class AlignmentInfoBottleneck:
               f.write('{}\t{}\t{:.3f}\n'.format(z, y, self.P_ZY[z, y]))
         
         with open('{}_P_XYA_epoch{}.txt'.format(prefix, epoch), 'w') as f:
-          print('{}_P_XYA_epoch{}.txt'.format(prefix, epoch)) # XXX
           for x in range(self.K_x):
             for y in range(self.K_y):
               f.write('{}\t{}\t{:.3f}\t{:.3f}\n'.format(x, y, self.P_XYA[x, y, 1], self.P_XYA[x, y, 0]))
@@ -331,7 +330,7 @@ class AlignmentInfoBottleneck:
     I_ZX = H_Z - H_XZ
     I_ZY = kl_divergence(P_Z_Y.flatten(), (self.P_Z[:, np.newaxis] * self.P_Y[np.newaxis, :]).flatten())
     I_ZX_k = np.zeros((2, self.K_c))
-    I_AXY = kl_divergence(P_X_Y_A.flatten(), (self.P_X_Y[:, :, np.newaxis] * self.P_A[np.newaxis, np.newaxis, :]).flatten())
+    I_AXY = kl_divergence(P_X_Y_A.flatten(), (P_X_Y[:, :, np.newaxis] * self.P_A[np.newaxis, np.newaxis, :]).flatten())
     for d in range(2): 
       for c in range(self.K_c):
         I_ZX_k[d, c] = kl_divergence(P_Z_X_k[d, c].flatten(), (self.P_Z[:, np.newaxis] * self.P_X[np.newaxis, :]).flatten())
@@ -481,7 +480,7 @@ class AlignmentInfoBottleneck:
     best_f1 = 0.
     if not os.path.exists(prefix+'_token_f1.csv'):
       for t in range(ntrials):
-        self.initialize(init_method='kmeans')
+        self.initialize(init_method='rand')
 
       for alpha in 10**np.linspace(-3, 0, 4):
         for beta in 10**np.linspace(0, 2, 10):
@@ -524,7 +523,7 @@ class AlignmentInfoBottleneck:
                  markers=True,
                  dashes=False)
     plt.savefig(prefix+'_token_f1.png')
-    # plt.show()
+    plt.show()
     plt.close()
 
   def evaluate_alignment(self, corpus_path, 
@@ -541,7 +540,7 @@ class AlignmentInfoBottleneck:
     best_f1 = 0.
     if not os.path.exists(prefix+'_alignment_accuracy.csv'):
       for t in range(ntrials):
-        self.initialize(init_method='kmeans')
+        self.initialize(init_method='rand')
 
       for alpha in 10**np.linspace(-3, 0, 4):
         for beta in 10**np.linspace(0, 2, 10):
@@ -629,17 +628,21 @@ if __name__ == '__main__':
     gold_path = os.path.join(data_path, '../mscoco2k_gold_units.json')
 
   corpus_path = os.path.join(data_path, 'predictions.json')
-  bottleneck = AlignmentInfoBottleneck(corpus_path, P_X_Y=P_X_Y, K_c=0, K_z=50)
+  bottleneck = AlignmentInfoBottleneck(corpus_path, P_X_Y=P_X_Y, K_c=0, K_z=10 if args.dataset == 'synthetic_image_caption' else 49)
   bottleneck.fit(beta=40, init_method='rand', prefix=os.path.join(args.exp_dir, 'align_ib'))
   gold_dict = json.load(open(gold_path))
+  
   # pred = bottleneck.cluster(corpus_path)
-  pred = bottleneck.align(corpus_path, os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
-  pred = np.asarray(pred)
-  gold = np.asarray([g['alignment'] for g in gold_dict])
-  acc = (pred == gold).mean()
-  print('Alignment accuracy = {:.3f}'.format(acc))
+  # pred = bottleneck.align(corpus_path, os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
+  # pred = np.asarray(pred)
+  # gold = np.asarray([g['alignment'] for g in gold_dict])
+  # acc = (pred == gold).mean()
+  # print('Alignment accuracy = {:.3f}'.format(acc))
   # evaluate(pred, gold, ds_rate=8 if args.dataset=='mscoco2k' else 1)
   # bottleneck.plot_IB_tradeoff(prefix='general_information_ib_mscoco2k')
-  bottleneck.evaluate_alignment(corpus_path, gold_path, 
-                                ds_rate = 8 if args.dataset == 'mscoco2k' else 1, 
-                                prefix=os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
+  # bottleneck.evaluate_alignment(corpus_path, gold_path, 
+  #                               ds_rate = 8 if args.dataset == 'mscoco2k' else 1, 
+  #                               prefix=os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
+  bottleneck.evaluate_cluster(corpus_path, gold_path, 
+                              ds_rate = 8 if args.dataset == 'mscoco2k' else 1, 
+                              prefix=os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
