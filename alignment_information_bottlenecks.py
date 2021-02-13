@@ -51,10 +51,12 @@ class AlignmentInfoBottleneck:
       K_z = None
   ):
     self.K_c = K_c # Context window offset (+-)
+    self.token_to_index = {}
     if P_X_Y is None or P_XX_k is None:
       self.sent_ids,\
       X, Y,\
-      self.K_x, self.K_y\
+      self.K_x, self.K_y,\
+      self.token_to_index\
       = self.load_samples(corpus_path)
       # Compute conditional and marginal distributions of the source and target units 
       P_X_Y, P_XX_k = self.compute_joint_prob(X, Y)
@@ -109,12 +111,10 @@ class AlignmentInfoBottleneck:
     P_X_Y = self.P_X[:, np.newaxis] * self.P_XY 
     P_X_X_k = self.P_X.reshape(1, 1, self.K_x+1, 1) * self.P_XX_k
 
-    self.P_XYA = 1./2 * self.ones((self.K_x, self.K_y, 2))
+    self.P_XYA = 1./2 * np.ones((self.K_x+1, self.K_y, 2))
     self.P_A = np.sum(P_X_Y[:, :, np.newaxis] * self.P_XYA, axis=(0, 1))
-    print('self.P_XYA.sum(axis=-1): ', self.P_XYA.sum(axis=-1)) # XXX
-    print('self.P_A: ', self.P_A)
     
-    self.P_ZY = self.P_XZ.T @ (P_X_Y * P_XYA[:, :, 1]) 
+    self.P_ZY = self.P_XZ.T @ (P_X_Y * self.P_XYA[:, :, 1]) 
     self.P_ZY /= np.sum(self.P_ZY, axis=-1, keepdims=True) + EPS 
     for d in range(2):
       for k in range(self.K_c):
@@ -155,7 +155,7 @@ class AlignmentInfoBottleneck:
       sent_ids.append(data_dict['sent_id'])
     K_y = len(token_to_index)
 
-    return sent_ids, X, Y, K_x, K_y
+    return sent_ids, X, Y, K_x, K_y, token_to_index
 
   def compute_joint_prob(self, X, Y):
     # Co-occurence based, need to try other approach when the number of 
@@ -189,7 +189,7 @@ class AlignmentInfoBottleneck:
     self.initialize(init_method=init_method)
     
     losses = []
-    mutual_infos = [[], [], []]
+    mutual_infos = [[], [], [], []]
     nat_rates = []
     prev_loss = np.inf
     P_X_Y = self.P_X[:, np.newaxis] * self.P_XY
@@ -210,7 +210,13 @@ class AlignmentInfoBottleneck:
             x_ks = np.argsort(-self.P_XX_k[d, c, x])[:5]
             for x_k in x_ks:
               f.write('{}\t{}\t{}\t{:.3f}\n'.format(k, x, x_k, self.P_XX_k[d, c, x, x_k]))
-        
+
+    with open('{}_P_XYA.txt'.format(prefix), 'w') as f:
+      f.write('X\tY\tP(A = 1|X, Y)\tP(A = 0|X, Y)\n')
+      for x in range(self.K_x):
+        for y in range(self.K_y):
+          f.write('{}\t{}\t{:.3f}\t{:.3f}\n'.format(x, y, self.P_XYA[x, y, 1], self.P_XYA[x, y, 0]))
+
     H_X = entropy(self.P_X)
     H_Y = entropy(self.P_Y)
     I_XY = kl_divergence(P_X_Y.flatten(), (self.P_X[:, np.newaxis] * self.P_Y[np.newaxis, :]).flatten())
@@ -230,11 +236,11 @@ class AlignmentInfoBottleneck:
       P_XZ = np.exp(P_XZ)
 
       # Update aligner
-      P_XYA = np.zeros((self.K_x, self.K_y, 2))
+      P_XYA = np.zeros((self.K_x+1, self.K_y, 2))
       gamma = beta # TODO Try different gammas
-      P_XYA[:, :, 1] = 1./(1+gamma) * np.log(self.P_A + EPS) + beta/(1+gamma) * self.P_XZ @ np.log(self.P_ZY + EPS)
-      P_XYA[:, :, 0] = 1./(1+gamma) * np.log(self.P_A + EPS) + beta/(1+gamma) * np.log(self.P_Y + EPS)  
-      P_XYA -= logsumexp(P_XYA, axis=-1)[:, np.newaxis]
+      P_XYA[:, :, 1] = 1./(1+gamma) * np.log(self.P_A[1] + EPS) + beta/(1+gamma) * self.P_XZ @ np.log(self.P_ZY + EPS)
+      P_XYA[:, :, 0] = 1./(1+gamma) * np.log(self.P_A[0] + EPS) + beta/(1+gamma) * np.log(self.P_Y + EPS)  
+      P_XYA -= logsumexp(P_XYA, axis=-1)[:, :, np.newaxis]
       P_XYA = np.exp(P_XYA)
       
       # Update predictors
@@ -254,14 +260,17 @@ class AlignmentInfoBottleneck:
       self.P_ZX_k = deepcopy(P_ZX_k)
       self.P_ZY = deepcopy(P_ZY)
       self.P_Z = deepcopy(P_Z)
+      self.P_XYA = deepcopy(P_XYA)
+      self.P_A = deepcopy(P_A)
       
-      loss, I_ZX, I_ZY, I_ZX_k = self.bottleneck_objective(alpha, beta)
+      loss, I_ZX, I_ZY, I_ZX_k, I_AXY = self.bottleneck_objective(alpha, beta)
       H_Z = entropy(self.P_Z)
 
       losses.append(loss)
       mutual_infos[0].append(I_ZX)
       mutual_infos[1].append(I_ZY)
       mutual_infos[2].append(I_ZX_k.tolist())
+      mutual_infos[3].append(I_AXY)
       nat_rates.append(H_Z)
 
       if epoch % 1 == 0:
@@ -278,7 +287,15 @@ class AlignmentInfoBottleneck:
             ys = np.argsort(-self.P_ZY[z])[:5]
             for y in ys:
               f.write('{}\t{}\t{:.3f}\n'.format(z, y, self.P_ZY[z, y]))
+        
+        with open('{}_P_XYA_epoch{}.txt'.format(prefix, epoch), 'w') as f:
+          print('{}_P_XYA_epoch{}.txt'.format(prefix, epoch)) # XXX
+          for x in range(self.K_x):
+            for y in range(self.K_y):
+              f.write('{}\t{}\t{:.3f}\t{:.3f}\n'.format(x, y, self.P_XYA[x, y, 1], self.P_XYA[x, y, 0]))
+
         np.save(prefix+'_clusterer.npy', self.P_XZ)
+        np.save(prefix+'_aligner.npy', self.P_XYA)
         np.save(prefix+'_predictor.npy', self.P_ZY)
 
       # logging.info('I( X ; Y ) = {:.3f}, H( X ) = {:.3f}, H( Y ) = {:.3f}'.format(I_XY, H_X, H_Y))
@@ -288,10 +305,11 @@ class AlignmentInfoBottleneck:
       if epoch > 0 and abs(loss - prev_loss) <= abs(tol * prev_loss):
         logging.info('I( X ; Y ) = {:.3f}, H( X ) = {:.3f}, H( Y ) = {:.3f}'.format(I_XY, H_X, H_Y))
         logging.info('I( Z ; X ) = {:.3f}, I( Z ; Y ) = {:.3f}, I(Z ; X_k) = {}, H( Z ) = {:.3f}'.format(I_ZX, I_ZY, I_ZX_k, H_Z))
+        logging.info('I( A ; X, Y ) = {:.3f}'.format(I_AXY))
         logging.info('Information bottleneck objective={:.3f}'.format(loss))
         return losses, mutual_infos, nat_rates
       else:
-        prev_loss = loss  
+        prev_loss = loss
 
     # logging.info('alpha = {}, beta = {}'.format(alpha, beta))
     # logging.info('I( Z ; X ) = {:.3f}, H( X ) = {:.3f}'.format(I_ZX, H_X))
@@ -303,6 +321,9 @@ class AlignmentInfoBottleneck:
     P_Z_X = self.P_X[:, np.newaxis] * self.P_XZ 
     P_Z_Y = self.P_Z[:, np.newaxis] * self.P_ZY
     P_Z_X_k = self.P_Z[:, np.newaxis] * self.P_ZX_k
+    P_X_Y = self.P_X[:, np.newaxis] * self.P_XY
+    P_X_Y_A = P_X_Y[:, :, np.newaxis] * self.P_XYA
+     
     # I_ZX = kl_divergence(P_Z_X.flatten(), (self.P_X[:, np.newaxis] * self.P_Z[np.newaxis, :]).flatten())
     H_Z = entropy(self.P_Z)
     H_XZ = entropy(P_Z_X) - entropy(self.P_X) 
@@ -310,11 +331,12 @@ class AlignmentInfoBottleneck:
     I_ZX = H_Z - H_XZ
     I_ZY = kl_divergence(P_Z_Y.flatten(), (self.P_Z[:, np.newaxis] * self.P_Y[np.newaxis, :]).flatten())
     I_ZX_k = np.zeros((2, self.K_c))
+    I_AXY = kl_divergence(P_X_Y_A.flatten(), (self.P_X_Y[:, :, np.newaxis] * self.P_A[np.newaxis, np.newaxis, :]).flatten())
     for d in range(2): 
       for c in range(self.K_c):
         I_ZX_k[d, c] = kl_divergence(P_Z_X_k[d, c].flatten(), (self.P_Z[:, np.newaxis] * self.P_X[np.newaxis, :]).flatten())
     IB = H_Z - alpha * H_XZ - beta * (I_ZY + I_ZX_k.sum()) / (2 * self.K_c + 1) 
-    return IB, I_ZX, I_ZY, I_ZX_k 
+    return IB, I_ZX, I_ZY, I_ZX_k, I_AXY 
 
   def plot_IB_tradeoff(self, prefix='discrete_ib'):
     data_dict = {'Epoch': [],
@@ -324,7 +346,8 @@ class AlignmentInfoBottleneck:
     data_tradeoff_Y_dict = {r'$\alpha$': [],
                           r'$I(Z;X)$': [],
                           r'$H(Z)$': [],
-                          r'$I(Z;Y)$': []}
+                          r'$I(Z;Y)$': [],
+                          r'$I(A;X, Y)$': []}
     data_tradeoff_X_dict = {r'$\alpha$': [],
                             r'$k$': [],
                             r'$I(Z;X)$': [],
@@ -346,6 +369,7 @@ class AlignmentInfoBottleneck:
           data_tradeoff_Y_dict[r'$H(Z)$'].append(nat_rates[-1])
           data_tradeoff_Y_dict[r'$I(Z;X)$'].append(mutual_infos[0][-1])
           data_tradeoff_Y_dict[r'$I(Z;Y)$'].append(mutual_infos[1][-1])
+          data_tradeoff_Y_dict[r'$I(A;X, Y)$'].append(mutual_infos[3][-1])
           for d in range(2):
             sign = 2 * d - 1
             for k in range(self.K_c):
@@ -395,6 +419,16 @@ class AlignmentInfoBottleneck:
     plt.show()
     plt.close()
     
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(data=df_tradeoff_Y,
+                    x=r'$I(A;X, Y)$',
+                    y=r'$I(Z;Y)$', 
+                    hue=r'$\alpha$',
+                    style=r'$k$',
+                    dashes=True,
+                    marker=True,
+                    palette=sns.color_palette('husl', 4))
+    plt.savefig(prefix+'_A_tradeoff.png')
 
   def cluster(self, corpus_path):
     Z = []
@@ -411,6 +445,27 @@ class AlignmentInfoBottleneck:
       Z.append({'sent_id': sent_id,
                 'units': zs})
     return Z
+
+  def align(self, corpus_path, prefix):
+    Z = []
+    alignment = []
+    data = json.load(open(corpus_path, 'r'))
+    
+    for datum in data:
+      sent_id = datum['sent_id']
+      xs = datum['units']
+      ys = [self.token_to_index.get(y, self.K_y) for y in datum['text'].split()]
+      scores = np.asarray([[self.P_XYA[x, y, 1] for y in ys] for x in xs])
+      alignment.append(np.argmax(scores, axis=1))
+
+    with open(prefix+'_alignment.readable', 'w') as f:
+      for ex, (datum, ali) in enumerate(zip(data, alignment)):
+        xs = datum['units']
+        ys = datum['text'].split()
+        for x_idx, y_idx in enumerate(ali):
+          f.write('Example {}: {} ({}) -> {} ({})\n'.format(ex, xs[x_idx], x_idx, ys[y_idx], y_idx))
+        f.write('\n')
+    return alignment
 
   def evaluate_cluster(self, corpus_path, 
                        gold_path, 
@@ -472,6 +527,67 @@ class AlignmentInfoBottleneck:
     # plt.show()
     plt.close()
 
+  def evaluate_alignment(self, corpus_path, 
+                       gold_path, 
+                       ds_rate=1,
+                       ntrials=10, 
+                       prefix='alignment_ib'):
+    token_f1_dict = {'Alignment Accuracy': [],
+                     r'$H(Z)$': [],
+                     r'$I(Z;X)$': [],
+                     r'$\beta$': [],
+                     r'$\alpha$': []}
+    gold = np.asarray([g['alignment'] for g in json.load(open(gold_path, 'r'))])
+    best_f1 = 0.
+    if not os.path.exists(prefix+'_alignment_accuracy.csv'):
+      for t in range(ntrials):
+        self.initialize(init_method='kmeans')
+
+      for alpha in 10**np.linspace(-3, 0, 4):
+        for beta in 10**np.linspace(0, 2, 10):
+          logging.info('alpha = {}, beta = {}'.format(alpha, beta))
+          best_I_ZY = -np.inf
+          for t in range(ntrials):
+            self.i_trial = t
+            logging.info('Random restart trial {}'.format(t))
+            _, mutual_infos, nat_rates = self.fit(alpha=alpha, 
+                                                  beta=beta, 
+                                                  init_method='fixed',
+                                                  prefix=prefix)
+            if mutual_infos[1][-1] > best_I_ZY:
+              best_I_ZY = best_I_ZY
+              best_P_ZY = deepcopy(self.P_ZY)
+              best_P_XZ = deepcopy(self.P_XZ)
+          self.P_ZY = deepcopy(best_P_ZY)
+          self.P_XZ = deepcopy(best_P_XZ)
+          pred = self.align(corpus_path, prefix=prefix)
+          token_f1 = np.mean(np.asarray(pred)==np.asarray(gold)) # TODO Change the name
+          logging.info('Alignment Accuracy = {:.3f}'.format(token_f1))
+          token_f1_dict['Alignment Accuracy'].append(token_f1)
+          token_f1_dict[r'$I(Z;X)$'].append(mutual_infos[0][-1])
+          token_f1_dict[r'$H(Z)$'].append(nat_rates[-1])
+          token_f1_dict[r'$\beta$'].append(beta)
+          token_f1_dict[r'$\alpha$'].append(alpha)
+          if token_f1 > best_f1:
+            best_f1 = token_f1
+      token_f1_df = pd.DataFrame(token_f1_dict)
+      token_f1_df.to_csv(prefix+'_alignment_accuracy.csv')
+    else:
+      token_f1_df = pd.read_csv(prefix+'_alignment_accuracy.csv')
+    plt.figure(figsize=(8, 6))
+    sns.lineplot(data=token_f1_df,
+                 x=r'$I(Z;X)$',
+                 y='Alignment Accuracy',
+                 hue=r'$\alpha$',
+                 style=r'$\alpha$',
+                 palette=sns.color_palette('husl', 4),
+                 markers=True,
+                 dashes=False)
+    plt.savefig(prefix+'_alignment_accuracy.png')
+    plt.show()
+    plt.close()
+
+
 def entropy(p):
   return - np.sum(p * np.log(p + EPS))
 
@@ -483,7 +599,7 @@ def kl_divergence(p, qs):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--exp_dir', '-e', type=str, default='./', help='Experiment directory')
-  parser.add_argument('--dataset', choices={'synthetic', 'synthetic_ngram', 'mscoco2k'})
+  parser.add_argument('--dataset', choices={'synthetic', 'synthetic_image_caption', 'mscoco2k'})
   args = parser.parse_args()
   if not os.path.exists(args.exp_dir):
     os.makedirs(args.exp_dir)
@@ -505,20 +621,25 @@ if __name__ == '__main__':
     H_X = entropy(P_X)
     P_Y = P_X @ P_XY
     H_Y = entropy(P_Y)
-  elif args.dataset == 'synthetic_ngram':
-    data_path = 'datasets/synthetic_ngram/'
-    gold_path = data_path + 'synthetic_ngram_gold_units.json'
+  elif args.dataset == 'synthetic_image_caption':
+    data_path = 'datasets/synthetic_image_caption/'
+    gold_path = data_path + 'gold_units.json'
   else:
     data_path = 'datasets/mscoco2k/transducer_unsupervised'
     gold_path = os.path.join(data_path, '../mscoco2k_gold_units.json')
 
   corpus_path = os.path.join(data_path, 'predictions.json')
-  bottleneck = BagOfPhonesInfoBottleneck(corpus_path, P_X_Y=P_X_Y, K_c=2, K_z=5 if args.dataset == 'synthetic_ngram' else 49)
-  # bottleneck.fit(beta=40, init_method='rand', prefix=os.path.join(args.exp_dir, 'boph_discrete_ib'))
-  # gold = json.load(open(gold_path))
+  bottleneck = AlignmentInfoBottleneck(corpus_path, P_X_Y=P_X_Y, K_c=0, K_z=50)
+  bottleneck.fit(beta=40, init_method='rand', prefix=os.path.join(args.exp_dir, 'align_ib'))
+  gold_dict = json.load(open(gold_path))
   # pred = bottleneck.cluster(corpus_path)
+  pred = bottleneck.align(corpus_path, os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
+  pred = np.asarray(pred)
+  gold = np.asarray([g['alignment'] for g in gold_dict])
+  acc = (pred == gold).mean()
+  print('Alignment accuracy = {:.3f}'.format(acc))
   # evaluate(pred, gold, ds_rate=8 if args.dataset=='mscoco2k' else 1)
   # bottleneck.plot_IB_tradeoff(prefix='general_information_ib_mscoco2k')
-  bottleneck.evaluate_cluster(corpus_path, gold_path, 
-                              ds_rate = 8 if args.dataset == 'mscoco2k' else 1, 
-                              prefix=os.path.join(args.exp_dir, 'general_discrete_ib_{}'.format(args.dataset)))
+  bottleneck.evaluate_alignment(corpus_path, gold_path, 
+                                ds_rate = 8 if args.dataset == 'mscoco2k' else 1, 
+                                prefix=os.path.join(args.exp_dir, 'align_ib_{}'.format(args.dataset)))
