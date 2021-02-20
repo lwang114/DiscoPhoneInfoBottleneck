@@ -5,6 +5,7 @@ import torch
 import torchaudio
 import torchvision 
 import collections
+import numpy as np
 
 UNK = '###UNK###'
 def log_normalize(x):
@@ -13,6 +14,14 @@ def log_normalize(x):
     std = x.std()
     return x.sub_(mean).div_(std + 1e-6)
 
+def fix_embedding_length(emb, L):
+  size = emb.size()[1:]
+  if emb.size(0) < L:
+    pad = [torch.zeros(size, dtype=emb.dtype).unsqueeze(0) for _ in range(L-emb.size(0))]
+    emb = torch.cat([emb]+pad, dim=0)
+  else:
+    emb = emb[:L]
+  return emb
 
 class Dataset(torch.utils.data.Dataset):
   def __init__(
@@ -29,7 +38,8 @@ class Dataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-
+    self.max_feat_len = 512
+    
     data = []
     for sp in self.splits[split]:
       data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))
@@ -59,8 +69,9 @@ class Dataset(torch.utils.data.Dataset):
     # Load each audio file 
     audio = [example['audio'] for example in data]
     text = [example['text'] for example in data]
-    duration = [example['duration'] for example in data]
-    self.dataset = list(zip(audio, text, duration))
+    duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
+    interval = [example['interval'] for example in data]
+    self.dataset = list(zip(audio, text, duration, interval))
     
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "gold_units.json")):
@@ -74,17 +85,23 @@ class Dataset(torch.utils.data.Dataset):
     return [((duration, 1), len(text)) for _, text, duration in self.dataset]
 
   def __getitem__(self, index):
-      audio_file, text, _ = self.dataset[index]
+      audio_file, text, _, interval = self.dataset[index]
+      begin = int(interval[0] * (self.sample_rate // 1000))
+      end = int(interval[1] * (self.sample_rate // 1000))
       audio = torchaudio.load(audio_file)
-      inputs = self.transforms(audio[0])
-      outputs = self.preprocessor.to_index(text)
-      return inputs, outputs
+      inputs = self.transforms(audio[0][begin:end])
+      nframes = inputs.size(1)
+      input_mask = torch.zeros(self.max_feat_len)
+      input_mask[:nframes] = 1.
+      inputs = fix_embedding_length(inputs.squeeze(0).t(), self.max_feat_len).t()
+      
+      outputs = self.preprocessor.to_index(text).squeeze(0)
+      
+      return inputs, outputs, input_mask
 
   def __len__(self):
       return len(self.dataset)
 
-
- 
 class Preprocessor:
   """
   A preprocessor for the MSCOCO 2k dataset.
@@ -120,52 +137,32 @@ class Preprocessor:
     self.supervised = supervised
 
     data = []
-    for sp in splits['train']:
-      data.extend(load_data_split(data_path, sp, self.wordsep, sample_rate))
+    for _, spl in splits.items():
+        for sp in spl:
+            data.extend(load_data_split(data_path, sp, self.wordsep, sample_rate))
 
     # lexicon is a mapping from word to its corresponding token ids 
     tokens = set()
-    lexicon = {} 
+    lexicon = {}
     for ex in data:
-      for w in ex['text'].split(self.wordsep):
-        if not w in lexicon:
-          if supervised: # Use graphemes in supervised setting 
-            lexicon[w] = [t for t in w]
-          elif level == 'phone': # Use five states per word in unsupervised setting 
-            lexicon[w] = ['{:03d}'.format(5 * len(lexicon) + i) for i in range(5)]
-          else:
-            lexicon[w] = [len(lexicon)]
-          tokens.update(lexicon[w])
+        for w in ex['text'].split(self.wordsep):
+            if not w in lexicon:
+                if level == 'phone':
+                    lexicon[w] = ['{:03d}'.format(5 * len(lexicon) + i) for i in range(5)]
+                else:
+                    lexicon[w] = [len(lexicon)]    
+                tokens.update(lexicon[w])
+    self.lexicon = lexicon
     self.tokens = sorted(tokens)
-
-    # Build the token-to-index and index-to-token maps:
-    if tokens_path is not None:
-      with open(tokens_path, 'r') as fid:
-        self.tokens = [l.strip() for l in fid]
-
-    if lexicon_path is not None:
-      with open(lexicon_path, "r") as fid:
-        lexicon = (l.strip().split() for l in fid)
-        lexicon = {l[0]: l[1:] for l in lexicon}
-        self.lexicon = lexicon
-    else:
-      self.lexicon = lexicon
-
-    with open(os.path.join(data_path, 'tokens.json'), 'w') as token_f,\
-         open(os.path.join(data_path, 'lexicon.json'), 'w') as lexicon_f:
-      json.dump(self.tokens, token_f, indent=4)
-      json.dump(self.lexicon, lexicon_f, indent=4)
-
     self.tokens_to_index = {t: i for i, t in enumerate(self.tokens)}
     self.graphemes_to_index = self.tokens_to_index
-    self.tokens_to_lexicon = {t: w for w in lexicon for t in lexicon[w]}
 
   @property
   def num_tokens(self):
       return len(self.tokens)
 
   def to_index(self, line):
-      tok_to_idx = self.tokens_to_index
+      tok_to_idx = self.tokens_to_index      
       if self.lexicon is not None:
           if len(line) > 0:
               # If the word is not found in the lexicon, fall back to letters.
@@ -175,9 +172,15 @@ class Preprocessor:
                   for t in self.lexicon.get(w, self.wordsep + w)
               ]
           tok_to_idx = self.tokens_to_index
-      
-      return torch.LongTensor([tok_to_idx.get(t, 0) for t in line])
+          return torch.LongTensor([tok_to_idx.get(t, 0) for t in line])
+      else:
+          return torch.LongTensor(tok_to_idx.get(line, 0))
 
+  def to_onehot(self, line):
+      i = self.tokens_to_index.get(line, 0)
+      v = np.eye(self.num_tokens)[i]
+      return torch.FloatTensor(v)
+  
   def to_text(self, indices):
       # Roughly the inverse of `to_index`
       encoding = self.tokens
@@ -227,12 +230,26 @@ def load_data_split(data_path, split, wordsep, sample_rate):
     select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
+  examples = []
+  phone_info_dict = json.load(open(os.path.join(data_path, 'mscoco2k_phone_info.json'), 'r'))
+
   with open(wav_scp_file, 'r') as wav_scp_f,\
        open(text_file, 'r') as text_f:
-    filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f) if idx in select_idxs]
-    texts = [' '.join(l.split()[1:]) for idx, l in enumerate(text_f) if idx in select_idxs]
-    durations = [torchaudio.load(fn)[0].size(-1) / float(sample_rate) for fn in filenames]
-    examples = [{'audio': fn, 'text':text, 'duration':dur} for text, fn, dur in zip(texts, filenames, durations)]  
+      filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f)]
+      texts = [' '.join(l.split()[1:]) for idx, l in enumerate(text_f)]
+      for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
+          if not idx in select_idxs:
+              continue
+
+          begin_word = 0
+          for w_idx, (word_info, word_token) in enumerate(zip(phone_info["data_ids"], phone_info["concepts"])):
+              dur_word = word_info[2][-1][2] - word_info[2][0][1]
+              end_word = begin_word + dur_word
+              example = {'audio': filenames[idx],
+                         'text': word_token,
+                         'duration': dur_word,
+                         'interval': [begin_word, end_word]}
+              examples.append(example)
   return examples
 
 def create_gold_file(data_path, sample_rate):
@@ -264,7 +281,7 @@ def create_gold_file(data_path, sample_rate):
     phone_to_index = json.load(open(phone_path, "r"))
   else:
     phones = set()
-    for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))): # XXX
+    for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
       for word_token in phone_info["data_ids"]:
         for phone_token in word_token[2]:
           token = phone_token[0]
@@ -275,36 +292,42 @@ def create_gold_file(data_path, sample_rate):
 
   # Extract phone units
   phone_to_word_counts = collections.defaultdict(dict)
-  for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))): # XXX
+  for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
     if not idx in select_idxs:
       continue
 
-    begin_phone = 0
-    for word_info, word_token in zip(phone_info["data_ids"], phone_info["concepts"]): # TODO
+    begin_word = 0
+    for word_info, word_token in zip(phone_info["data_ids"], phone_info["concepts"]):
+      dur_word = word_info[2][-1][2] - word_info[2][0][1]
+      end_word = begin_word + dur_word
+      nframes = int(dur_word // 10)
       gold_dict = {"sentence_id": filenames[idx],
-                   "units": [],
-                   "text": [],
-                   "interval": None
+                   "units": [-1]*nframes,
+                   "text": [UNK]*nframes,
+                   "interval": [begin_word, end_word]
       }
+      begin_phone = 0
       for phone_token in word_info[2]: 
         if not word_token in phone_to_word_counts[phone_token[0]]:
             phone_to_word_counts[phone_token[0]][word_token] = 1
         else:
             phone_to_word_counts[phone_token[0]][word_token] += 1
         
-        token, begin, end = phone_token[0], float(phone_token[1]), float(phone_token[2])
+        token, begin, end = phone_token[0], phone_token[1], phone_token[2]
+        dur_phone = end - begin
         begin_frame = int(begin_phone // 10)
-        end_frame = int((begin_phone + end - begin) // 10)
-        if end_frame > durations[idx]:
-          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], end_frame, durations[idx]))
+        end_frame = int((begin_phone + dur_phone) // 10)
+        if (begin_word + begin_phone + dur_phone) // 10 > durations[idx]:
+          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_phone + dur_phone) // 10, durations[idx]))
           break
-      
+
         for t in range(begin_frame, end_frame):
           gold_dict["units"][t] = phone_to_index[token]
           gold_dict["text"][t] = token
-        begin_phone += end - begin
-    gold_dicts.append(gold_dict)
-
+        begin_phone += dur_phone
+      gold_dicts.append(gold_dict)
+      begin_word += dur_word
+      
   with open(os.path.join(data_path, 'phone_token_top_10_words.txt'), 'w') as f:
     f.write('Phone\tWord\tCounts\n')
     for p in phone_to_word_counts:
@@ -318,3 +341,4 @@ if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
   preproc = Preprocessor(data_path, 80) 
   dataset = Dataset(data_path, preproc, "test")
+  print(dataset[0])
