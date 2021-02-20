@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import json
 from models import TDS
-from transducer import ConvTransduce1D
+import math
 
 class Davenet(nn.Module):
     def __init__(self, embedding_dim=1024):
@@ -38,6 +38,89 @@ class Davenet(nn.Module):
         x = x.squeeze(2).permute(0, 2, 1)
         return x
 
+class BLSTM(nn.Module):
+  def __init__(self, input_size, n_class, embedding_dim=100, n_layers=1):
+    super(BLSTM, self).__init__()
+    self.embedding_dim = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    # self.i2h = nn.Linear(40 + embedding_dim, embedding_dim)
+    # self.i2o = nn.Linear(40 + embedding_dim, n_class) 
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.fc = nn.Linear(2 * embedding_dim, n_class)
+    self.softmax = nn.Softmax(dim=1)
+
+  def forward(self, x, save_features=False):
+    if x.dim() < 3:
+      x.unsqueeze(0)
+
+    B = x.size(0)
+    T = x.size(1)
+    h0 = torch.zeros((2 * self.n_layers, B, self.embedding_dim))
+    c0 = torch.zeros((2 * self.n_layers, B, self.embedding_dim))
+    if torch.cuda.is_available():
+      h0 = h0.cuda()
+      c0 = c0.cuda()
+       
+    embed, _ = self.rnn(x, (h0, c0))
+    outputs = []
+    for b in range(B):
+      # out = self.softmax(self.fc(embed[b]))
+      out = self.fc(embed[b])
+      outputs.append(out)
+
+    if save_features:
+      return embed, torch.stack(outputs, dim=1)
+    else:
+      return torch.stack(outputs, dim=1)
+    
+class PositionalEncoding(nn.Module):
+    '''
+    Borrowed from this tutorial:
+    https://pytorch.org/tutorials/beginner/transformer_tutorial.html
+    '''
+    def __init__(self, input_size, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, input_size)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, input_size, 2).float() * (-math.log(10000.0) / input_size))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(1), :]
+        return self.dropout(x)
+        
+class PDMLP(torch.nn.Module):
+  '''
+  Position-dependent multi-layer peceptron
+
+  Args:
+      input_size: int, dimension of the input features
+      output_size: int, number of output classes
+      hidden_size: int, dimension of the hidden embeddings 
+  '''
+  def __init__(self, input_size, output_size, hidden_size=512):
+      super(PDMLP, self).__init__()
+      self.fc1 = nn.Linear(input_size, hidden_size)
+      self.fc2 = nn.Linear(hidden_size, output_size) 
+      self.pe = PositionalEncoding(hidden_size) 
+      nn.init.orthogonal_(self.fc1.weight)
+      nn.init.zeros_(self.fc1.bias)
+
+  def forward(self, x, T):
+      outputs = []
+      for t in range(T):
+          out = F.relu(self.fc1(x))
+          outputs.append(out)
+      outputs = torch.stack(outputs, dim=1)
+      outputs = self.pe(outputs)
+      outputs = self.fc2(outputs)
+      return outputs
+      
 class PositionDependentUnigramBottleneck(torch.nn.Module):
   '''
   Information bottleneck model with position-dependent unigram assumption
@@ -45,60 +128,40 @@ class PositionDependentUnigramBottleneck(torch.nn.Module):
 
   Args:
       input_size: int, dimension of the input features
-      output_size: int, number of word types 
-      hidden_size: int, number of phone types
+      output_size: int, dimension of the output features
+      bottleneck_size: int, number of phoneme types
   '''
   def __init__(self, input_size, output_size,
-               bottleneck_size,
+               bottleneck_size, hidden_size,
                tds_groups, kernel_size, 
-               stride, dropout, 
-               beta=10., **kwargs): 
+               dropout, 
+               beta=100., **kwargs): 
     super(PositionDependentUnigramBottleneck, self).__init__()
-    self.bottleneck = TDS(input_size, bottleneck_size, tds_groups, kernel_size, dropout)
-    
-    self.predictor = BiLSTM(output_size, bottleneck_size) # TODO
-    
-    # Prior
-    self.logit_prior = nn.Parameter(torch.empty(bottleneck_size))
-    nn.init.ones_(self.logit_prior)
+    self.bottleneck_size = bottleneck_size
+    self.output_size = output_size
+    self.tds = BLSTM(input_size, output_size) # TDS(input_size, output_size, tds_groups, kernel_size, dropout)
     self.beta = beta
 
-  def forward(self, inputs, outputs, input_masks):
-    device = audio_inputs.device
+  def forward(self, inputs, input_masks):
+    m = nn.LogSoftmax(dim=-1)
+    B = inputs.size(0)
+    
+    device = inputs.device
     # Inputs shape: [B, F, T]
-    in_scores = self.bottleneck(inputs)
-    pooling_ratio = inputs.size(-1) // in_scores.size(1)
-    score_masks = input_masks[:, ::pooling_ratio].unsqueeze(-1)
+    in_scores = self.tds(inputs.permute(0, 2, 1)).permute(1, 0, 2) * input_masks.unsqueeze(-1)
+    out_scores = in_scores.sum(dim=1)
     
-    # Input token scores shape: [B, S, bottleneck_size]
-    in_scores = in_scores * score_masks
-    
-    # Output token scores shape: [B, S, bottleneck_size]
-    out_scores = self.predictor(outputs, in_scores.size(-1))
-    return in_scores,
-           out_scores
-  
+    return in_scores, out_scores
+
   def calculate_loss(self,
                      in_scores,
-                     out_scores):
-    m = nn.LogSoftmax(dim=2)
-    beta = torch.tensor(self.beta, device=audio_inputs.device)
-    
-    log_prior = m(self.logit_prior)
+                     prediction_loss):
+    m = nn.LogSoftmax(dim=-1)
+
+    in_scores = in_scores.sum(dim=1)
     in_log_posteriors = m(in_scores)
-    out_log_posteriors = m(out_scores)
+    in_posteriors = F.softmax(in_scores, dim=-1)
 
-    in_scores_ = torch.where(in_scores != 0,
-                in_scores,
-                torch.tensor(-9e9, device=device))
-    out_scores_ = torch.where(out_scores != 0,
-                             out_scores,
-                             torch.tensor(-9e9, device=device))
-    in_posteriors = F.softmax(in_scores_)
-    out_posteriors = F.softmax(out_scores_)
-
+    I_ZX = (in_posteriors * in_log_posteriors).sum(dim=-1).mean()
     
-    I_ZX = (in_posteriors * (in_log_posteriors - in_log_prior)).sum(dim=-1).mean()
-    I_ZY = (out_posteriors * out_log_posteriors).sum(dim=-1).mean()
-    
-    return I_ZX - beta * I_ZY, I_ZX, I_ZY
+    return prediction_loss, I_ZX, prediction_loss

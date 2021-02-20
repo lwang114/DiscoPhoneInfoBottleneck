@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 import models
 import utils
-from audio_visual_information_bottlenecks import AudioVisualInformationBottleneck
+from pdu_information_bottlenecks import PositionDependentUnigramBottleneck
+from evaluate import evaluate
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -36,6 +37,10 @@ def parse_args():
         type=str,
         help="Checkpoint path for saving models",
     )
+    parser.add_argument(
+        "--world_size", default=1, type=int, help="world size for distributed training"
+    )
+    
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
@@ -53,32 +58,39 @@ def test(model, data_loader, device, checkpoint_path='./'):
     pred_dicts = []
     pooling_ratio = None
     with torch.no_grad():
+      total = 0.
+      correct = 0.
       for b_idx, (inputs, targets, input_masks) in enumerate(data_loader):
         if b_idx == 0:
             B = inputs.size(0)
-
+        in_scores, out_scores = model(inputs.to(device), input_masks.to(device))
         if not pooling_ratio:
             pooling_ratio = int(inputs.size(-1) // in_scores.size(-1))
+
+        pred_label = out_scores.topk(1, dim=-1)[-1].detach().cpu().numpy()
+        gold_label = targets.detach().cpu().numpy()
+        correct += (pred_label == gold_label).sum()
+        total += targets.size(0)
         
-        in_scores, out_scores = model(inputs.to(device), targets.to(device), input_masks.to(device))
-        
-        prediction = in_scores.topk(1, dim=-1)[-1].permute(0, 2, 1)
+        prediction = out_scores.topk(1, dim=-1)[-1].squeeze(-1)
         prediction = prediction.cpu().detach().numpy().tolist()
+        
         for idx in range(inputs.size(0)):
             global_idx = b_idx * B + idx
             example_id = data_loader.dataset.dataset[global_idx][0]
             text = data_loader.dataset.dataset[global_idx][1] 
             pred_dicts.append(
                 {'sent_id': example_id,
-                 'units': prediction[idx],
+                 'units': prediction, 
+                 'scores': in_scores.cpu().detach().numpy().tolist(),
                  'text': text})
 
-    gold_dicts = json.load(open(os.path.join(data_loader.dataset.data_path, 'gold_units.json'), 'r'))
-    f1, _, precision, recall = evaluate(pred_dicts, gold_dicts, ds_rate=pooling_ratio)
+    acc = correct / total
     
     if not os.path.exists(checkpoint_path):
         os.mkdir(checkpoint_path)
-    return precision, recall, f1
+    json.dump(pred_dicts, open(os.path.join(checkpoint_path, 'predictions.json'), 'w'), indent=2)
+    return acc
 
 def checkpoint(model, checkpoint_path, save_best=False):
     if not os.path.exists(checkpoint_path):
@@ -91,7 +103,7 @@ def checkpoint(model, checkpoint_path, save_best=False):
         torch.save(model.state_dict(), model_checkpoint + ".best")
         # torch.save(criterion.state_dict(), criterion_checkpoint + ".best")
 
-def train(args):
+def train(args, world_rank=0):
     # setup logging
     level = logging.INFO
     logging.getLogger().setLevel(level)
@@ -118,20 +130,30 @@ def train(args):
     dataset = utils.module_from_file("dataset", f"datasets/{dataset}.py")
 
     input_size = config["data"]["num_features"]
-    output_size = config["data"]["num_visual_features"]
     data_path = config["data"]["data_path"]
     batch_size = config["optim"]["batch_size"]
-    
-    trainset = dataset.Dataset(data_path, split="train", config=config["data"])
-    valset = dataset.Dataset(data_path, split="test", config=config["data"])
 
+    preprocessor = dataset.Preprocessor(
+        data_path,
+        num_features=input_size,
+        tokens_path=config["data"].get("tokens", None),
+        lexicon_path=config["data"].get("lexicon", None),
+        use_words=config["data"].get("use_words", False),
+        prepend_wordsep=config["data"].get("prepend_wordsep", False),
+        supervised=config["data"].get("supervised", False),
+        level=config["data"].get("level", "phone") 
+    )    
+    output_size = preprocessor.num_tokens
+    trainset = dataset.Dataset(data_path, preprocessor, split="train", augment=True)
+    valset = dataset.Dataset(data_path, preprocessor, split="test", augment=True)
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, drop_last=True, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(valset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
     # setup criterion, model:
     logging.info("Loading model ...")
+    criterion = nn.CrossEntropyLoss()
     model = PositionDependentUnigramBottleneck(input_size, output_size, **config['model'])
-
+        
     if args.restore:
         model_checkpoint = os.path.join(args.checkpoint_path, "model.checkpoint")
         model.load_state_dict(torch.load(model_checkpoint))
@@ -184,16 +206,16 @@ def train(args):
         model.train()
         start_time = time.time()
         meters = utils.IBMeters()
-
+        
         timers.reset()
         timers.start("train_total").start("ds_fetch")
         for i, (inputs, targets, input_masks) in enumerate(train_loader):
             timers.stop("ds_fetch").start("model_fwd")
             optimizer.zero_grad()
-            in_scores, trg_scores = model(inputs.to(device),
-                                          targets.to(device),
-                                          input_masks.to(device))
-            loss, I_ZX, I_ZY = model.module.calculate_loss(in_scores, trg_scores)
+            in_scores, trg_scores = model(inputs.to(device), input_masks)
+            prediction_loss = criterion(trg_scores, targets.to(device))
+            loss, I_ZX, I_ZY = model.module.calculate_loss(in_scores, prediction_loss)
+            
             timers.stop("model_fwd").start("crit_fwd")
             timers.stop("crit_fwd").start("bwd")
             loss.backward()
@@ -210,23 +232,21 @@ def train(args):
             meters.num_samples += len(targets)
             meters.I_ZX += I_ZX.item() * len(targets)
             meters.I_ZY += I_ZY.item() * len(targets)
-            meters.num_tokens += input_masks.sum().cpu().detach().numpy()
+            meters.num_tokens += len(targets)
             timers.stop("metrics").start("ds_fetch")
             if i % 1000 == 0:
-                info = 'Itr {} {meters.loss:.3f} ({meters.avg_loss:.3f}, {meters.avg_I_ZX:.3f})'.format(i, meters=meters)
+                info = 'Itr {} {meters.loss:.3f} ({meters.avg_loss:.3f})'.format(i, meters=meters)
                 print(info)
         timers.stop("ds_fetch").stop("train_total")
         epoch_time = time.time() - start_time
 
         logging.info(
             "Epoch {} complete. "
-            "nUpdates {}, Loss {:.3f}, I_ZX {:.3f}, I_ZY {:.3f} "
+            "nUpdates {}, Loss {:.3f} "
             " Time {:.3f} (s), LR {:.3f}".format(
                 epoch + 1,
                 num_updates,
                 meters.avg_loss,
-                meters.avg_I_ZX,
-                meters.avg_I_ZY,
                 epoch_time,
                 scheduler.get_last_lr()[0],
             ),
@@ -235,10 +255,9 @@ def train(args):
         if epoch % 1 == 0:
           logging.info("Evaluating validation set..")
           timers.start("test_total")
-          token_recall, token_precision, token_f1 = test(
+          val_acc = test(
              model, val_loader, device, args.checkpoint_path
           )
-          val_acc = token_f1
           
           timers.stop("test_total")
           checkpoint(
@@ -249,9 +268,9 @@ def train(args):
 
           max_val_acc = max(val_acc, max_val_acc) 
           logging.info(
-              "Validation Set: Token Recall {:.3f}, Token Precision {:.3f}, Token F1 {:.3f}, "
-              "Best Token F1 {:.3f}".format(
-                token_recall, token_precision, token_f1, max_val_acc
+              "Validation Set: WER {:.3f}, "
+              "Best WER {:.3f}".format(
+                1-val_acc, 1-max_val_acc
             ),
           )
           logging.info(
