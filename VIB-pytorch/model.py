@@ -8,8 +8,68 @@ from utils import cuda
 import time
 from numbers import Number
 
-class ToyNet(nn.Module):
+class Davenet(nn.Module):
+    def __init__(self, embedding_dim=512):
+        super(Davenet, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.batchnorm1 = nn.BatchNorm2d(1)
+        self.conv1 = nn.Conv2d(1, 128, kernel_size=(80,1), stride=(1,1), padding=(0,0))
+        self.conv2 = nn.Conv2d(128, 256, kernel_size=(1,11), stride=(1,1), padding=(0,5))
+        self.conv3 = nn.Conv2d(256, 512, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.conv4 = nn.Conv2d(512, 512, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.conv5 = nn.Conv2d(512, embedding_dim*2, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.pool = nn.MaxPool2d(kernel_size=(1,3), stride=(1,2),padding=(0,1))
 
+    def forward(self, x, num_sample=1):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        x = self.batchnorm1(x)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = F.relu(self.conv3(x))
+        x = self.pool(x)
+        x = F.relu(self.conv4(x))
+        x = self.pool(x)
+        x = F.relu(self.conv5(x))
+        x = self.pool(x)
+        x = x.squeeze(2).permute(0, 2, 1)
+        
+        statistics = self.encode(x).mean(dim=1)
+        print('x.size(), stat.size(): ', x.size(), statistics.size()) # XXX
+        mu = statistics[:,:self.K]
+        std = F.softplus(statistics[:,self.K:]-5,beta=1)
+        encoding = self.reparametrize_n(mu,std,num_sample)
+        logit = self.decode(encoding)
+
+        if num_sample == 1 : pass
+        elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+        return (mu, std), logit
+
+    def reparametrize_n(self, mu, std, n=1):
+        # reference :
+        # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
+        def expand(v):
+            if isinstance(v, Number):
+                return torch.Tensor([v]).expand(n, 1)
+            else:
+                return v.expand(n, *v.size())
+
+        if n != 1 :
+            mu = expand(mu)
+            std = expand(std)
+
+        eps = Variable(cuda(std.data.new(std.size()).normal_(), std.is_cuda))
+
+        return mu + eps * std
+
+    def weight_init(self):
+        for m in self._modules:
+            xavier_init(self._modules[m])
+
+
+
+class ToyNet(nn.Module):
     def __init__(self, K=256):
         super(ToyNet, self).__init__()
         self.K = K
