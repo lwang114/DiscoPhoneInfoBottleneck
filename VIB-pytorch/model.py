@@ -144,7 +144,7 @@ class GumbelBLSTM(nn.Module):
     self.bottleneck = nn.Linear(2*embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
 
-  def forward(self, x, num_sample=1, masks=None):
+  def forward(self, x, num_sample=1, masks=None, temp=1.):
     device = x.device
     if x.dim() < 3:
         x = x.unsqueeze(0)
@@ -167,7 +167,7 @@ class GumbelBLSTM(nn.Module):
       x = x * masks.unsqueeze(2)
 
     in_logit = x.sum(dim=1)
-    encoding = self.reparametrize_n(x,num_sample)
+    encoding = self.reparametrize_n(x,num_sample,temp)
     logit = self.decode(encoding)
     logit = logit.sum(dim=-2)
 
@@ -176,7 +176,7 @@ class GumbelBLSTM(nn.Module):
 
     return in_logit, logit
     
-  def reparametrize_n(self, x, n=1):
+  def reparametrize_n(self, x, n=1, temp=1.):
       # reference :
       # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
       # param x: FloatTensor of size (batch size, num. frames, num. classes) 
@@ -190,7 +190,7 @@ class GumbelBLSTM(nn.Module):
 
       if n != 1 :
           x = expand(x)
-      encoding = F.gumbel_softmax(x)
+      encoding = F.gumbel_softmax(x, tau=temp)
 
       return encoding
 

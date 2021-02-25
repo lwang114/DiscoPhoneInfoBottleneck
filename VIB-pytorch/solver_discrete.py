@@ -77,6 +77,9 @@ class Solver(object):
 
     def train(self):
         self.set_mode('train')
+        temp_min = 0.5
+        anneal_rate = 3e-5
+        temp = 1.
         for e in range(self.epoch) :
             self.global_epoch += 1
 
@@ -86,7 +89,7 @@ class Solver(object):
                 x = Variable(cuda(audios, self.cuda))
                 y = Variable(cuda(labels, self.cuda))
                 masks = Variable(cuda(masks, self.cuda))
-                in_logit, logit = self.toynet(x, masks=masks)
+                in_logit, logit = self.toynet(x, masks=masks, temp=temp)
 
                 class_loss = F.cross_entropy(logit,y).div(math.log(2))
                 info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
@@ -110,6 +113,7 @@ class Solver(object):
                 else : avg_accuracy = Variable(cuda(torch.zeros(accuracy.size()), self.cuda))
 
                 if self.global_iter % 100 == 0 :
+                    temp = np.maximum(temp * np.exp(-anneal_rate * idx), temp_min)
                     print('i:{} Total Loss:{:.2f} IZY:{:.2f} IZX:{:.2f}'
                             .format(idx+1, total_loss.item(), izy_bound.item(), izx_bound.item()), end=' ')
                     print('acc:{:.4f} avg_acc:{:.4f}'
