@@ -134,6 +134,71 @@ class BLSTM(nn.Module):
   def weight_init(self):
       pass
 
+class GumbelBLSTM(nn.Module):
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
+    super(BLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.bottleneck = nn.Linear(2*embedding_dim, 49)
+    self.decode = nn.Linear(49, self.n_class)
+
+  def forward(self, x, num_sample=1, masks=None):
+    device = x.device
+    if x.dim() < 3:
+        x = x.unsqueeze(0)
+    elif x.dim() > 3:
+        x = x.squeeze(1)
+    x = x.permute(0, 2, 1)
+        
+    B = x.size(0)
+    T = x.size(1)
+    h0 = torch.zeros((2 * self.n_layers, B, self.K))
+    c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    if torch.cuda.is_available():
+      h0 = h0.cuda()
+      c0 = c0.cuda()
+       
+    x, _ = self.rnn(x, (h0, c0))
+    x = self.bottleneck(x)
+    
+    if not masks is None:
+      x = x * masks.unsqueeze(2)
+
+    in_logit = x.sum(dim=1)
+    encoding = self.reparametrize_n(x,num_sample)
+    logit = self.decode(encoding)
+    logit = logit.sum(dim=-2)
+
+    if num_sample == 1 : pass
+    elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+
+    return in_logit, logit
+    
+  def reparametrize_n(self, x, n=1):
+      # reference :
+      # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
+      # param x: FloatTensor of size (batch size, num. frames, num. classes) 
+      # param n: number of samples
+      # return encoding: FloatTensor of size (n, batch size, num. frames, num. classes)
+      def expand(v):
+          if isinstance(v, Number):
+              return torch.Tensor([v]).expand(n, 1)
+          else:
+              return v.expand(n, *v.size())
+
+      if n != 1 :
+          x = expand(x)
+      encoding = F.gumbel_softmax(x)
+
+      return encoding
+
+  def weight_init(self):
+      pass
+
+
+
 class BigToyNet(nn.Module):
     def __init__(self, K=256):
         super(BigToyNet, self).__init__()
