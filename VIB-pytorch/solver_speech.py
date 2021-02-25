@@ -12,7 +12,7 @@ from torchvision import transforms
 # from tensorboardX import SummaryWriter
 from utils import cuda, Weight_EMA_Update
 from datasets.datasets import return_data
-from model import ToyNet
+from model import BLSTM
 from pathlib import Path
 
 class Solver(object):
@@ -32,9 +32,9 @@ class Solver(object):
         self.global_epoch = 0
 
         # Network & Optimizer
-        self.toynet = cuda(Davenet(self.K), self.cuda)
+        self.toynet = cuda(BLSTM(self.K), self.cuda)
         self.toynet.weight_init()
-        self.toynet_ema = Weight_EMA_Update(cuda(Davenet(self.K), self.cuda),\
+        self.toynet_ema = Weight_EMA_Update(cuda(BLSTM(self.K), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -86,12 +86,12 @@ class Solver(object):
                 x = Variable(cuda(audios, self.cuda))
                 y = Variable(cuda(labels, self.cuda))
                 masks = Variable(cuda(masks, self.cuda))
-                (mu, std), logit = self.toynet(x)
+                (mu, std), logit = self.toynet(x, masks=masks)
 
                 class_loss = F.cross_entropy(logit,y).div(math.log(2))
                 info_loss = -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum(1).mean().div(math.log(2))
                 total_loss = class_loss + self.beta*info_loss
-
+                
                 izy_bound = math.log(65,2) - class_loss
                 izx_bound = info_loss
 
@@ -102,16 +102,16 @@ class Solver(object):
 
                 prediction = F.softmax(logit,dim=1).max(1)[1]
                 accuracy = torch.eq(prediction,y).float().mean()
-
+                
                 if self.num_avg != 0 :
-                    _, avg_soft_logit = self.toynet(x,self.num_avg)
+                    _, avg_soft_logit = self.toynet(x,self.num_avg,masks=masks)
                     avg_prediction = avg_soft_logit.max(1)[1]
                     avg_accuracy = torch.eq(avg_prediction,y).float().mean()
                 else : avg_accuracy = Variable(cuda(torch.zeros(accuracy.size()), self.cuda))
 
                 if self.global_iter % 100 == 0 :
-                    print('i:{} IZY:{:.2f} IZX:{:.2f}'
-                            .format(idx+1, izy_bound.item(), izx_bound.item()), end=' ')
+                    print('i:{} Total Loss:{:.2f} IZY:{:.2f} IZX:{:.2f}'
+                            .format(idx+1, total_loss.item(), izy_bound.item(), izx_bound.item()), end=' ')
                     print('acc:{:.4f} avg_acc:{:.4f}'
                             .format(accuracy.item(), avg_accuracy.item()), end=' ')
                     print('err:{:.4f} avg_err:{:.4f}'
@@ -159,30 +159,33 @@ class Solver(object):
         correct = 0
         avg_correct = 0
         total_num = 0
-        for idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
+        with torch.no_grad():
+          for idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
 
-            x = Variable(cuda(audios, self.cuda))
-            y = Variable(cuda(labels, self.cuda))
-            masks = Variable(cuda(masks, self.cuda))
-            (mu, std), logit = self.toynet_ema.model(x)
+              x = Variable(cuda(audios, self.cuda))
+              y = Variable(cuda(labels, self.cuda))
+              masks = Variable(cuda(masks, self.cuda))
+              (mu, std), logit = self.toynet_ema.model(x, masks=masks)
 
-            class_loss += F.cross_entropy(logit,y,size_average=False).div(math.log(2))
-            info_loss += -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum().div(math.log(2))
-            total_loss += class_loss + self.beta*info_loss
-            total_num += y.size(0)
+              cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
+              cur_info_loss = -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum().div(math.log(2))
+              class_loss = class_loss + cur_class_loss
+              info_loss = info_loss + cur_info_loss
+              total_loss = total_loss + class_loss + self.beta*info_loss
+              total_num += y.size(0)
 
-            izy_bound += math.log(10,2) - class_loss
-            izx_bound += info_loss
+              izy_bound = izy_bound + y.size(0) * math.log(65,2) - cur_class_loss 
+              izx_bound = izx_bound + cur_info_loss
 
-            prediction = F.softmax(logit,dim=1).max(1)[1]
-            correct += torch.eq(prediction,y).float().sum()
+              prediction = F.softmax(logit,dim=1).max(1)[1]
+              correct += torch.eq(prediction,y).float().sum()
 
-            if self.num_avg != 0 :
-                _, avg_soft_logit = self.toynet_ema.model(x,self.num_avg)
-                avg_prediction = avg_soft_logit.max(1)[1]
-                avg_correct += torch.eq(avg_prediction,y).float().sum()
-            else :
-                avg_correct = Variable(cuda(torch.zeros(correct.size()), self.cuda))
+              if self.num_avg != 0 :
+                  _, avg_soft_logit = self.toynet_ema.model(x,self.num_avg)
+                  avg_prediction = avg_soft_logit.max(1)[1]
+                  avg_correct += torch.eq(avg_prediction,y).float().sum()
+              else :
+                  avg_correct = Variable(cuda(torch.zeros(correct.size()), self.cuda))
 
         accuracy = correct/total_num
         avg_accuracy = avg_correct/total_num
@@ -212,6 +215,7 @@ class Solver(object):
             if save_ckpt : self.save_checkpoint('best_acc.tar')
 
         if self.tensorboard :
+            '''
             self.tf.add_scalars(main_tag='performance/accuracy',
                                 tag_scalar_dict={
                                     'test_one-shot':accuracy.item(),
@@ -233,7 +237,7 @@ class Solver(object):
                                     'I(Z;Y)':izy_bound.item(),
                                     'I(Z;X)':izx_bound.item()},
                                 global_step=self.global_iter)
-
+            '''
         self.set_mode('train')
 
     def save_checkpoint(self, filename='best_acc.tar'):

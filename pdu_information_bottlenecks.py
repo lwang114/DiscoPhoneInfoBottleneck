@@ -108,18 +108,14 @@ class PDMLP(torch.nn.Module):
       self.fc1 = nn.Linear(input_size, hidden_size)
       self.fc2 = nn.Linear(hidden_size, output_size) 
       self.pe = PositionalEncoding(hidden_size) 
-      nn.init.orthogonal_(self.fc1.weight)
-      nn.init.zeros_(self.fc1.bias)
+      # nn.init.orthogonal_(self.fc1.weight)
+      # nn.init.zeros_(self.fc1.bias)
 
-  def forward(self, x, T):
-      outputs = []
-      for t in range(T):
-          out = F.relu(self.fc1(x))
-          outputs.append(out)
-      outputs = torch.stack(outputs, dim=1)
+  def forward(self, x):
+      outputs = F.relu(self.fc1(x))
       outputs = self.pe(outputs)
       outputs = self.fc2(outputs)
-      return outputs
+      return outputs.permute(1, 0, 2)
       
 class PositionDependentUnigramBottleneck(torch.nn.Module):
   '''
@@ -132,6 +128,7 @@ class PositionDependentUnigramBottleneck(torch.nn.Module):
       bottleneck_size: int, number of phoneme types
   '''
   def __init__(self, input_size, output_size,
+               model_type,
                bottleneck_size, hidden_size,
                tds_groups, kernel_size, 
                dropout, 
@@ -139,7 +136,13 @@ class PositionDependentUnigramBottleneck(torch.nn.Module):
     super(PositionDependentUnigramBottleneck, self).__init__()
     self.bottleneck_size = bottleneck_size
     self.output_size = output_size
-    self.tds = BLSTM(input_size, output_size) # TDS(input_size, output_size, tds_groups, kernel_size, dropout)
+    if model_type == 'blstm':
+        self.tds = BLSTM(input_size, output_size)
+    elif model_type == 'tds':
+        self.tds = TDS(input_size, output_size, tds_groups, kernel_size, dropout)
+    elif model_type == 'pdmlp':
+        self.tds = PDMLP(input_size, output_size)
+        
     self.beta = beta
 
   def forward(self, inputs, input_masks):

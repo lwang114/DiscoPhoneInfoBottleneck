@@ -12,7 +12,7 @@ from torchvision import transforms
 # from tensorboardX import SummaryWriter
 from utils import cuda, Weight_EMA_Update
 from datasets.datasets import return_data
-from model import ToyNet
+from model import ToyNet, BLSTM, BigToyNet
 from pathlib import Path
 
 class Solver(object):
@@ -30,11 +30,17 @@ class Solver(object):
         self.num_avg = args.num_avg
         self.global_iter = 0
         self.global_epoch = 0
-
+        self.dataset = args.dataset
         # Network & Optimizer
-        self.toynet = cuda(ToyNet(self.K), self.cuda)
-        self.toynet.weight_init()
-        self.toynet_ema = Weight_EMA_Update(cuda(ToyNet(self.K), self.cuda),\
+        if args.dataset == 'MSCOCO2K':
+            self.toynet = cuda(BigToyNet(self.K), self.cuda)
+            self.toynet.weight_init()
+            self.toynet_ema = Weight_EMA_Update(cuda(BigToyNet(self.K), self.cuda),\
+                self.toynet.state_dict(), decay=0.999)
+        else:
+            self.toynet = cuda(ToyNet(self.K), self.cuda)
+            self.toynet.weight_init()
+            self.toynet_ema = Weight_EMA_Update(cuda(ToyNet(self.K), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -80,7 +86,12 @@ class Solver(object):
         for e in range(self.epoch) :
             self.global_epoch += 1
 
-            for idx, (images,labels) in enumerate(self.data_loader['train']):
+            for idx, batch in enumerate(self.data_loader['train']):
+                if self.dataset == 'MSCOCO2K':
+                    images,labels,masks = batch
+                else:
+                    images,labels = batch
+                    
                 self.global_iter += 1
 
                 x = Variable(cuda(images, self.cuda))
@@ -109,8 +120,8 @@ class Solver(object):
                 else : avg_accuracy = Variable(cuda(torch.zeros(accuracy.size()), self.cuda))
 
                 if self.global_iter % 100 == 0 :
-                    print('i:{} IZY:{:.2f} IZX:{:.2f}'
-                            .format(idx+1, izy_bound.item(), izx_bound.item()), end=' ')
+                    print('i:{} Total Loss:{:.2f}, IZY:{:.2f} IZX:{:.2f}'
+                            .format(idx+1, total_loss.item(), izy_bound.item(), izx_bound.item()), end=' ')
                     print('acc:{:.4f} avg_acc:{:.4f}'
                             .format(accuracy.item(), avg_accuracy.item()), end=' ')
                     print('err:{:.4f} avg_err:{:.4f}'
@@ -158,19 +169,27 @@ class Solver(object):
         correct = 0
         avg_correct = 0
         total_num = 0
-        for idx, (images,labels) in enumerate(self.data_loader['test']):
-
+        for idx, batch in enumerate(self.data_loader['test']):
+            if self.dataset == 'MSCOCO2K':
+                images,labels,masks = batch
+            else:
+                images,labels = batch
             x = Variable(cuda(images, self.cuda))
             y = Variable(cuda(labels, self.cuda))
             (mu, std), logit = self.toynet_ema.model(x)
 
-            class_loss += F.cross_entropy(logit,y,size_average=False).div(math.log(2))
-            info_loss += -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum().div(math.log(2))
-            total_loss += class_loss + self.beta*info_loss
+            cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
+            cur_info_loss = -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum().div(math.log(2))
+            class_loss = class_loss + cur_class_loss
+            info_loss = info_loss + cur_info_loss
+            total_loss = total_loss + class_loss + self.beta*info_loss
             total_num += y.size(0)
 
-            izy_bound += math.log(10,2) - class_loss
-            izx_bound += info_loss
+            if self.dataset == 'MSCOCO2K':
+                izy_bound = izy_bound + y.size(0) * math.log(65,2) - class_loss
+            else:
+                izy_bound = izy_bound + y.size(0) * math.log(10,2) - class_loss
+            izx_bound = izx_bound + cur_info_loss
 
             prediction = F.softmax(logit,dim=1).max(1)[1]
             correct += torch.eq(prediction,y).float().sum()
@@ -192,8 +211,8 @@ class Solver(object):
         total_loss /= total_num
 
         print('[TEST RESULT]')
-        print('e:{} IZY:{:.2f} IZX:{:.2f}'
-                .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')
+        print('e:{} Total Loss:{:.2f}, IZY:{:.2f} IZX:{:.2f}'
+                .format(self.global_epoch, total_loss.item(), izy_bound.item(), izx_bound.item()), end=' ')
         print('acc:{:.4f} avg_acc:{:.4f}'
                 .format(accuracy.item(), avg_accuracy.item()), end=' ')
         print('err:{:.4f} avg_erra:{:.4f}'

@@ -237,12 +237,14 @@ class TDS(torch.nn.Module):
         self.tds = torch.nn.Sequential(*modules)
         self.linear = torch.nn.Linear(in_channels, output_size)
 
-    def forward(self, inputs):
+    def forward(self, inputs, return_feat=False):
         # inputs shape: [B, H, W]
         outputs = self.tds(inputs)
         # outputs shape: [B, W, output_size]
+        if return_feat:
+            return self.linear(outputs.permute(0, 2, 1)), self.linear(outputs.permute(0, 2, 1))
         return self.linear(outputs.permute(0, 2, 1))
-
+        
 class TDSTransducer(torch.nn.Module):
     def __init__(
             self, input_size, output_size, tokens, kernel_size, stride, tds1, tds2, wfst=True, **kwargs,
@@ -282,17 +284,20 @@ class TDSTransducer(torch.nn.Module):
         self.linear = torch.nn.Linear(len(lexicon), output_size) # in_channels * inner_size)
         # self.tds2 = TDS2d(inner_size, output_size, **tds2)
 
-    def forward(self, inputs):
+    def forward(self, inputs, return_feat=False):
         # inputs shape: [B, H, W]
-        outputs = self.tds1(inputs)
+        feats = self.tds1(inputs)
         # outputs shape: [B, W, C]
         if self.wfst:
-            outputs = self.conv(outputs)
+            outputs = self.conv(feats)
         else:
-            outputs = self.conv(outputs.permute(0, 2, 1)).permute(0, 2, 1)
+            outputs = self.conv(feats.permute(0, 2, 1)).permute(0, 2, 1)
         # outputs shape: [B, W, C']
         outputs = self.linear(outputs)
-        return outputs
+        if return_feat:
+            return outputs, feats
+        else:
+            return outputs
         # return self.tds2(outputs.permute(0, 2, 1))
 
 class RNN(torch.nn.Module):

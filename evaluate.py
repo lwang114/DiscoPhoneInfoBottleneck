@@ -63,7 +63,7 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
 
   print('Token precision={:.3f}\tToken recall={:.3f}\tToken F1={:.3f}'.format(token_precision, token_recall, token_f1))  
   confusion_df = pd.DataFrame(confusion_dict)
-  return token_f1, confusion_df
+  return token_f1, confusion_df, token_precision, token_recall
 
 def main():
   args = parse_args()

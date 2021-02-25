@@ -2,7 +2,7 @@ import torch, os
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import MNIST
-import torchaudio
+from datasets.mscoco2k_segment import Dataset, Preprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -22,19 +22,12 @@ def return_data(args):
         dset = MNIST
         train_data = dset(**train_kwargs)
         test_data = dset(**test_kwargs)    
-    elif 'MSCOCO2k' in name : # TODO
-        transform = [
-            torchaudio.transforms.MelSpectrogram(
-                sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
-                n_mels=preprocessor.num_features,
-                hop_length=sample_rate * 10 // 1000,
-            ),
-            torchvision.transforms.Lambda(log_normalize),
-        ]
-        transform = transforms.Compose(transform)
-        preprocessor = Preprocessor() # TODO
-        dset = Dataset(self, data_path,
-                       preprocessor, 'train',)
+    elif 'MSCOCO2K' in name :
+        preprocessor = Preprocessor(dset_dir, 80, level='word')
+        train_data = Dataset(dset_dir,
+                             preprocessor, 'train')
+        test_data = Dataset(dset_dir,
+                            preprocessor, 'test')
     else : raise UnknownDatasetError()
 
 

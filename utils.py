@@ -134,6 +134,55 @@ class Meters:
     def wer(self):
         return self.edit_distance_words * 100.0 / self.num_words if self.num_words > 0 else 0
 
+@dataclass
+class IBMeters:
+    loss = 0.0
+    num_samples = 0
+    num_tokens = 0
+    I_ZX = 0.0
+    I_ZY = 0.0
+    
+    def sync(self):
+        lst = [self.loss, self.num_samples, self.num_tokens, self.I_ZX, self.I_WX, self.I_WY]
+        # TODO: avoid this so that distributed cpu training also works
+        lst_tensor = torch.FloatTensor(lst).cuda()
+        torch.distributed.all_reduce(lst_tensor)
+        (
+            self.loss,
+            self.num_samples,
+            self.num_tokens,
+            self.I_ZX,
+            self.I_ZY,
+        ) = lst_tensor.tolist()
+
+    @property
+    def avg_loss(self):
+        return self.loss / self.num_samples if self.num_samples > 0 else 0
+
+    @property
+    def avg_I_ZX(self):
+        return self.I_ZX / self.num_tokens if self.num_tokens > 0 else 0
+
+    @property
+    def avg_I_ZY(self):
+        return self.I_ZY / self.num_tokens if self.num_tokens > 0 else 0
+    
+class RetrievalEvaluation:
+  def __init__(self, predictions, labels=None):
+    self.predictions = predictions
+    self.labels = labels
+    self.total = len(predictions)
+    if labels is None:
+      self.labels = list(range(self.total))
+
+  def get_recall_at_k(self, k=10):
+    recall_at_k = 0.
+    for i in range(self.total):
+      for idx in range(k):
+        if self.predictions[i][idx] == self.labels[i]:
+          recall_at_k += 1
+          break
+    return recall_at_k / self.total  
 
 # A simple timer class inspired from `tnt.TimeMeter`
 class CudaTimer:

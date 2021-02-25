@@ -40,6 +40,9 @@ def parse_args():
     parser.add_argument(
         "--world_size", default=1, type=int, help="world size for distributed training"
     )
+    parser.add_argument(
+        "--eval_only", action="store_true"
+    )
     
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
@@ -64,8 +67,6 @@ def test(model, data_loader, device, checkpoint_path='./'):
         if b_idx == 0:
             B = inputs.size(0)
         in_scores, out_scores = model(inputs.to(device), input_masks.to(device))
-        if not pooling_ratio:
-            pooling_ratio = int(inputs.size(-1) // in_scores.size(-1))
 
         pred_label = out_scores.topk(1, dim=-1)[-1].detach().cpu().numpy()
         gold_label = targets.detach().cpu().numpy()
@@ -78,11 +79,16 @@ def test(model, data_loader, device, checkpoint_path='./'):
         for idx in range(inputs.size(0)):
             global_idx = b_idx * B + idx
             example_id = data_loader.dataset.dataset[global_idx][0]
-            text = data_loader.dataset.dataset[global_idx][1] 
+            text = data_loader.dataset.dataset[global_idx][1]
+            nframes = int(input_masks[idx].sum().cpu().detach().numpy())
+            in_scores_ds = in_scores[idx].cpu().detach().numpy()
+            in_scores_ds = in_scores_ds.reshape(8, int(in_scores[idx].size(0) // 8), -1).mean(axis=0)
+            nframes_ds = int(nframes // 8)
             pred_dicts.append(
                 {'sent_id': example_id,
-                 'units': prediction, 
-                 'scores': in_scores.cpu().detach().numpy().tolist(),
+                 'units': prediction[idx],
+                 'scores': in_scores_ds[:nframes_ds].tolist(),
+                 'nframes': nframes,
                  'text': text})
 
     acc = correct / total
@@ -152,7 +158,8 @@ def train(args, world_rank=0):
     # setup criterion, model:
     logging.info("Loading model ...")
     criterion = nn.CrossEntropyLoss()
-    model = PositionDependentUnigramBottleneck(input_size, output_size, **config['model'])
+    
+    model = PositionDependentUnigramBottleneck(input_size, output_size,config["model_type"], **config['model'])
         
     if args.restore:
         model_checkpoint = os.path.join(args.checkpoint_path, "model.checkpoint")
@@ -210,6 +217,8 @@ def train(args, world_rank=0):
         timers.reset()
         timers.start("train_total").start("ds_fetch")
         for i, (inputs, targets, input_masks) in enumerate(train_loader):
+            if args.eval_only:
+                continue
             timers.stop("ds_fetch").start("model_fwd")
             optimizer.zero_grad()
             in_scores, trg_scores = model(inputs.to(device), input_masks)
