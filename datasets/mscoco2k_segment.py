@@ -38,12 +38,11 @@ class Dataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 512
+    self.max_feat_len = 256
     
     data = []
     for sp in self.splits[split]:
-      data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))
-    
+      data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))    
     self.preprocessor = preprocessor
     
     # Set up transforms
@@ -76,7 +75,8 @@ class Dataset(torch.utils.data.Dataset):
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "gold_units.json")):
       create_gold_file(data_path, sample_rate) 
-
+    self.gold_dicts = json.load(os.path.join(data_path, "gold_units.json"))
+      
   def sample_sizes(self):
     """
     Returns a list of tuples containing the input size
@@ -88,13 +88,15 @@ class Dataset(torch.utils.data.Dataset):
       audio_file, text, _, interval = self.dataset[index]
       begin = int(interval[0] * (self.sample_rate // 1000))
       end = int(interval[1] * (self.sample_rate // 1000))
-      audio = torchaudio.load(audio_file)
-      inputs = self.transforms(audio[0][begin:end])
-      nframes = inputs.size(1)
+      audio, _ = torchaudio.load(audio_file)
+      try:
+          inputs = self.transforms(audio[:, begin:end]).squeeze(0)
+      except:
+          inputs = self.transforms(audio)[:, :, int(begin // 10):int(end // 10)].squeeze(0)
+      nframes = inputs.size(-1)
       input_mask = torch.zeros(self.max_feat_len)
       input_mask[:nframes] = 1.
-      inputs = fix_embedding_length(inputs.squeeze(0).t(), self.max_feat_len).t()
-      
+      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
       outputs = self.preprocessor.to_index(text).squeeze(0)
       
       return inputs, outputs, input_mask
@@ -250,6 +252,7 @@ def load_data_split(data_path, split, wordsep, sample_rate):
                          'duration': dur_word,
                          'interval': [begin_word, end_word]}
               examples.append(example)
+              begin_word += dur_word
   return examples
 
 def create_gold_file(data_path, sample_rate):

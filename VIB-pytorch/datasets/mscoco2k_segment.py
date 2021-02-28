@@ -38,7 +38,7 @@ class Dataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 512
+    self.max_feat_len = 128
     
     data = []
     for sp in self.splits[split]:
@@ -71,12 +71,12 @@ class Dataset(torch.utils.data.Dataset):
     text = [example['text'] for example in data]
     duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
     interval = [example['interval'] for example in data]
-    self.dataset = list(zip(audio, text, duration, interval))
-    
+    self.dataset = list(zip(audio, text, duration, interval))    
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "gold_units.json")):
       create_gold_file(data_path, sample_rate) 
-
+    self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
+      
   def sample_sizes(self):
     """
     Returns a list of tuples containing the input size
@@ -85,16 +85,18 @@ class Dataset(torch.utils.data.Dataset):
     return [((duration, 1), len(text)) for _, text, duration in self.dataset]
 
   def __getitem__(self, index):
-      audio_file, text, _, interval = self.dataset[index]
+      audio_file, text, dur, interval = self.dataset[index]
       begin = int(interval[0] * (self.sample_rate // 1000))
       end = int(interval[1] * (self.sample_rate // 1000))
-      audio = torchaudio.load(audio_file)
-      inputs = self.transforms(audio[0][begin:end])
-      nframes = inputs.size(1)
+      audio, _ = torchaudio.load(audio_file)
+      try:
+          inputs = self.transforms(audio[:, begin:end]).squeeze(0)
+      except:
+          inputs = self.transforms(audio)[:, :, int(begin // 10):int(end // 10)].squeeze(0)
+      nframes = inputs.size(-1)
       input_mask = torch.zeros(self.max_feat_len)
       input_mask[:nframes] = 1.
-      inputs = fix_embedding_length(inputs.squeeze(0).t(), self.max_feat_len).t()
-      
+      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
       outputs = self.preprocessor.to_index(text).squeeze(0)
       
       return inputs, outputs, input_mask
@@ -129,7 +131,7 @@ class Preprocessor:
     prepend_wordsep=False,
     sample_rate = 16000,
     supervised = True,
-    level = 'phone'
+    level = 'word'
   ):
     self.wordsep = ' '
     self._prepend_wordsep = prepend_wordsep
@@ -250,6 +252,7 @@ def load_data_split(data_path, split, wordsep, sample_rate):
                          'duration': dur_word,
                          'interval': [begin_word, end_word]}
               examples.append(example)
+              begin_word += dur_word
   return examples
 
 def create_gold_file(data_path, sample_rate):
@@ -258,7 +261,7 @@ def create_gold_file(data_path, sample_rate):
       gold_dicts : a list of mappings
           {"sentence_id" : str,
            "units" : a list of ints representing phoneme id for each feature frame,
-           "text" : a list of strs representing phoneme tokens for each feature frame}       
+           "text" : a list of strs representing phoneme tokens for each feature frame}
   """
   wav_scp_file = os.path.join(data_path, "mscoco2k_wav.scp")
   split_file = os.path.join(data_path, "mscoco2k_retrieval_split.txt")
@@ -300,6 +303,7 @@ def create_gold_file(data_path, sample_rate):
     for word_info, word_token in zip(phone_info["data_ids"], phone_info["concepts"]):
       dur_word = word_info[2][-1][2] - word_info[2][0][1]
       end_word = begin_word + dur_word
+      print(begin_word, end_word) # XXX
       nframes = int(dur_word // 10)
       gold_dict = {"sentence_id": filenames[idx],
                    "units": [-1]*nframes,
@@ -341,4 +345,6 @@ if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
   preproc = Preprocessor(data_path, 80) 
   dataset = Dataset(data_path, preproc, "test")
-  print(dataset[0])
+  for k in range(5):
+      inputs, outputs, input_masks = dataset[k]
+      print('inputs, outputs, input_masks: ', inputs.size(), outputs, input_masks.sum(dim=-1)) # XXX

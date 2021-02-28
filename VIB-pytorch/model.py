@@ -135,16 +135,18 @@ class BLSTM(nn.Module):
       pass
 
 class GumbelBLSTM(nn.Module):
-  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
-    super(BLSTM, self).__init__()
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1):
+    super(GumbelBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
+    self.ds_ratio = ds_ratio
     self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
     self.bottleneck = nn.Linear(2*embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
 
-  def forward(self, x, num_sample=1, masks=None, temp=1.):
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
+    ds_ratio = self.ds_ratio
     device = x.device
     if x.dim() < 3:
         x = x.unsqueeze(0)
@@ -168,13 +170,21 @@ class GumbelBLSTM(nn.Module):
 
     in_logit = x.sum(dim=1)
     encoding = self.reparametrize_n(x,num_sample,temp)
+    L = ds_ratio * (T // ds_ratio)
+    if encoding.dim() > 3:
+        encoding = encoding[:, :, :L].view(num_sample, B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
+    else:
+        encoding = encoding[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
     logit = self.decode(encoding)
     logit = logit.sum(dim=-2)
 
     if num_sample == 1 : pass
     elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
 
-    return in_logit, logit
+    if return_encoding:
+        return in_logit, logit, encoding
+    else:
+        return in_logit, logit
     
   def reparametrize_n(self, x, n=1, temp=1.):
       # reference :
@@ -197,8 +207,48 @@ class GumbelBLSTM(nn.Module):
   def weight_init(self):
       pass
 
+class ExactDiscreteBLSTM(nn.Module):
+    def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
+        super(ExactDiscreteBLSTM, self).__init__()
+        self.K = embedding_dim
+        self.n_layers = n_layers
+        self.n_class = n_class
+        self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+        self.bottleneck = nn.Linear(2*embedding_dim, 49)
+        self.decode = nn.Linear(49, self.n_class)
 
+    def forward(self, x, num_sample=1, masks=None, temp=1.):
+        device = x.device
+        if x.dim() < 3:
+            x = x.unsqueeze(0)
+        elif x.dim() > 3:
+            x = x.squeeze(1)
+        x = x.permute(0, 2, 1)
 
+        B = x.size(0)
+        T = x.size(1)
+
+        h0 = torch.zeros((2 * self.n_layers, B, self.K))
+        c0 = torch.zeros((2 * self.n_layers, B, self.K))
+        if torch.cuda.is_available():
+            h0 = h0.cuda()
+            c0 = c0.cuda()
+
+        x, _ = self.rnn(x, (h0, c0))
+        x = self.bottleneck(x)
+
+        if not masks is None:
+            x = x * masks.unsqueeze(2)
+
+        in_logit = x.sum(dim=1)
+        logit = torch.matmul(F.softmax(x, dim=-1), F.log_softmax(self.decode.weight.t(), dim=-1))
+        logit = logit.sum(dim=-2)
+        return in_logit, logit
+
+    def weight_init(self):
+        pass
+
+    
 class BigToyNet(nn.Module):
     def __init__(self, K=256):
         super(BigToyNet, self).__init__()

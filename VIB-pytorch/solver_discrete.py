@@ -9,11 +9,13 @@ from torch.autograd import Variable
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms
-# from tensorboardX import SummaryWriter
+from tensorboardX import SummaryWriter
 from utils import cuda, Weight_EMA_Update
 from datasets.datasets import return_data
 from model import GumbelBLSTM
 from pathlib import Path
+import json
+from evaluate import evaluate
 
 class Solver(object):
 
@@ -30,11 +32,12 @@ class Solver(object):
         self.num_avg = args.num_avg
         self.global_iter = 0
         self.global_epoch = 0
-
+        self.ds_ratio = args.ds_ratio
+        
         # Network & Optimizer
-        self.toynet = cuda(GumbelBLSTM(self.K), self.cuda)
+        self.toynet = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
         self.toynet.weight_init()
-        self.toynet_ema = Weight_EMA_Update(cuda(BLSTM(self.K), self.cuda),\
+        self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -60,8 +63,8 @@ class Solver(object):
             self.env_name = args.env_name
             self.summary_dir = Path(args.summary_dir).joinpath(args.env_name)
             if not self.summary_dir.exists() : self.summary_dir.mkdir(parents=True,exist_ok=True)
-            # self.tf = SummaryWriter(log_dir=self.summary_dir)
-            # self.tf.add_text(tag='argument',text_string=str(args),global_step=self.global_epoch)
+            self.tf = SummaryWriter(log_dir=self.summary_dir)
+            self.tf.add_text(tag='argument',text_string=str(args),global_step=self.global_epoch)
 
         # Dataset
         self.data_loader = return_data(args)
@@ -77,9 +80,10 @@ class Solver(object):
 
     def train(self):
         self.set_mode('train')
-        temp_min = 0.5
-        anneal_rate = 3e-5
+        temp_min = 0.1
+        anneal_rate = 3e-6
         temp = 1.
+        
         for e in range(self.epoch) :
             self.global_epoch += 1
 
@@ -122,7 +126,6 @@ class Solver(object):
                             .format(1-accuracy.item(), 1-avg_accuracy.item()))
 
                 if self.global_iter % 10 == 0 :
-                    '''
                     if self.tensorboard :
                         self.tf.add_scalars(main_tag='performance/accuracy',
                                             tag_scalar_dict={
@@ -145,11 +148,10 @@ class Solver(object):
                                                 'I(Z;Y)':izy_bound.data[0],
                                                 'I(Z;X)':izx_bound.data[0]},
                                             global_step=self.global_iter)
-                    '''
 
             if (self.global_epoch % 2) == 0 : self.scheduler.step()
             self.test()
-
+            
         print(" [*] Training Finished!")
 
     def test(self, save_ckpt=True):
@@ -163,13 +165,16 @@ class Solver(object):
         correct = 0
         avg_correct = 0
         total_num = 0
+        pred_dicts = []
         with torch.no_grad():
-          for idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
-
+            B = 0
+            for b_idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
+              if b_idx == 0:
+                  B = audios.size(0)
               x = Variable(cuda(audios, self.cuda))
               y = Variable(cuda(labels, self.cuda))
               masks = Variable(cuda(masks, self.cuda))
-              in_logit, logit = self.toynet_ema.model(x, masks=masks)
+              in_logit, logit, encoding = self.toynet_ema.model(x, masks=masks, return_encoding=True)
 
               cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
               cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
@@ -183,7 +188,18 @@ class Solver(object):
 
               prediction = F.softmax(logit,dim=1).max(1)[1]
               correct += torch.eq(prediction,y).float().sum()
-
+              for idx in range(audios.size(0)):
+                  global_idx = b_idx * B + idx
+                  example_id = self.data_loader['test'].dataset.dataset[global_idx][0]
+                  text = self.data_loader['test'].dataset.dataset[global_idx][1]
+                  ds_ratio = self.ds_ratio
+                  L = ds_ratio * (encoding.size(1) // ds_ratio)
+                  encoding_ds = encoding[idx, :L].view(ds_ratio, int(L // ds_ratio), -1).sum(1)
+                  units = encoding_ds.max(-1)[1]
+                  pred_dicts.append({'sent_id': example_id,
+                                     'units': units.cpu().detach().numpy().tolist(),  
+                                     'text': text})
+              
               if self.num_avg != 0 :
                   _, avg_soft_logit = self.toynet_ema.model(x,self.num_avg)
                   avg_prediction = avg_soft_logit.max(1)[1]
@@ -200,11 +216,12 @@ class Solver(object):
         info_loss /= total_num
         total_loss /= total_num
 
+        token_f1, _, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=8)
         print('[TEST RESULT]')
-        print('e:{} IZY:{:.2f} IZX:{:.2f}'
+        print('e:{} IZY:{:.2f} IZX:{:.4f}'
                 .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')
-        print('acc:{:.4f} avg_acc:{:.4f}'
-                .format(accuracy.item(), avg_accuracy.item()), end=' ')
+        print('token precision:{:.4f} token recall:{:.4f} token f1:{:.4f} acc:{:.4f} avg_acc:{:.4f}'
+                .format(token_prec, token_recall, token_f1, accuracy.item(), avg_accuracy.item()), end=' ')
         print('err:{:.4f} avg_erra:{:.4f}'
                 .format(1-accuracy.item(), 1-avg_accuracy.item()))
         print()
@@ -217,9 +234,18 @@ class Solver(object):
             self.history['epoch'] = self.global_epoch
             self.history['iter'] = self.global_iter
             if save_ckpt : self.save_checkpoint('best_acc.tar')
-
+            json.dump(pred_dicts, open(self.ckpt_dir.joinpath('best_predicted_units.json'), 'w'), indent=2)
+            
         if self.tensorboard :
-            '''
+            self.tf.add_scalars(main_tag='performance/token_prec',
+                                tag_scalar_dict={
+                                    'test_one-shot':token_prec})
+            self.tf.add_scalars(main_tag='performance/token_recall',
+                                tag_scalar_dict={
+                                    'test_one-shot':token_recall})
+            self.tf.add_scalars(main_tag='performance/token_f1',
+                                tag_scalar_dict={
+                                    'test_one-shot':token_f1})
             self.tf.add_scalars(main_tag='performance/accuracy',
                                 tag_scalar_dict={
                                     'test_one-shot':accuracy.item(),
@@ -241,7 +267,6 @@ class Solver(object):
                                     'I(Z;Y)':izy_bound.item(),
                                     'I(Z;X)':izx_bound.item()},
                                 global_step=self.global_iter)
-            '''
         self.set_mode('train')
 
     def save_checkpoint(self, filename='best_acc.tar'):
