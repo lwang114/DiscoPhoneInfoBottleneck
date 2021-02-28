@@ -12,7 +12,7 @@ from torchvision import transforms
 from tensorboardX import SummaryWriter
 from utils import cuda, Weight_EMA_Update
 from datasets.datasets import return_data
-from model import GumbelBLSTM
+from model import GumbelBLSTM, GumbelPyramidalBLSTM
 from pathlib import Path
 import json
 from evaluate import evaluate
@@ -35,9 +35,9 @@ class Solver(object):
         self.ds_ratio = args.ds_ratio
         
         # Network & Optimizer
-        self.toynet = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+        self.toynet = cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
         self.toynet.weight_init()
-        self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
+        self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))

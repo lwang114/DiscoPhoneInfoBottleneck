@@ -248,6 +248,65 @@ class ExactDiscreteBLSTM(nn.Module):
     def weight_init(self):
         pass
 
+class GumbelPyramidalBLSTM(nn.Module):
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1.)
+    super(GumbelPyramidalBLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.rnn1 = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
+    self.rnn2 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
+    self.rnn3 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
+
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
+    device = x.device
+    if x.dim() < 3:
+      x = x.unsqueeze(0)
+    elif x.dim() > 3:
+      x = x.squeeze(1)
+    x = x.permute(0, 2, 1)
+
+    B = x.size(0)
+    T = x.size(1)
+    h0 = torch.zeros((2 * self.n_layers, B, self.K))
+    c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    if torch.cuda.is_available():
+      h0 = h0.cuda()
+      c0 = c0.cuda()
+
+    x, _ = self.rnn1(x, (h0, c0))
+    print('rnn1: ', x.size())
+    L = 2 * (T // 2)
+    x, _ = self.rnn2(x[:, :L].view(B, L // 2, -1), (h0, c0))
+    print('rnn2: ', x.size())
+    L = 2 * (L // 2)
+    x, _ = self.rnn3(x[:, :L].view(B, L // 2, -1), (h0, c0))
+    print('rnn3: ', x.size())
+
+    if not masks is None:
+      x = x * masks[:, ::4].unsqueeze(2)
+    
+    encoding = self.reparametrize_n(x,num_sample,temp)
+    logit = self.decode(encoding)
+    logit = logit.sum(dim=-2)
+
+    if num_sample == 1 : pass
+    elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+
+    if return_encoding:
+      return in_logit, logit, encoding
+    else:
+      return in_logit, logit
+
+'''
+class GumbelMarkovBLSTM(nn.Module): # TODO
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80)
+    super(GumbelMarkovBLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
+'''
     
 class BigToyNet(nn.Module):
     def __init__(self, K=256):
