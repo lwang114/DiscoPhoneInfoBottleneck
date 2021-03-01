@@ -37,11 +37,14 @@ class Solver(object):
         # Network & Optimizer
         if args.model_type == 'gumbel_blstm':
           self.toynet = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+          self.toynet.weight_init()
+          self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
+                self.toynet.state_dict(), decay=0.999)
         elif args.model_type == 'pyramidal_blstm':
           self.ds_ratio = 4
           self.toynet = cuda(GumbelPyramidalBLSTM(self.K), self.cuda)
-        self.toynet.weight_init()
-        self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
+          self.toynet.weight_init()
+          self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -196,10 +199,8 @@ class Solver(object):
                   global_idx = b_idx * B + idx
                   example_id = self.data_loader['test'].dataset.dataset[global_idx][0]
                   text = self.data_loader['test'].dataset.dataset[global_idx][1]
-                  ds_ratio = self.ds_ratio
-                  L = ds_ratio * (encoding.size(1) // ds_ratio)
-                  encoding_ds = encoding[idx, :L].view(ds_ratio, int(L // ds_ratio), -1).sum(1)
-                  units = encoding_ds.max(-1)[1]
+
+                  units = encoding[idx].max(-1)[1]
                   pred_dicts.append({'sent_id': example_id,
                                      'units': units.cpu().detach().numpy().tolist(),  
                                      'text': text})
@@ -220,7 +221,8 @@ class Solver(object):
         info_loss /= total_num
         total_loss /= total_num
 
-        token_f1, _, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=8)
+        token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
+        conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
         print('[TEST RESULT]')
         print('e:{} IZY:{:.2f} IZX:{:.4f}'
                 .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')

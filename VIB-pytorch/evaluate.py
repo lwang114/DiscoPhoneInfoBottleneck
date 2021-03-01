@@ -1,6 +1,8 @@
 import argparse
 import pandas as pd
 import numpy as np
+import json
+import os
 
 EPS = 1e-40
 def parse_args():
@@ -10,7 +12,8 @@ def parse_args():
     parser.add_argument(
         '--config', type=str, help=''
     )
-
+    return parser.parse_args()
+    
 def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
   '''
   Evaluate the predictions of a phoneme discovery system
@@ -67,10 +70,17 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
 
 def main():
   args = parse_args()
-  config = json.load(args.config)
+  config = json.load(open(args.config))
   data_path = config['data']['data_path']
-  checkpoint_path = config['data']['checkpoint_path'] 
-  pred_path = os.path.join(data_path, 'gold_units.json')
-  token_path = os.path.join(data_path, 'phone2id.json')
-  gold_path = os.path.join(checkpoint_path, 'pred_units.json') 
-  evaluate(pred_path, gold_path, token_path)
+  # checkpoint_path = config['data']['checkpoint_path']
+  gold_path = os.path.join(data_path, 'gold_units.json')
+  # token_path = os.path.join(data_path, 'phone2id.json')
+  # gold_path = os.path.join(checkpoint_path, 'pred_units.json') 
+
+  gold_dicts = json.load(open(gold_path))
+  token_f1, conf_df, token_prec, token_rec = evaluate(gold_dicts, gold_dicts)
+  print('Token precision={:.3f}\tToken recall={:.3f}\tToken F1={:.3f}'.format(token_prec, token_rec, token_f1))  
+  conf_df.to_csv('confusion_matrix.csv')
+  
+if __name__ == '__main__':
+    main()

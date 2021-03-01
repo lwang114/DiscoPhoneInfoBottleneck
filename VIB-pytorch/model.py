@@ -244,20 +244,22 @@ class ExactDiscreteBLSTM(nn.Module):
         logit = torch.matmul(F.softmax(x, dim=-1), F.log_softmax(self.decode.weight.t(), dim=-1))
         logit = logit.sum(dim=-2)
         return in_logit, logit
-
+    
     def weight_init(self):
         pass
 
 class GumbelPyramidalBLSTM(nn.Module):
-  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1.)
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1.):
     super(GumbelPyramidalBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
-    self.rnn1 = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
-    self.rnn2 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
-    self.rnn3 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
-
+    self.rnn1 = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.rnn2 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.rnn3 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.bottleneck = nn.Linear(2*embedding_dim, 49)
+    self.decode = nn.Linear(49, self.n_class)
+    
   def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
     device = x.device
     if x.dim() < 3:
@@ -275,17 +277,17 @@ class GumbelPyramidalBLSTM(nn.Module):
       c0 = c0.cuda()
 
     x, _ = self.rnn1(x, (h0, c0))
-    print('rnn1: ', x.size())
-    L = 2 * (T // 2)
-    x, _ = self.rnn2(x[:, :L].view(B, L // 2, -1), (h0, c0))
-    print('rnn2: ', x.size())
-    L = 2 * (L // 2)
-    x, _ = self.rnn3(x[:, :L].view(B, L // 2, -1), (h0, c0))
-    print('rnn3: ', x.size())
+    L = T // 2
+    x = x[:, :2*L].contiguous().view(B, L, -1)
+    x, _ = self.rnn2(x, (h0, c0))
+    L = L // 2
+    x = x[:, :2*L].contiguous().view(B, L, -1)
+    x, _ = self.rnn3(x, (h0, c0))
+    x = self.bottleneck(x)
+    # if not masks is None:
+    #   x = x * masks[:, ::4].unsqueeze(2)
 
-    if not masks is None:
-      x = x * masks[:, ::4].unsqueeze(2)
-    
+    in_logit = x.sum(dim=1)
     encoding = self.reparametrize_n(x,num_sample,temp)
     logit = self.decode(encoding)
     logit = logit.sum(dim=-2)
@@ -298,6 +300,27 @@ class GumbelPyramidalBLSTM(nn.Module):
     else:
       return in_logit, logit
 
+  def weight_init(self):
+      pass
+
+  def reparametrize_n(self, x, n=1, temp=1.):
+      # reference :
+      # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
+      # param x: FloatTensor of size (batch size, num. frames, num. classes) 
+      # param n: number of samples
+      # return encoding: FloatTensor of size (n, batch size, num. frames, num. classes)
+      def expand(v):
+          if isinstance(v, Number):
+              return torch.Tensor([v]).expand(n, 1)
+          else:
+              return v.expand(n, *v.size())
+
+      if n != 1 :
+          x = expand(x)
+      encoding = F.gumbel_softmax(x, tau=temp)
+
+      return encoding
+  
 '''
 class GumbelMarkovBLSTM(nn.Module): # TODO
   def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80)
