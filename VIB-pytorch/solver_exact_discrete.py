@@ -9,13 +9,11 @@ from torch.autograd import Variable
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
 from utils import cuda, Weight_EMA_Update
 from datasets.datasets import return_data
-from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM
+from model import ExactDiscreteBLSTM
 from pathlib import Path
-import json
-from evaluate import evaluate
 
 class Solver(object):
 
@@ -32,25 +30,11 @@ class Solver(object):
         self.num_avg = args.num_avg
         self.global_iter = 0
         self.global_epoch = 0
-        self.ds_ratio = args.ds_ratio
-        
+
         # Network & Optimizer
-        if args.model_type == 'gumbel_blstm':
-          self.toynet = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
-          self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
-                self.toynet.state_dict(), decay=0.999)
-        elif args.model_type == 'pyramidal_blstm':
-          self.ds_ratio = 4
-          self.toynet = cuda(GumbelPyramidalBLSTM(self.K), self.cuda)
-          self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
-                self.toynet.state_dict(), decay=0.999)
-        elif args.model_type == 'gumbel_markov_blstm':
-          self.ds_ratio = 1
-          self.toynet = cuda(GumbelMarkovBLSTM(self.K), self.cuda)
-          self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelMarkovBLSTM(self.K), self.cuda),
+        self.toynet = cuda(ExactDiscreteBLSTM(self.K), self.cuda)
+        self.toynet.weight_init()
+        self.toynet_ema = Weight_EMA_Update(cuda(ExactDiscreteBLSTM(self.K), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -76,8 +60,8 @@ class Solver(object):
             self.env_name = args.env_name
             self.summary_dir = Path(args.summary_dir).joinpath(args.env_name)
             if not self.summary_dir.exists() : self.summary_dir.mkdir(parents=True,exist_ok=True)
-            self.tf = SummaryWriter(log_dir=self.summary_dir)
-            self.tf.add_text(tag='argument',text_string=str(args),global_step=self.global_epoch)
+            # self.tf = SummaryWriter(log_dir=self.summary_dir)
+            # self.tf.add_text(tag='argument',text_string=str(args),global_step=self.global_epoch)
 
         # Dataset
         self.data_loader = return_data(args)
@@ -93,10 +77,10 @@ class Solver(object):
 
     def train(self):
         self.set_mode('train')
-        temp_min = 0.1
-        anneal_rate = 3e-6
+        temp_min = 0.5
+        anneal_rate = 3e-5
         temp = 1.
-        
+        criterion = nn.NLLLoss()
         for e in range(self.epoch) :
             self.global_epoch += 1
 
@@ -108,7 +92,7 @@ class Solver(object):
                 masks = Variable(cuda(masks, self.cuda))
                 in_logit, logit = self.toynet(x, masks=masks, temp=temp)
 
-                class_loss = F.cross_entropy(logit,y).div(math.log(2))
+                class_loss = criterion(logit, y).div(math.log(2))
                 info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
                 total_loss = class_loss + self.beta*info_loss
                 
@@ -139,6 +123,7 @@ class Solver(object):
                             .format(1-accuracy.item(), 1-avg_accuracy.item()))
 
                 if self.global_iter % 10 == 0 :
+                    '''
                     if self.tensorboard :
                         self.tf.add_scalars(main_tag='performance/accuracy',
                                             tag_scalar_dict={
@@ -161,10 +146,11 @@ class Solver(object):
                                                 'I(Z;Y)':izy_bound.data[0],
                                                 'I(Z;X)':izx_bound.data[0]},
                                             global_step=self.global_iter)
+                    '''
 
             if (self.global_epoch % 2) == 0 : self.scheduler.step()
             self.test()
-            
+
         print(" [*] Training Finished!")
 
     def test(self, save_ckpt=True):
@@ -178,7 +164,9 @@ class Solver(object):
         correct = 0
         avg_correct = 0
         total_num = 0
+        criterion = nn.NLLLoss()
         pred_dicts = []
+        
         with torch.no_grad():
             B = 0
             for b_idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
@@ -187,10 +175,11 @@ class Solver(object):
               x = Variable(cuda(audios, self.cuda))
               y = Variable(cuda(labels, self.cuda))
               masks = Variable(cuda(masks, self.cuda))
-              in_logit, logit, encoding = self.toynet_ema.model(x, masks=masks, return_encoding=True)
+              in_logit, logit = self.toynet_ema.model(x, masks=masks)
 
-              cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
+              cur_class_loss = criterion(logit, y).div(math.log(2))
               cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
+              
               class_loss = class_loss + cur_class_loss
               info_loss = info_loss + cur_info_loss
               total_loss = total_loss + class_loss + self.beta*info_loss
@@ -205,10 +194,8 @@ class Solver(object):
                   global_idx = b_idx * B + idx
                   example_id = self.data_loader['test'].dataset.dataset[global_idx][0]
                   text = self.data_loader['test'].dataset.dataset[global_idx][1]
-
-                  units = encoding[idx].max(-1)[1]
                   pred_dicts.append({'sent_id': example_id,
-                                     'units': units.cpu().detach().numpy().tolist(),  
+                                     'units': prediction[idx].cpu().detach().numpy().tolist(),
                                      'text': text})
               
               if self.num_avg != 0 :
@@ -227,13 +214,11 @@ class Solver(object):
         info_loss /= total_num
         total_loss /= total_num
 
-        token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
-        conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
         print('[TEST RESULT]')
-        print('e:{} IZY:{:.2f} IZX:{:.4f}'
+        print('e:{} IZY:{:.2f} IZX:{:.2f}'
                 .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')
-        print('token precision:{:.4f} token recall:{:.4f} token f1:{:.4f} acc:{:.4f} avg_acc:{:.4f}'
-                .format(token_prec, token_recall, token_f1, accuracy.item(), avg_accuracy.item()), end=' ')
+        print('acc:{:.4f} avg_acc:{:.4f}'
+                .format(accuracy.item(), avg_accuracy.item()), end=' ')
         print('err:{:.4f} avg_erra:{:.4f}'
                 .format(1-accuracy.item(), 1-avg_accuracy.item()))
         print()
@@ -246,18 +231,10 @@ class Solver(object):
             self.history['epoch'] = self.global_epoch
             self.history['iter'] = self.global_iter
             if save_ckpt : self.save_checkpoint('best_acc.tar')
-            json.dump(pred_dicts, open(self.ckpt_dir.joinpath('best_predicted_units.json'), 'w'), indent=2)
+            json.dump(pred_dicts, open(self.ckpt_dir.joinpath('best_predicted_units.json')), indent=2)
             
         if self.tensorboard :
-            self.tf.add_scalars(main_tag='performance/token_prec',
-                                tag_scalar_dict={
-                                    'test_one-shot':token_prec})
-            self.tf.add_scalars(main_tag='performance/token_recall',
-                                tag_scalar_dict={
-                                    'test_one-shot':token_recall})
-            self.tf.add_scalars(main_tag='performance/token_f1',
-                                tag_scalar_dict={
-                                    'test_one-shot':token_f1})
+            '''
             self.tf.add_scalars(main_tag='performance/accuracy',
                                 tag_scalar_dict={
                                     'test_one-shot':accuracy.item(),
@@ -279,6 +256,7 @@ class Solver(object):
                                     'I(Z;Y)':izy_bound.item(),
                                     'I(Z;X)':izx_bound.item()},
                                 global_step=self.global_iter)
+            '''
         self.set_mode('train')
 
     def save_checkpoint(self, filename='best_acc.tar'):

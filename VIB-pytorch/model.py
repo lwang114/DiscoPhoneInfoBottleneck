@@ -321,35 +321,41 @@ class GumbelPyramidalBLSTM(nn.Module):
       return encoding
   
 class GumbelMarkovModelCell(nn.Module):
-  def __init__(self, num_states):
+  def __init__(self, input_size, num_states):
     """
     Discrete deep Markov model with Gumbel softmax samples. 
     """
     super(GumbelMarkovModelCell, self).__init__()
     self.num_states = num_states
     self.weight_ih = nn.Parameter(
-        torch.FloatTensor(num_states, num_states))
+        torch.FloatTensor(input_size, num_states))
     self.weight_hh = nn.Parameter(
         torch.FloatTensor(num_states, num_states))
+    self.bias = nn.Parameter(torch.FloatTensor(num_states))
+
+    self.fc = nn.Linear(input_size, num_states) 
     self.trans = nn.Parameter(torch.FloatTensor(num_states, num_states))
+    
     self.reset_parameters()
 
   def reset_parameters(self):
-    init.orthogonal(self.weight_ih.data)
-    weight_hh_data = torch.eye(self.num_states)
-    self.weight_hh.data.set_(weight_hh_data)
-    init.constant(self.bias.data, val=0)
-
-  def forward(self, logit_z_1, z_0, temp=1.): # TODO Generalize to k-steps
+    init.orthogonal_(self.weight_ih.data)
+    init.eye_(self.weight_hh)
+    init.constant_(self.bias.data, val=0)
+    init.eye_(self.trans)
+    
+  def forward(self, input_, z_0, temp=1.): # TODO Generalize to k-steps
     """
-    :param logit_z_1: FloatTensor of size (batch, num. states), unnormalized log probabilities for p(z|x) 
+    :param input_: FloatTensor of size (batch, input size), input features
     :param z_0: FloatTensor of size (batch, num. states), sample at the current time step
     :return z_1: FloatTensor of size (batch, num. states), sample for the next time step 
+    :return logit_z1_given_z0: FloatTensor of size (batch, num. states)
     """
-    batch_size = logit_z_1.size(0)
+    batch_size = input_.size(0)
     bias_batch = (self.bias.unsqueeze(0).expand(batch_size, *self.bias.size()))
+    logit_z_1 = self.fc(input_)
     wh_b = torch.addmm(bias_batch, z_0, self.weight_hh)
-    wi = torch.mm(logit_z_1, self.weight_ih)
+    wi = torch.mm(input_, self.weight_ih)
     g = wh_b + wi
 
     logit_prior_z1_given_z0 = torch.mm(z_0, self.trans)
@@ -357,21 +363,23 @@ class GumbelMarkovModelCell(nn.Module):
                         (1 - torch.sigmoid(g))*logit_z_1
     z_1 = F.gumbel_softmax(logit_z1_given_z0, tau=temp)
     
-    return z_1
+    return z_1, logit_z1_given_z0
 
 
 class GumbelMarkovBLSTM(nn.Module):
   def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
     super(GumbelMarkovBLSTM, self).__init__()
     self.K = embedding_dim
+    self.bottleneck_dim = 49
     self.n_layers = n_layers
     self.n_class = n_class
-    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first)
-    self.bottleneck = GumbelMarkovModelCell(49)
-    self.decode = nn.Linear(2*embedding_dim, self.n_class) 
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+    self.bottleneck = GumbelMarkovModelCell(embedding_dim*2, self.bottleneck_dim)
+    self.decode = nn.Linear(self.bottleneck_dim, self.n_class) 
 
   @staticmethod
-  def _forward_bottleneck(cell, logit_z_1, length, z_0, n=1, temp=1.):
+  def _forward_bottleneck(cell, input_, length, z_0, n=1, temp=1.):
+    device = input_.device
     def expand(v):
       if isinstance(v, Number):
         return torch.Tensor([v]).expand(n, 1)
@@ -379,29 +387,34 @@ class GumbelMarkovBLSTM(nn.Module):
         return v.expand(n, *v.size())
 
     B = z_0.size(0)
-    size_z = z_0.size()[1:]
-    max_time = logit_z_1.size(0)
+    num_states = z_0.size(-1)
+    in_size = input_.size()[1:]
+    if n != 1:
+        z_0 = expand(z_0).contiguous().view(B*n, num_states)
+        input_ = expand(input_).contiguous().view(B*n, *in_size) 
+        length = expand(length).flatten()
+    
+    input_ = input_.permute(1, 0, 2)
+    max_time = input_.size(0)
     output = []
+    logits = []
     for time in range(max_time):
-      if time == 0 and n != 1:
-        z_0 = expand(z_0).view(B*n, *size_z)
-        logit_z_1 = expand(logit_z_1).view(B*n, *size_z) 
-        length = length.flatten()
-
-      z_1 = cell(logit_z_1=logit_z_1[time], z_0=z_0, n=n, temp=temp)
-      mask = (time < length).float().unsqueeze(1).expand_as(z_1)
+      z_1, logit = cell(input_=input_[time], z_0=z_0, temp=temp)
+      mask = (time < length).float().unsqueeze(1).expand_as(z_1).to(device)
       z_1 = z_1*mask + z_0*(1 - mask)
-      output.append(z_0)
+      output.append(z_1)
+      logits.append(logit)
       z_0 = z_1
     output = torch.stack(output, 1)
+    logits = torch.stack(logits, 1)
     
     if n != 1:
-      output = output.view(n, B, *size_z)
-      z_0 = z_0.view(n, B, *size_z)
+      output = output.view(n, B, max_time, num_states)
+      logits = logits.view(n, B, max_time, num_states)
+      
+    return output, logits
 
-    return output, z_0
-
-  def forward(self, x, num_sample=1, masks=None, temp=1.):
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
     if x.dim() < 3:
       x = x.unsqueeze(0)
     elif x.dim() > 3:
@@ -410,25 +423,29 @@ class GumbelMarkovBLSTM(nn.Module):
 
     B = x.size(0)   
     T = x.size(1)
-    h0 = torch.zeros((2 * self.n_layers, B, self.K))
-    c0 = torch.zeros((2 * self.n_layers, B, self.K))
-    z0 = torch.zeros((B, 49))
-    if torch.cuda.is_available():
-      h0 = h0.cuda()
-      c0 = c0.cuda()
+    h0 = torch.zeros((2 * self.n_layers, B, self.K)).to(x.device)
+    c0 = torch.zeros((2 * self.n_layers, B, self.K)).to(x.device)
+    z0 = torch.zeros((B, 49)).to(x.device)
     x, _ = self.rnn(x, (h0, c0))
     
     if not masks is None:
       length = masks.sum(-1)
     else:
       length = T * torch.ones(B, dtype=torch.int)
-    encoding, _ = GumbelMarkovBLSTM._forward_bottleneck(
-        logit_z_1=x, length=length, z_0=z0, n=num_sample, temp=temp)
-    logit = self.decode(encoding)
+    encoding, in_logit = GumbelMarkovBLSTM._forward_bottleneck(
+        cell=self.bottleneck, input_=x, length=length, z_0=z0, n=num_sample, temp=temp)
+    logit = self.decode(encoding).sum(dim=-2)
 
-    return logit
-
+    if num_sample != 1:
+        logit = torch.log(F.softmax(logit, dim=2).mean(0))
     
+    if return_encoding:
+        return in_logit, logit, encoding
+    else:
+        return in_logit, logit
+    
+  def weight_init(self):
+      pass
    
 class BigToyNet(nn.Module):
     def __init__(self, K=256):
