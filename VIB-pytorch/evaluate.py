@@ -24,12 +24,12 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
       gold_dicts (list) : A list of mappings
           {'sentence_id': str,
            'units' : a list of ints representing phoneme id for each feature frame,
-           'text' : a list of strs representing phoneme tokens for each feature frame}       
+           'phoneme_text' : a list of strs representing phoneme tokens for each feature frame}       
   '''
   if token_path is None:
     token_to_index = {}
     for gold_dict in gold_dicts:
-      for g_idx, g_token in zip(gold_dict['units'], gold_dict['text']):
+      for g_idx, g_token in zip(gold_dict['units'], gold_dict['phoneme_text']):
         if not g_token in token_to_index:
           token_to_index[g_token] = g_idx
   else:
@@ -45,7 +45,7 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
   confusion_mat = np.zeros((n_gold_tokens, n_pred_tokens))
   for pred_dict, gold_dict in zip(pred_dicts, gold_dicts):
     gold_units = gold_dict['units'][::ds_rate]
-    gold_tokens = gold_dict['text'][::ds_rate]
+    gold_tokens = gold_dict['phoneme_text'][::ds_rate]
     for p_idx, g_idx, g_token in zip(pred_dict['units'], gold_units, gold_tokens):
       confusion_dict[g_token][p_idx] += 1
       confusion_mat[g_idx][p_idx] += 1

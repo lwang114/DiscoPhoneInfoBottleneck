@@ -110,7 +110,7 @@ class BLSTM(nn.Module):
     logit = self.decode(encoding)
 
     if num_sample == 1 : pass
-    elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+    elif num_sample > 1 : logit = torch.log(F.softmax(logit, dim=2).mean(0))
 
     return (mu, std), logit
     
@@ -145,7 +145,7 @@ class GumbelBLSTM(nn.Module):
     self.bottleneck = nn.Linear(2*embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
 
-  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
     ds_ratio = self.ds_ratio
     device = x.device
     if x.dim() < 3:
@@ -162,8 +162,8 @@ class GumbelBLSTM(nn.Module):
       h0 = h0.cuda()
       c0 = c0.cuda()
        
-    x, _ = self.rnn(x, (h0, c0))
-    x = self.bottleneck(x)
+    embed, _ = self.rnn(x, (h0, c0))
+    x = self.bottleneck(embed)
     
     if not masks is None:
       x = x * masks.unsqueeze(2)
@@ -176,13 +176,15 @@ class GumbelBLSTM(nn.Module):
     else:
         encoding = encoding[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
     logit = self.decode(encoding)
-    logit = logit.sum(dim=-2)
 
     if num_sample == 1 : pass
-    elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+    elif num_sample > 1 : logit = torch.log(F.softmax(logit, dim=2).mean(0))
 
-    if return_encoding:
-        return in_logit, logit, encoding
+    if return_feat:
+        if return_feat == 'bottleneck':
+            return in_logit, logit, encoding
+        elif return_feat == 'rnn':
+            return in_logit, logit, embed
     else:
         return in_logit, logit
     
@@ -242,7 +244,6 @@ class ExactDiscreteBLSTM(nn.Module):
 
         in_logit = x.sum(dim=1)
         logit = torch.matmul(F.softmax(x, dim=-1), F.log_softmax(self.decode.weight.t(), dim=-1))
-        logit = logit.sum(dim=-2)
         return in_logit, logit
     
     def weight_init(self):
@@ -260,7 +261,7 @@ class GumbelPyramidalBLSTM(nn.Module):
     self.bottleneck = nn.Linear(2*embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
     
-  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
     if x.dim() < 3:
       x = x.unsqueeze(0)
     elif x.dim() > 3:
@@ -281,21 +282,23 @@ class GumbelPyramidalBLSTM(nn.Module):
     x, _ = self.rnn2(x, (h0, c0))
     L = L // 2
     x = x[:, :2*L].contiguous().view(B, L, -1)
-    x, _ = self.rnn3(x, (h0, c0))
-    x = self.bottleneck(x)
+    embed, _ = self.rnn3(x, (h0, c0))
+    x = self.bottleneck(embed)
     # if not masks is None:
     #   x = x * masks[:, ::4].unsqueeze(2)
 
     in_logit = x.sum(dim=1)
     encoding = self.reparametrize_n(x,num_sample,temp)
     logit = self.decode(encoding)
-    logit = logit.sum(dim=-2)
 
     if num_sample == 1 : pass
     elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
 
-    if return_encoding:
-      return in_logit, logit, encoding
+    if return_feat:
+      if return_feat == 'bottleneck':
+          return in_logit, logit, encoding
+      elif return_feat == 'rnn':
+          return in_logit, logit, embed
     else:
       return in_logit, logit
 
@@ -414,7 +417,7 @@ class GumbelMarkovBLSTM(nn.Module):
       
     return output, logits
 
-  def forward(self, x, num_sample=1, masks=None, temp=1., return_encoding=False):
+  def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
     if x.dim() < 3:
       x = x.unsqueeze(0)
     elif x.dim() > 3:
@@ -426,7 +429,7 @@ class GumbelMarkovBLSTM(nn.Module):
     h0 = torch.zeros((2 * self.n_layers, B, self.K)).to(x.device)
     c0 = torch.zeros((2 * self.n_layers, B, self.K)).to(x.device)
     z0 = torch.zeros((B, 49)).to(x.device)
-    x, _ = self.rnn(x, (h0, c0))
+    embed, _ = self.rnn(x, (h0, c0))
     
     if not masks is None:
       length = masks.sum(-1)
@@ -434,13 +437,16 @@ class GumbelMarkovBLSTM(nn.Module):
       length = T * torch.ones(B, dtype=torch.int)
     encoding, in_logit = GumbelMarkovBLSTM._forward_bottleneck(
         cell=self.bottleneck, input_=x, length=length, z_0=z0, n=num_sample, temp=temp)
-    logit = self.decode(encoding).sum(dim=-2)
+    logit = self.decode(encoding)
 
     if num_sample != 1:
         logit = torch.log(F.softmax(logit, dim=2).mean(0))
     
-    if return_encoding:
-        return in_logit, logit, encoding
+    if return_feat:
+        if return_feat == 'bottleneck':
+            return in_logit, logit, encoding
+        elif return_feat == 'rnn':
+            return in_logit, logit, embed
     else:
         return in_logit, logit
     

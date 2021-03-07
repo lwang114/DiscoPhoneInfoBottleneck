@@ -124,7 +124,8 @@ class Solver(object):
                 accuracy = torch.eq(prediction,y).float().mean()
                 
                 if self.num_avg != 0 :
-                    _, avg_soft_logit = self.toynet(x,self.num_avg,masks=masks)
+                    _, avg_soft_logits = self.toynet(x,self.num_avg,masks=masks)
+                    avg_soft_logit = avg_soft_logits.sum(dim=-2)
                     avg_prediction = avg_soft_logit.max(1)[1]
                     avg_accuracy = torch.eq(avg_prediction,y).float().mean()
                 else : avg_accuracy = Variable(cuda(torch.zeros(accuracy.size()), self.cuda))
@@ -179,6 +180,8 @@ class Solver(object):
         avg_correct = 0
         total_num = 0
         pred_dicts = []
+        pred_scores = {}
+        pred_features = {}
         with torch.no_grad():
             B = 0
             for b_idx, (audios,labels,masks) in enumerate(self.data_loader['test']):
@@ -187,8 +190,10 @@ class Solver(object):
               x = Variable(cuda(audios, self.cuda))
               y = Variable(cuda(labels, self.cuda))
               masks = Variable(cuda(masks, self.cuda))
-              in_logit, logit, encoding = self.toynet_ema.model(x, masks=masks, return_encoding=True)
-
+              in_logit, logits, encoding = self.toynet_ema.model(x, masks=masks, return_feat='bottleneck')
+              _, _, embed = self.toynet_ema.model(x, masks=masks, return_feat='rnn')
+              logit = logits.sum(dim=-2)
+              
               cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
               cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
               class_loss = class_loss + cur_class_loss
@@ -210,9 +215,12 @@ class Solver(object):
                   pred_dicts.append({'sent_id': example_id,
                                      'units': units.cpu().detach().numpy().tolist(),  
                                      'text': text})
-              
+                  pred_scores['{}_{}'.format(example_id, global_idx)] = logits[idx].cpu().detach().numpy()
+                  pred_features['{}_{}'.format(example_id, global_idx)] = embed[idx].cpu().detach().numpy()
+                  
               if self.num_avg != 0 :
-                  _, avg_soft_logit = self.toynet_ema.model(x,self.num_avg)
+                  _, avg_soft_logits = self.toynet_ema.model(x,self.num_avg)
+                  avg_soft_logit = avg_soft_logits.sum(dim=-2)
                   avg_prediction = avg_soft_logit.max(1)[1]
                   avg_correct += torch.eq(avg_prediction,y).float().sum()
               else :
@@ -247,6 +255,9 @@ class Solver(object):
             self.history['iter'] = self.global_iter
             if save_ckpt : self.save_checkpoint('best_acc.tar')
             json.dump(pred_dicts, open(self.ckpt_dir.joinpath('best_predicted_units.json'), 'w'), indent=2)
+
+            np.savez(self.ckpt_dir.joinpath('best_bottleneck_feats.npz'), **pred_scores)
+            np.savez(self.ckpt_dir.joinpath('best_rnn_feats.npz'), **pred_features)
             
         if self.tensorboard :
             self.tf.add_scalars(main_tag='performance/token_prec',

@@ -1,3 +1,4 @@
+
 import json
 import os
 import re
@@ -303,11 +304,11 @@ def create_gold_file(data_path, sample_rate):
     for word_info, word_token in zip(phone_info["data_ids"], phone_info["concepts"]):
       dur_word = word_info[2][-1][2] - word_info[2][0][1]
       end_word = begin_word + dur_word
-      print(begin_word, end_word) # XXX
       nframes = int(dur_word // 10)
       gold_dict = {"sentence_id": filenames[idx],
                    "units": [-1]*nframes,
-                   "text": [UNK]*nframes,
+                   "phoneme_text": [UNK]*nframes,
+                   "word_text": [word_token]*nframes,
                    "interval": [begin_word, end_word]
       }
       begin_phone = 0
@@ -322,13 +323,17 @@ def create_gold_file(data_path, sample_rate):
         begin_frame = int(begin_phone // 10)
         end_frame = int((begin_phone + dur_phone) // 10)
         if (begin_word + begin_phone + dur_phone) // 10 > durations[idx]:
-          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_phone + dur_phone) // 10, durations[idx]))
+          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_word + begin_phone + dur_phone) // 10, durations[idx]))
           break
 
         for t in range(begin_frame, end_frame):
           gold_dict["units"][t] = phone_to_index[token]
-          gold_dict["text"][t] = token
+          gold_dict["phoneme_text"][t] = token
         begin_phone += dur_phone
+      if end_frame != nframes:
+          gold_dict['phoneme_text'] = gold_dict['phoneme_text'][:end_frame]
+          gold_dict['word_text'] = gold_dict['word_text'][:end_frame]
+          print('sentence_id, end_frame, nframes: ', filenames[idx], end_frame, nframes)
       gold_dicts.append(gold_dict)
       begin_word += dur_word
       
@@ -347,4 +352,3 @@ if __name__ == "__main__":
   dataset = Dataset(data_path, preproc, "test")
   for k in range(5):
       inputs, outputs, input_masks = dataset[k]
-      print('inputs, outputs, input_masks: ', inputs.size(), outputs, input_masks.sum(dim=-1)) # XXX
