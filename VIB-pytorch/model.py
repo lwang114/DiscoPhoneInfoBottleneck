@@ -72,10 +72,34 @@ class Davenet(nn.Module):
         #     xavier_init(self._modules[m])
         pass
 
-
 class BLSTM(nn.Module):
-  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
+  def __init__(self, embedding_dim=100, n_layers=1, input_size=80):
     super(BLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
+
+  def forward(self, x):
+    if x.dim() < 3:
+        x = x.unsqueeze(0)
+    elif x.dim() > 3:
+        x = x.squeeze(1)
+    x = x.permute(0, 2, 1)
+        
+    B = x.size(0)
+    T = x.size(1)
+    h0 = torch.zeros((2 * self.n_layers, B, self.K))
+    c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    if torch.cuda.is_available():
+      h0 = h0.cuda()
+      c0 = c0.cuda()
+    
+    x, _ = self.rnn(x, (h0, c0))
+    return x
+ 
+class GaussianBLSTM(nn.Module):
+  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80):
+    super(GaussianBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
