@@ -104,6 +104,7 @@ class PredictionNetwork(nn.Module):
             c = c.permute(0, 2, 1)
 
         for k in range(len(self.predictors)):
+            print(self.predictors[k].weight.device, c.device) # XXX
             locC = self.predictors[k](c)
             if isinstance(locC, tuple):
                 locC = locC[0]

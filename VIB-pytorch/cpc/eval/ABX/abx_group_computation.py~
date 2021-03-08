@@ -5,8 +5,7 @@
 import torch
 import math
 import pyximport
-import numpy
-pyximport.install(setup_args={"include_dirs":numpy.get_include()})
+pyximport.install()
 from . import dtw
 import progressbar
 

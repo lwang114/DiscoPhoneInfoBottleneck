@@ -7,8 +7,8 @@ import sys
 import torch
 import json
 from pathlib import Path
-import .ABX.abx_group_computation as abx_g
-import .ABX.abx_iterators as abx_it
+from .ABX import abx_group_computation as abx_g
+from .ABX import abx_iterators as abx_it
 from cpc.dataset import findAllSeqs
 from cpc.feature_loader import buildFeature, FeatureModule, loadModel
 

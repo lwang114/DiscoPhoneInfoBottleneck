@@ -31,7 +31,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CPC Pretraining')
     parser.add_argument('--epoch', default = 200, type=int, help='epoch size')
     parser.add_argument('--lr', default = 1e-4, type=float, help='learning rate')
-    parser.add_argument('--beta', default = 1e-3, type=float, help='beta')
     parser.add_argument('--K', default = 256, type=int, help='dimension of encoding Z')
     parser.add_argument('--seed', default = 1, type=int, help='random seed')
     parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
@@ -44,7 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--load_ckpt',default='', type=str, help='checkpoint name')
     parser.add_argument('--cuda',default=True, type=str2bool, help='enable cuda')
     parser.add_argument('--mode',default='train', type=str, help='train or test')
-    parser.add_argument('--n_predicts', default=8, help='number of prediction samples for CPC')
+    parser.add_argument('--n_predicts', type=int, default=8, help='number of prediction samples for CPC')
     parser.add_argument('--tensorboard',action='store_true', help='enable tensorboard')
     args = parser.parse_args()
 
