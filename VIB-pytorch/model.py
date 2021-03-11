@@ -79,7 +79,7 @@ class BLSTM(nn.Module):
     self.n_layers = n_layers
     self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
 
-  def forward(self, x):
+  def forward(self, x, masks=None):
     if x.dim() < 3:
         x = x.unsqueeze(0)
     elif x.dim() > 3:
@@ -95,6 +95,8 @@ class BLSTM(nn.Module):
       c0 = c0.cuda()
     
     x, _ = self.rnn(x, (h0, c0))
+    if not masks is None:
+        x = x * masks.unsqueeze(2)
     return x
  
 class GaussianBLSTM(nn.Module):

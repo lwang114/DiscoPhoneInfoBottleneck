@@ -23,19 +23,27 @@ def plot_tsne(feat_file, label_file,
   durations = []
   labels_all = []
   word_labels_all = []
-  for label_dict in label_dicts:
-    tokens.update(label_dict['phoneme_text'])
-    durations.append(len(label_dict['phoneme_text']))
-    label = label_dict['phoneme_text'][::ds_ratio]
-    word_label = label_dict['word_text'][::ds_ratio]
-    labels_all.extend(label)
-    word_labels_all.extend(word_label)
-  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###']
-    
-  # Load feature files 
   feat_npz = np.load(feat_file)
-  feat_mat_all = np.concatenate([feat_npz[k][:durations[i]] for i, k in\
-                                   enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))], axis=0)
+  feat_mat_all = [feat_npz[k] for i, k in\
+                  enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))]
+  for i, label_dict in enumerate(label_dicts):
+    phone_label = label_dict['phoneme_text']
+    word_label = label_dict['word_text']
+
+    dur = min(feat_mat_all[i].shape[0], len(phone_label))
+    durations.append(dur)
+
+    feat_mat_all[i] = feat_mat_all[i][:dur]
+    phone_label = phone_label[:dur][::ds_ratio]
+    word_label = word_label[:dur][::ds_ratio]
+
+    labels_all.extend(phone_label)
+    word_labels_all.extend(word_label)
+    tokens.update(phone_label)
+  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###']
+  
+  # Load feature files 
+  feat_mat_all = np.concatenate(feat_mat_all)
   
   # Subsample data
   feat_mat = []
@@ -62,7 +70,6 @@ def plot_tsne(feat_file, label_file,
   df.to_csv(out_prefix+'.csv')
   
   # Plot and annotate word labels and phoneme labels
-  markers = {token:'$'+token.replace('^', '-')+'$' for token in tokens}
   fig, ax = plt.subplots(figsize=(20, 20))
   sns.scatterplot(data=df, x='t-SNE dim0', y='t-SNE dim1',
                   hue='phonemes', style='phonemes')

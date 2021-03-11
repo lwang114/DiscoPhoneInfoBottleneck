@@ -174,7 +174,8 @@ class CPCUnsupervisedCriterion(BaseCriterion):
         """
         :param encodedData: FloatTensor of size (batchSize, nNegativeExt, dimEncoded), features within the current window
         :param windowSize: int,
-        :return outputs: list of FloatTensors of size (batchSize, nPredicts, negativeSamplingExt+1, windowSize, dimEncoded), the concatenated features of both positive and negative samples 
+        :return outputs: list of FloatTensors of size (batchSize, nPredicts, negativeSamplingExt+1, windowSize, dimEncoded), 
+                         the concatenated features of both positive and negative samples 
         """
         batchSize, nNegativeExt, dimEncoded = encodedData.size()
         outputs = []
@@ -203,7 +204,7 @@ class CPCUnsupervisedCriterion(BaseCriterion):
         extIdx = seqIdx + batchIdx * nNegativeExt
         negExt = negExt[extIdx].view(batchSize, self.negativeSamplingExt,
                                      windowSize, dimEncoded)
-        
+
         labelLoss = torch.zeros((batchSize * windowSize),
                                 dtype=torch.long,
                                 device=encodedData.device)
