@@ -2,7 +2,8 @@ import torch, os
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import MNIST
-from datasets.mscoco2k_segment import Dataset, Preprocessor
+from datasets.mscoco2k_segment import MSCOCO2kSegmentDataset, MSCOCO2kSegmentPreprocessor
+from datasets.mscoco2k_segment_image import MSCOCO2kSegmentImageDataset, MSCOCO2kSegmentImagePreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -22,12 +23,19 @@ def return_data(args):
         dset = MNIST
         train_data = dset(**train_kwargs)
         test_data = dset(**test_kwargs)    
-    elif 'MSCOCO2K' in name :
-        preprocessor = Preprocessor(dset_dir, 80, level='word')
-        train_data = Dataset(dset_dir,
+    elif 'MSCOCO2K' == name :
+        preprocessor = MSCOCO2kSegmentPreprocessor(dset_dir, 80, level='word')
+        train_data = MSCOCO2kSegmentDataset(dset_dir,
                              preprocessor, 'train')
-        test_data = Dataset(dset_dir,
+        test_data = MSCOCO2kSegmentDataset(dset_dir,
                             preprocessor, 'test')
+    elif 'MSCOCO2K_SEGMENT_IMAGE' in name :
+        preprocessor = MSCOCO2kSegmentImagePreprocessor(dset_dir, 80, level='word')
+        train_data = MSCOCO2kSegmentImageDataset(dset_dir,
+                             preprocessor, 'train')
+        test_data = MSCOCO2kSegmentImageDataset(dset_dir,
+                            preprocessor, 'test')
+
     else : raise UnknownDatasetError()
 
 

@@ -25,7 +25,7 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
-class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
+class MSCOCO2kSegmentImageDataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path,
       preprocessor, split,
@@ -78,7 +78,8 @@ class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
     if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
       create_gold_file(data_path, sample_rate) 
     self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
-      
+    self.image_feat = np.load(os.path.join(data_path, f"feats/mscoco2k_res34_embed512dim_{split}.npz"))
+
   def sample_sizes(self):
     """
     Returns a list of tuples containing the input size
@@ -95,18 +96,24 @@ class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
           inputs = self.transforms(audio[:, begin:end]).squeeze(0)
       except:
           inputs = self.transforms(audio)[:, :, int(begin // 10):int(end // 10)].squeeze(0)
+      
+      image_idx, feat_idx = index // 5, index % 5
+      image_id = f'arr_{image_idx}'
+      image_feat = self.image_feats[image_id][feat_idx] 
+      image_inputs = torch.FloatTensor(image_feat)
+
       nframes = inputs.size(-1)
       input_mask = torch.zeros(self.max_feat_len)
       input_mask[:nframes] = 1.
       inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
       outputs = self.preprocessor.to_index(text).squeeze(0)
       
-      return inputs, outputs, input_mask
+      return inputs, image_inputs, outputs, input_mask
 
   def __len__(self):
       return len(self.dataset)
 
-class MSCOCO2kSegmentPreprocessor:
+class MSCOCO2kSegmentImagePreprocessor:
   """
   A preprocessor for the MSCOCO 2k dataset.
   Args:
