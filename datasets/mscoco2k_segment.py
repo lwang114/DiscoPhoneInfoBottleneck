@@ -1,3 +1,4 @@
+
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import collections
 import numpy as np
 
 UNK = '###UNK###'
+NULL = 'NONE'
 def log_normalize(x):
     x.add_(1e-6).log_()
     mean = x.mean()
@@ -23,7 +25,7 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
-class Dataset(torch.utils.data.Dataset):
+class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path,
       preprocessor, split,
@@ -33,16 +35,17 @@ class Dataset(torch.utils.data.Dataset):
         "test": ["val"], # Prefix of the test metainfo 
       },
       augment=True,
-      sample_rate = 16000
+      sample_rate = 16000,
   ):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 256
+    self.max_feat_len = 64
     
     data = []
     for sp in self.splits[split]:
-      data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))    
+      data.extend(load_data_split(data_path, sp, preprocessor.wordsep, self.sample_rate))
+    
     self.preprocessor = preprocessor
     
     # Set up transforms
@@ -70,12 +73,11 @@ class Dataset(torch.utils.data.Dataset):
     text = [example['text'] for example in data]
     duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
     interval = [example['interval'] for example in data]
-    self.dataset = list(zip(audio, text, duration, interval))
-    
+    self.dataset = list(zip(audio, text, duration, interval))    
     # Create gold unit file
-    if not os.path.exists(os.path.join(data_path, "gold_units.json")):
+    if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
       create_gold_file(data_path, sample_rate) 
-    self.gold_dicts = json.load(os.path.join(data_path, "gold_units.json"))
+    self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
       
   def sample_sizes(self):
     """
@@ -85,7 +87,7 @@ class Dataset(torch.utils.data.Dataset):
     return [((duration, 1), len(text)) for _, text, duration in self.dataset]
 
   def __getitem__(self, index):
-      audio_file, text, _, interval = self.dataset[index]
+      audio_file, text, dur, interval = self.dataset[index]
       begin = int(interval[0] * (self.sample_rate // 1000))
       end = int(interval[1] * (self.sample_rate // 1000))
       audio, _ = torchaudio.load(audio_file)
@@ -104,7 +106,7 @@ class Dataset(torch.utils.data.Dataset):
   def __len__(self):
       return len(self.dataset)
 
-class Preprocessor:
+class MSCOCO2kSegmentPreprocessor:
   """
   A preprocessor for the MSCOCO 2k dataset.
   Args:
@@ -131,7 +133,7 @@ class Preprocessor:
     prepend_wordsep=False,
     sample_rate = 16000,
     supervised = True,
-    level = 'phone'
+    level = 'word'
   ):
     self.wordsep = ' '
     self._prepend_wordsep = prepend_wordsep
@@ -257,11 +259,16 @@ def load_data_split(data_path, split, wordsep, sample_rate):
 
 def create_gold_file(data_path, sample_rate):
   """
-  Returns:
-      gold_dicts : a list of mappings
+  Create the following files:
+      gold_units.json : contains gold_dicts, a list of mappings of
           {"sentence_id" : str,
            "units" : a list of ints representing phoneme id for each feature frame,
-           "text" : a list of strs representing phoneme tokens for each feature frame}       
+           "text" : a list of strs representing phoneme tokens for each feature frame}
+     abx_triplets.item : contains ABX triplets in the format
+                         line 0 : whatever (not read)
+                         line > 0: #file_ID onset offset #phone prev-phone next-phone speaker
+                         onset : begining of the triplet (in s)
+                         offset : end of the triplet (in s)
   """
   wav_scp_file = os.path.join(data_path, "mscoco2k_wav.scp")
   split_file = os.path.join(data_path, "mscoco2k_retrieval_split.txt")
@@ -270,7 +277,7 @@ def create_gold_file(data_path, sample_rate):
   phone_info_dict = json.load(open(os.path.join(data_path, "mscoco2k_phone_info.json"), "r"))
   phone_to_index = {}
   gold_dicts = []
-
+  triplets = ['#file_ID onset offset #phone prev-phone next-phone speaker']
   # Extract audio file names as sentence ids
   with open(wav_scp_file, 'r') as wav_scp_f:
     filenames = [l.split()[-1] for idx, l in enumerate(wav_scp_f)]
@@ -295,6 +302,7 @@ def create_gold_file(data_path, sample_rate):
 
   # Extract phone units
   phone_to_word_counts = collections.defaultdict(dict)
+  global_idx = 0
   for idx, (_, phone_info) in enumerate(sorted(phone_info_dict.items(), key=lambda x:int(x[0].split("_")[-1]))):
     if not idx in select_idxs:
       continue
@@ -306,28 +314,38 @@ def create_gold_file(data_path, sample_rate):
       nframes = int(dur_word // 10)
       gold_dict = {"sentence_id": filenames[idx],
                    "units": [-1]*nframes,
-                   "text": [UNK]*nframes,
+                   "phoneme_text": [UNK]*nframes,
+                   "word_text": [word_token]*nframes,
                    "interval": [begin_word, end_word]
       }
       begin_phone = 0
-      for phone_token in word_info[2]: 
+      prefix = filenames[idx].split('/')[-1] 
+      example_id = f"{prefix}_{global_idx}"
+      global_idx += 1
+      for phone_token in word_info[2]:
         if not word_token in phone_to_word_counts[phone_token[0]]:
             phone_to_word_counts[phone_token[0]][word_token] = 1
         else:
             phone_to_word_counts[phone_token[0]][word_token] += 1
         
         token, begin, end = phone_token[0], phone_token[1], phone_token[2]
+        
         dur_phone = end - begin
         begin_frame = int(begin_phone // 10)
         end_frame = int((begin_phone + dur_phone) // 10)
         if (begin_word + begin_phone + dur_phone) // 10 > durations[idx]:
-          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_phone + dur_phone) // 10, durations[idx]))
+          print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_word + begin_phone + dur_phone) // 10, durations[idx]))
           break
+        triplets.append(f'{example_id} {begin_phone/1000.0:.4f} {(begin_phone + dur_phone)/1000.0:.4f} {token} {NULL} {NULL} 0')
 
         for t in range(begin_frame, end_frame):
           gold_dict["units"][t] = phone_to_index[token]
-          gold_dict["text"][t] = token
+          gold_dict["phoneme_text"][t] = token
         begin_phone += dur_phone
+      if end_frame != nframes:
+          gold_dict['phoneme_text'] = gold_dict['phoneme_text'][:end_frame]
+          gold_dict['word_text'] = gold_dict['word_text'][:end_frame]
+          print('sentence_id, end_frame, nframes: ', filenames[idx], end_frame, nframes)
       gold_dicts.append(gold_dict)
       begin_word += dur_word
       
@@ -339,9 +357,13 @@ def create_gold_file(data_path, sample_rate):
 
   with open(os.path.join(data_path, "gold_units.json"), "w") as gold_f:
     json.dump(gold_dicts, gold_f, indent=2) 
+  
+  with open(os.path.join(data_path, "abx_triplets.item"), "w") as triplet_f:
+    triplet_f.write('\n'.join(triplets))
 
 if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
   preproc = Preprocessor(data_path, 80) 
   dataset = Dataset(data_path, preproc, "test")
-  print(dataset[0])
+  for k in range(5):
+      inputs, outputs, input_masks = dataset[k]

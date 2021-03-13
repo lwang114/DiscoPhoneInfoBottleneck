@@ -106,8 +106,9 @@ class Solver(object):
                 x = Variable(cuda(audios, self.cuda))
                 y = Variable(cuda(labels, self.cuda))
                 masks = Variable(cuda(masks, self.cuda))
-                in_logit, logit = self.toynet(x, masks=masks, temp=temp)
-
+                in_logit, logits = self.toynet(x, masks=masks, temp=temp)
+                logit = logits.sum(dim=-2)
+                
                 class_loss = F.cross_entropy(logit,y).div(math.log(2))
                 info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
                 total_loss = class_loss + self.beta*info_loss
@@ -190,8 +191,8 @@ class Solver(object):
               x = Variable(cuda(audios, self.cuda))
               y = Variable(cuda(labels, self.cuda))
               masks = Variable(cuda(masks, self.cuda))
-              in_logit, logits, encoding = self.toynet_ema.model(x, masks=masks, return_feat='bottleneck')
-              _, _, embed = self.toynet_ema.model(x, masks=masks, return_feat='rnn')
+              in_logit, logits, encoding = self.toynet(x, masks=masks, return_feat='bottleneck')
+              _, _, embed = self.toynet(x, masks=masks, return_feat='rnn')
               logit = logits.sum(dim=-2)
               
               cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
@@ -322,8 +323,8 @@ class Solver(object):
             self.global_iter = checkpoint['iter']
             self.history = checkpoint['history']
 
-            self.toynet.load_state_dict(checkpoint['model_states']['net'])
-            self.toynet_ema.model.load_state_dict(checkpoint['model_states']['net_ema'])
+            self.toynet.load_state_dict(checkpoint['model_states']['net'], strict=False)
+            # XXX self.toynet_ema.model.load_state_dict(checkpoint['model_states']['net_ema'], strict=False)
 
             print("=> loaded checkpoint '{} (iter {})'".format(
                 file_path, self.global_iter))

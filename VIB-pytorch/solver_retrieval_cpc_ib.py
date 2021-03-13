@@ -39,15 +39,15 @@ class Solver(object):
 
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
-      self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+      self.net = cuda(GumbelBLSTM(self.K, n_class=512, ds_ratio=self.ds_ratio), self.cuda)
       self.K = 2*self.K
     elif args.model_type == 'pyramidal_blstm':
       self.ds_ratio = 4
-      self.net = cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+      self.net = cuda(GumbelPyramidalBLSTM(self.K, n_class=512, ds_ratio=self.ds_ratio), self.cuda)
       self.net.weight_init()
     elif args.model_type == 'gumbel_markov_blstm':
       self.ds_ratio = 1
-      self.net = cuda(GumbelMarkovBLSTM(self.K), self.cuda)
+      self.net = cuda(GumbelMarkovBLSTM(self.K, n_class=512), self.cuda)
       self.net.weight_init()
 
     self.crossmodal_criterion = cr.TripletLoss()
@@ -110,9 +110,10 @@ class Solver(object):
           # Compute IB loss
           in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat='rnn')
           logit = logits.sum(-2)
-          dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1)))
+          dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
           class_loss, prediction = self.crossmodal_criterion(logit.unsqueeze(1), v.unsqueeze(1),
                                                              dummy_mask, dummy_mask)
+          class_loss = class_loss.squeeze(-1)
           info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
           ib_loss = class_loss + self.beta * info_loss
           
@@ -176,8 +177,9 @@ class Solver(object):
           logit = logits.sum(dim=-2)
 
           # Word prediction
-          dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1)))
-          cur_class_loss, word_prediction = self.crossmodal_criterion(logit, v, dummy_mask, dummy_mask)
+          dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
+          cur_class_loss, word_prediction = self.crossmodal_criterion(logit.unsqueeze(1), v.unsqueeze(1), dummy_mask, dummy_mask)
+          cur_class_loss = cur_class_loss.squeeze(-1)
           cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
           cur_ib_loss = cur_class_loss + self.beta * cur_info_loss
           izy_bound = izy_bound + y.size(0) * math.log(65,2) - cur_class_loss
@@ -241,4 +243,41 @@ class Solver(object):
               
       self.set_mode('train')
 
- 
+  def save_checkpoint(self, filename='best_acc.tar'):
+    model_states = {
+                'net':self.net.state_dict(),
+                }
+    optim_states = {
+                'optim':self.optim.state_dict(),
+                }
+    states = {
+      'iter':self.global_iter,
+      'epoch':self.global_epoch,
+      'history':self.history,
+      'args':self.args,
+      'model_states':model_states,
+      'optim_states':optim_states,
+    }
+
+    file_path = self.ckpt_dir.joinpath(filename)
+    torch.save(states,file_path.open('wb+'))
+    print("=> saved checkpoint '{}' (iter {})".format(file_path,self.global_iter))
+    
+  def load_checkpoint(self, filename='best_acc.tar'):
+    file_path = self.ckpt_dir.joinpath(filename)
+    if file_path.is_file():
+      print("=> loading checkpoint '{}'".format(file_path))
+      checkpoint = torch.load(file_path.open('rb'))
+      self.global_epoch = checkpoint['epoch']
+      self.global_iter = checkpoint['iter']
+      self.history = checkpoint['history']
+
+      self.net.load_state_dict(checkpoint['model_states']['net'])
+      print("=> loaded checkpoint '{} (iter {})'".format(
+                file_path, self.global_iter))
+    else:
+      print("=> no checkpoint found at '{}'".format(file_path))
+
+def load_feature(path):
+  feat = np.load(path)
+  return torch.FloatTensor(feat).unsqueeze(0)

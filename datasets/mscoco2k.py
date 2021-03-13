@@ -27,6 +27,7 @@ class Dataset(torch.utils.data.Dataset):
       sample_rate = 16000
   ):
     self.splits = splits
+    self.data_path = data_path
     self.sample_rate = sample_rate
 
     data = []
@@ -211,7 +212,7 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   Returns:
       examples : a list of mappings of
           { "audio": filename of audio,
-            "text": a list of tokenized words,
+            "text": space-separated str of tokenized words,
             "duration": float}
   """
   # json_file format: a list training file name
@@ -221,7 +222,7 @@ def load_data_split(data_path, split, wordsep, sample_rate):
 
   if split == 'train':
     select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
-    print('Number of training examples={}'.format(len(select_idxs)))  
+    print('Number of training examples={}'.format(len(select_idxs)))
   else:
     select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
@@ -314,3 +315,5 @@ if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k"
   preproc = Preprocessor(data_path, 80) 
   dataset = Dataset(data_path, preproc, "test")
+  print(dataset.dataset[0])
+  print(dataset.preprocessor.to_index(dataset.dataset[0][1]))

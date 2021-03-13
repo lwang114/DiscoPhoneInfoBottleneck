@@ -38,6 +38,7 @@ if __name__ == '__main__':
     parser.add_argument('--env_name', default='main', type=str, help='visdom env name')
     parser.add_argument('--dataset', default='MSCOCO2K', type=str, help='dataset name')
     parser.add_argument('--model_type', choices={'gumbel_blstm', 'pyramidal_blstm', 'gumbel_markov_blstm'}, default='gumbel_blstm')
+    parser.add_argument('--cpc_feature', choices={'rnn', 'bottleneck'}, default='rnn')
     parser.add_argument('--dset_dir', default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k', type=str, help='dataset directory path')
     parser.add_argument('--summary_dir', default='summary', type=str, help='summary directory path')
     parser.add_argument('--ckpt_dir', default='checkpoints', type=str, help='checkpoint directory path')
