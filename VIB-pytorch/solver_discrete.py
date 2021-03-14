@@ -33,24 +33,28 @@ class Solver(object):
         self.global_iter = 0
         self.global_epoch = 0
         self.ds_ratio = args.ds_ratio
+
+        # Dataset
+        self.data_loader = return_data(args)
+        self.n_class = len(self.data_loader['train'].dataset.preprocessor.tokens)
         
         # Network & Optimizer
         if args.model_type == 'gumbel_blstm':
-          self.toynet = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+          self.toynet = cuda(GumbelBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda)
           self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
+          self.toynet_ema = Weight_EMA_Update(cuda(GumbelBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
         elif args.model_type == 'pyramidal_blstm':
           self.ds_ratio = 4
-          self.toynet = cuda(GumbelPyramidalBLSTM(self.K), self.cuda)
+          self.toynet = cuda(GumbelPyramidalBLSTM(self.K, n_class=self.n_class), self.cuda)
           self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda),\
+          self.toynet_ema = Weight_EMA_Update(cuda(GumbelPyramidalBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda),\
                 self.toynet.state_dict(), decay=0.999)
         elif args.model_type == 'gumbel_markov_blstm':
           self.ds_ratio = 1
-          self.toynet = cuda(GumbelMarkovBLSTM(self.K), self.cuda)
+          self.toynet = cuda(GumbelMarkovBLSTM(self.K, n_class=self.n_class), self.cuda)
           self.toynet.weight_init()
-          self.toynet_ema = Weight_EMA_Update(cuda(GumbelMarkovBLSTM(self.K), self.cuda),
+          self.toynet_ema = Weight_EMA_Update(cuda(GumbelMarkovBLSTM(self.K, n_class=self.n_class), self.cuda),
                 self.toynet.state_dict(), decay=0.999)
 
         self.optim = optim.Adam(self.toynet.parameters(),lr=self.lr,betas=(0.5,0.999))
@@ -78,9 +82,6 @@ class Solver(object):
             if not self.summary_dir.exists() : self.summary_dir.mkdir(parents=True,exist_ok=True)
             self.tf = SummaryWriter(log_dir=self.summary_dir)
             self.tf.add_text(tag='argument',text_string=str(args),global_step=self.global_epoch)
-
-        # Dataset
-        self.data_loader = return_data(args)
 
     def set_mode(self,mode='train'):
         if mode == 'train' :
@@ -113,7 +114,7 @@ class Solver(object):
                 info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
                 total_loss = class_loss + self.beta*info_loss
                 
-                izy_bound = math.log(65,2) - class_loss
+                izy_bound = math.log(self.n_class,2) - class_loss
                 izx_bound = info_loss
 
                 self.optim.zero_grad()
@@ -202,7 +203,7 @@ class Solver(object):
               total_loss = total_loss + class_loss + self.beta*info_loss
               total_num += y.size(0)
 
-              izy_bound = izy_bound + y.size(0) * math.log(65,2) - cur_class_loss 
+              izy_bound = izy_bound + y.size(0) * math.log(self.n_class,2) - cur_class_loss 
               izx_bound = izx_bound + cur_info_loss
 
               prediction = F.softmax(logit,dim=1).max(1)[1]
@@ -216,9 +217,10 @@ class Solver(object):
                   pred_dicts.append({'sent_id': example_id,
                                      'units': units.cpu().detach().numpy().tolist(),  
                                      'text': text})
-                  pred_scores['{}_{}'.format(example_id, global_idx)] = logits[idx].cpu().detach().numpy()
-                  pred_features['{}_{}'.format(example_id, global_idx)] = embed[idx].cpu().detach().numpy()
-                  
+                  if global_idx <= 1000:
+                      pred_scores['{}_{}'.format(example_id, global_idx)] = logits[idx].cpu().detach().numpy()
+                      pred_features['{}_{}'.format(example_id, global_idx)] = embed[idx].cpu().detach().numpy()
+              
               if self.num_avg != 0 :
                   _, avg_soft_logits = self.toynet_ema.model(x,self.num_avg)
                   avg_soft_logit = avg_soft_logits.sum(dim=-2)

@@ -47,7 +47,7 @@ class SpeechCOCOSegmentDataset(torch.utils.data.Dataset):
     self.preprocessor = preprocessor
 
     # Set up transforms
-   self.transforms = [
+    self.transforms = [
         torchaudio.transforms.MelSpectrogram(
           sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
           n_mels=preprocessor.num_features,
@@ -71,11 +71,12 @@ class SpeechCOCOSegmentDataset(torch.utils.data.Dataset):
     text = [example['text'] for example in data]
     duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
     interval = [example['interval'] for example in data]
-    self.dataset = list(zip(audio, text, duration, interval))    
+    self.dataset = list(zip(audio, text, duration, interval))
+    print("Number of segments = {}, number of classes = {}".format(len(self.dataset), len(self.preprocessor.tokens)))
     # Create gold unit file
-    if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
+    if not os.path.exists(os.path.join(data_path, "val2014/gold_units.json")) or not os.path.exists(os.path.join(data_path, "val2014/abx_triplets.item")):
       create_gold_file(data_path, sample_rate) 
-    self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
+    self.gold_dicts = json.load(open(os.path.join(data_path, "val2014/gold_units.json")))
   
   def sample_sizes(self):
     """
@@ -97,8 +98,8 @@ class SpeechCOCOSegmentDataset(torch.utils.data.Dataset):
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
     inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
-    outputs = self.preprocessor.to_index(text).squeeze(0)
-    
+    outputs = self.preprocessor.to_index([text]).squeeze(0)
+
     return inputs, outputs, input_mask
 
   def __len__(self):
@@ -178,15 +179,15 @@ def load_data_split(data_path, split, wordsep, sample_rate):
             "interval": [float, float], start and end time of the segment in the audio in ms}
   """ 
   # json_file format: a list training file name
-  segment_file = os.path.join(data_path, f"{split}2014/mscoco_{split}_word_segments.txt") # TODO Check name
+  segment_file = os.path.join(data_path, f"{split}2014/mscoco_{split}_word_segments.txt")
   examples = []
   with open(segment_file, 'r') as segment_f:
-    for line in segment_f:
+    for line in segment_f: # XXX
       parts = line.strip().split()
       audio_id = parts[0]
       word_token = parts[1]
       begin = float(parts[2]) 
-      end = float(parts[2])
+      end = float(parts[3])
       dur = end - begin
       examples.append({"audio": os.path.join(data_path, f"{split}2014/wav/{audio_id}.wav"),
                        "text": word_token,
@@ -194,7 +195,7 @@ def load_data_split(data_path, split, wordsep, sample_rate):
                        "interval": [begin, end]})
   return examples
 
-def create_gold_file(data_path, sample_rate): # TODO
+def create_gold_file(data_path, sample_rate):
   """
   Create the following files:
       gold_units.json : contains gold_dicts, a list of mappings of
@@ -206,4 +207,48 @@ def create_gold_file(data_path, sample_rate): # TODO
                           line > 0: #file_ID onset offset #phone prev-phone next-phone speaker
                           onset : begining of the triplet (in s)
                           offset : end of the triplet (in s)
-  """ 
+  """
+  with open(os.path.join(data_path, "val2014/mscoco_val_phone_info.json"), "r") as f,\
+       open(os.path.join(data_path, "val2014/gold_units.json"), "w") as unit_f,\
+       open(os.path.join(data_path, "val2014/abx_triplets.item"), "w") as abx_f:
+      gold_dicts = []
+      abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+      phone_to_index = {}
+      phone_count = {}
+      global_idx = 0
+      idx = 0
+      for line in f:
+        word_dict = json.loads(line)
+        begin_word = word_dict["begin"]
+        end_word = word_dict["end"]
+        dur_word = end_word - begin_word
+        nframes = int(dur_word // 10)
+        gold_dict = {"sentence_id": word_dict["audio_id"],
+                     "units": [-1]*nframes,
+                     "phoneme_text": [UNK]*nframes,
+                     "word_text": [word_dict["word"]],
+                     "interval": [word_dict["begin"], word_dict["end"]]}
+        example_id = f"{word_dict['audio_id']}_{global_idx}"
+        global_idx += 1
+        for phone_dict in word_dict["phonemes"]:
+          token = phone_dict["value"]
+          if not token in phone_to_index:
+            phone_to_index[token] = len(phone_to_index)
+            phone_count[token] = 1
+          else:
+            phone_count[token] += 1
+          begin = int((phone_dict["begin"] - begin_word) // 10)
+          end = int((phone_dict["end"] - begin_word) // 10)
+          for t in range(begin, end):
+            gold_dict["units"][t] = phone_to_index[token]
+            gold_dict["phoneme_text"][t] = token
+            
+          if phone_count[token] <= 100:
+            abx_f.write(f"{example_id} {begin / 1000.0:.4f} {end / 1000.0:.4f} {token} {NULL} {NULL} 0\n")
+        gold_dicts.append(gold_dict)      
+      json.dump(gold_dicts, unit_f, indent=2)
+
+if __name__ == '__main__':
+    data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/"
+    preproc = SpeechCOCOSegmentPreprocessor(data_path, 80)
+    dataset = SpeechCOCOSegmentDataset(data_path, preproc, "test")

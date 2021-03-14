@@ -26,7 +26,9 @@ def plot_tsne(feat_file, label_file,
   feat_npz = np.load(feat_file)
   feat_mat_all = [feat_npz[k] for i, k in\
                   enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))]
-  for i, label_dict in enumerate(label_dicts):
+  n_examples = len(feat_mat_all)
+  for i in range(n_examples):
+    label_dict = label_dicts[i]
     phone_label = label_dict['phoneme_text']
     word_label = label_dict['word_text']
 
@@ -35,6 +37,8 @@ def plot_tsne(feat_file, label_file,
 
     feat_mat_all[i] = feat_mat_all[i][:dur]
     phone_label = phone_label[:dur][::ds_ratio]
+    if len(word_label) == 1:
+      word_label = word_label*len(phone_label)
     word_label = word_label[:dur][::ds_ratio]
 
     labels_all.extend(phone_label)
@@ -89,7 +93,6 @@ if __name__ == '__main__':
   parser.add_argument('--exp_dir', '-e', type=str, required=True)
   parser.add_argument('--data_dir', '-d', type=str, default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k/')
   parser.add_argument('--ds_ratio', type=int, default=1)
-  parser.add_argument('--level', choices={'phoneme', 'word'}, default='phoneme')
   args = parser.parse_args()
   data_dir = args.data_dir
   exp_dir = args.exp_dir

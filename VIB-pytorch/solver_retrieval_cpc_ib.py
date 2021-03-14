@@ -37,9 +37,10 @@ class Solver(object):
     self.global_iter = 0
     self.global_epoch = 0
 
+    self.codebook = cuda(nn.Linear(65, 512), self.cuda)
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
-      self.net = cuda(GumbelBLSTM(self.K, n_class=512, ds_ratio=self.ds_ratio), self.cuda)
+      self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.K = 2*self.K
     elif args.model_type == 'pyramidal_blstm':
       self.ds_ratio = 4
@@ -58,7 +59,8 @@ class Solver(object):
     self.cpc_criterion = cuda(self.cpc_criterion, self.cuda)
 
     trainables = [p for p in self.net.parameters()]
-    trainables += [p for p in self.cpc_criterion.parameters()]        
+    trainables += [p for p in self.cpc_criterion.parameters()]
+    trainables += [p for p in self.codebook.parameters()]
     
     self.optim = optim.Adam(trainables,
                             lr=self.lr,betas=(0.5,0.999))
@@ -110,8 +112,9 @@ class Solver(object):
           # Compute IB loss
           in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat='rnn')
           logit = logits.sum(-2)
+          a = self.codebook(F.softmax(logit, dim=-1))
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
-          class_loss, prediction = self.crossmodal_criterion(logit.unsqueeze(1), v.unsqueeze(1),
+          class_loss, prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1),
                                                              dummy_mask, dummy_mask)
           class_loss = class_loss.squeeze(-1)
           info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
@@ -128,7 +131,7 @@ class Solver(object):
           
           cpc_acc = cpc_acc.mean(0).cpu().numpy()
 
-          loss = ib_loss + cpc_loss
+          loss = ib_loss # XXX + cpc_loss
           total_loss += loss.cpu().detach().numpy()
           total_step += audios.size(0)
 
@@ -175,10 +178,11 @@ class Solver(object):
           in_logit, logits, encoding = self.net(x, masks=masks, return_feat='bottleneck')
           _, _, c_feature = self.net(x, masks=masks, return_feat='rnn')
           logit = logits.sum(dim=-2)
+          a = self.codebook(F.softmax(logit, dim=-1))
 
           # Word prediction
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
-          cur_class_loss, word_prediction = self.crossmodal_criterion(logit.unsqueeze(1), v.unsqueeze(1), dummy_mask, dummy_mask)
+          cur_class_loss, word_prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1), dummy_mask, dummy_mask)
           cur_class_loss = cur_class_loss.squeeze(-1)
           cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
           cur_ib_loss = cur_class_loss + self.beta * cur_info_loss

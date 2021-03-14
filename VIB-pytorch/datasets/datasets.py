@@ -4,6 +4,7 @@ from torchvision import transforms
 from torchvision.datasets import MNIST
 from datasets.mscoco2k_segment import MSCOCO2kSegmentDataset, MSCOCO2kSegmentPreprocessor
 from datasets.mscoco2k_segment_image import MSCOCO2kSegmentImageDataset, MSCOCO2kSegmentImagePreprocessor
+from datasets.speechcoco_segment import SpeechCOCOSegmentDataset, SpeechCOCOSegmentPreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -35,7 +36,12 @@ def return_data(args):
                              preprocessor, 'train')
         test_data = MSCOCO2kSegmentImageDataset(dset_dir,
                             preprocessor, 'test')
-
+    elif 'SPEECHCOCO' in name:
+        preprocessor = SpeechCOCOSegmentPreprocessor(dset_dir, 80)
+        train_data = SpeechCOCOSegmentDataset(dset_dir,
+                                              preprocessor, 'train')
+        test_data = SpeechCOCOSegmentDataset(dset_dir,
+                                              preprocessor, 'test')
     else : raise UnknownDatasetError()
 
 

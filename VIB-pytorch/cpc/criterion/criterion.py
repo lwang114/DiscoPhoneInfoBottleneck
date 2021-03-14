@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 import torch
 import torch.nn as nn
+import numpy as np
 from .seq_alignment import collapseLabelChain
 from .custom_layers import EqualizedLinear, EqualizedConv1d
 
@@ -365,12 +366,12 @@ class CTCPhoneCriterion(BaseCriterion):
         return loss, avgPER * torch.ones(1, 1, device=loss.device)
 
 class TripletLoss(nn.Module):
-  def __init__(self, config):
+  def __init__(self, simtype='mean_max'):
     super(TripletLoss, self).__init__()
-    self.simtype = config.get('simtype', 'mean_max')
+    self.simtype = simtype
 
   def forward(self, text_outputs, image_outputs,        
-              text_mask, image_mask,
+              text_masks, image_masks,
               margin=1.):
     '''
     :param text_outputs: FloatTensor of size (batch size, max num. of tokens, text embed dim)
@@ -380,8 +381,8 @@ class TripletLoss(nn.Module):
     B, N, _ = text_outputs.size()
     L = image_outputs.size(1)
     loss = torch.zeros(1, device=image_outputs.device, requires_grad=True)
-    ntokens = text_mask.sum(1).to(torch.int)
-    nregions = image_mask.sum(1).to(torch.int)
+    ntokens = text_masks.sum(1).long()
+    nregions = image_masks.sum(1).long()
     
     if B == 1:
       return loss
@@ -438,17 +439,16 @@ class TripletLoss(nn.Module):
 
   def retrieve(self, text_outputs, image_outputs, text_masks, image_masks, k=10):
     n = len(text_outputs)
-    nF = text_masks.sum(-1)
-    nR = image_masks.sum(-1) 
-
+    nF = text_masks.sum(-1).long()
+    nR = image_masks.sum(-1).long()
+    
     S = torch.zeros((n, n), dtype=torch.float, requires_grad=False)
     for s_idx in range(n):
       for v_idx in range(n):
         S[s_idx, v_idx] = -self.matchmap_similarity(
                             self.compute_matchmap(text_outputs[s_idx][:nF[s_idx]],
                                                   image_outputs[v_idx][:nR[v_idx]])
-                            ).to(device)
-
+                            )
     _, I2S_idxs = S.topk(k, 0)
     _, S2I_idxs = S.topk(k, 1)
     return I2S_idxs.t(), S2I_idxs 

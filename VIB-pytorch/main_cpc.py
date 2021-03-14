@@ -43,8 +43,8 @@ if __name__ == '__main__':
     parser.add_argument('--load_ckpt',default='', type=str, help='checkpoint name')
     parser.add_argument('--cuda',default=True, type=str2bool, help='enable cuda')
     parser.add_argument('--mode',default='train', type=str, help='train or test')
-    parser.add_argument('--n_predicts', type=int, default=2, help='number of prediction samples for CPC')
-    parser.add_argument('--n_negatives', type=int, default=2, help='number of prediction samples for CPC')
+    parser.add_argument('--n_predicts', type=int, default=12, help='number of prediction samples for CPC')
+    parser.add_argument('--n_negatives', type=int, default=128, help='number of prediction samples for CPC')
     parser.add_argument('--tensorboard', action='store_true', help='enable tensorboard')
     args = parser.parse_args()
 

@@ -40,7 +40,7 @@ class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 128
+    self.max_feat_len = 64
     
     data = []
     for sp in self.splits[split]:

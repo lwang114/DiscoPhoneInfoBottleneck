@@ -40,7 +40,7 @@ class MSCOCO2kSegmentImageDataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 128
+    self.max_feat_len = 64
     
     data = []
     for sp in self.splits[split]:
@@ -73,12 +73,14 @@ class MSCOCO2kSegmentImageDataset(torch.utils.data.Dataset):
     text = [example['text'] for example in data]
     duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
     interval = [example['interval'] for example in data]
-    self.dataset = list(zip(audio, text, duration, interval))    
+    image_ids = [example['image_id'] for example in data]
+    feat_idxs = [example['feat_idx'] for example in data]
+    self.dataset = list(zip(audio, text, duration, interval, image_ids, feat_idxs))    
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
       create_gold_file(data_path, sample_rate) 
     self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
-    self.image_feat = np.load(os.path.join(data_path, f"feats/mscoco2k_res34_embed512dim_{split}.npz"))
+    self.image_feats = np.load(os.path.join(data_path, f"feats/mscoco2k_res34_embed512dim.npz"))
 
   def sample_sizes(self):
     """
@@ -88,7 +90,7 @@ class MSCOCO2kSegmentImageDataset(torch.utils.data.Dataset):
     return [((duration, 1), len(text)) for _, text, duration in self.dataset]
 
   def __getitem__(self, index):
-      audio_file, text, dur, interval = self.dataset[index]
+      audio_file, text, dur, interval, image_id, feat_idx = self.dataset[index]
       begin = int(interval[0] * (self.sample_rate // 1000))
       end = int(interval[1] * (self.sample_rate // 1000))
       audio, _ = torchaudio.load(audio_file)
@@ -97,8 +99,6 @@ class MSCOCO2kSegmentImageDataset(torch.utils.data.Dataset):
       except:
           inputs = self.transforms(audio)[:, :, int(begin // 10):int(end // 10)].squeeze(0)
       
-      image_idx, feat_idx = index // 5, index % 5
-      image_id = f'arr_{image_idx}'
       image_feat = self.image_feats[image_id][feat_idx] 
       image_inputs = torch.FloatTensor(image_feat)
 
@@ -235,10 +235,10 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   examples = []
@@ -259,7 +259,9 @@ def load_data_split(data_path, split, wordsep, sample_rate):
               example = {'audio': filenames[idx],
                          'text': word_token,
                          'duration': dur_word,
-                         'interval': [begin_word, end_word]}
+                         'interval': [begin_word, end_word],
+                         'image_id': f'arr_{idx}',
+                         'feat_idx': w_idx}
               examples.append(example)
               begin_word += dur_word
   return examples

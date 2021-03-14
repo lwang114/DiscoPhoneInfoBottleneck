@@ -13,7 +13,7 @@ from datasets.datasets import return_data
 from utils import cuda
 import cpc.criterion as cr
 import cpc.eval as ev
-from model import BLSTM
+from model import BLSTM, GumbelBLSTM
 from pathlib import Path
 import os
 import json
@@ -37,7 +37,11 @@ class Solver(object):
       if args.model_type == 'blstm':
         self.encoder = cuda(BLSTM(self.K), self.cuda)
         self.K = 2*self.K
-        
+      if args.model_type == 'gumbel_blstm':
+        self.encoder = cuda(GumbelBLSTM(self.K), self.cuda)
+        self.K = 49
+
+      self.model_type = args.model_type
       self.criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
                                                    dimOutputAR=self.K,
                                                    dimOutputEncoder=80,
@@ -77,6 +81,9 @@ class Solver(object):
   
   def train(self):
       self.set_mode('train')
+      temp_min = 0.1
+      anneal_rate = 3e-6
+      temp = 1.
       
       total_loss = 0.
       total_step = 0
@@ -89,7 +96,10 @@ class Solver(object):
           x = Variable(cuda(audios, self.cuda))
           masks = Variable(cuda(masks, self.cuda))
           spk_labels = torch.zeros((x.size(0),), dtype=torch.int, device=x.device)
-          c_feature = self.encoder(x, masks)
+          if self.model_type == 'blstm':
+            c_feature = self.encoder(x, masks=masks)
+          else:
+            _, _, c_feature = self.encoder(x, masks=masks, return_feat='bottleneck')
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels)
           loss = loss.sum()
           acc = acc.mean(0).cpu().numpy()
@@ -101,10 +111,14 @@ class Solver(object):
           self.optim.step()
 
           if self.global_iter % 100 == 0:
+            temp = np.maximum(temp * np.exp(-anneal_rate * idx), temp_min)
             print(f'i:{self.global_iter:d} avg loss (total loss):{total_loss / total_step:.2f} ({total_loss:.2f}) acc at step 1:{acc[0]:.4f} acc at step last:{acc[-1]:.4f}')
 
         if (self.global_epoch % 2) == 0 : self.scheduler.step()
-        self.test(compute_abx=True)
+        compute_abx = False
+        if self.global_epoch % 5 == 0:
+          compute_abx = True
+        self.test(compute_abx=compute_abx)
 
           
   def test(self, save_ckpt=True, compute_abx=False):
@@ -127,7 +141,10 @@ class Solver(object):
           masks = Variable(cuda(masks, self.cuda))
 
           spk_labels = torch.zeros((audios.size(0),), dtype=torch.int, device=x.device)
-          c_feature = self.encoder(x, masks)
+          if self.model_type == 'blstm':
+            c_feature = self.encoder(x, masks=masks)
+          else:
+            _, _, c_feature = self.encoder(x, masks=masks, return_feat='bottleneck')
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels) 
           total_loss += loss.sum().cpu().detach().numpy()
           correct += acc.sum(dim=0).mean().item() * x.size(0)
@@ -170,8 +187,9 @@ class Solver(object):
 
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
-                'net':self.encoder.state_dict(),
-                }
+      'net':self.encoder.state_dict(),
+      'criterion':self.criterion.state_dict()
+    }
     optim_states = {
                 'optim':self.optim.state_dict(),
                 }
@@ -198,6 +216,7 @@ class Solver(object):
       self.history = checkpoint['history']
 
       self.encoder.load_state_dict(checkpoint['model_states']['net'])
+      self.criterion.load_state_dict(checkpoint['model_states']['criterion'])
       print("=> loaded checkpoint '{} (iter {})'".format(
                 file_path, self.global_iter))
     else:

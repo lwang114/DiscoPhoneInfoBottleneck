@@ -36,7 +36,8 @@ class Solver(object):
       self.n_negatives = args.n_negatives # Number of negative samples per step
       self.global_iter = 0
       self.global_epoch = 0
- 
+      self.cpc_feature = args.cpc_feature
+      
       if args.model_type == 'gumbel_blstm':
         self.ds_ratio = 1
         self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
@@ -51,7 +52,7 @@ class Solver(object):
         self.net.weight_init()
 
       self.cpc_criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
-                                                   dimOutputAR=self.K,
+                                                   dimOutputAR=self.K if self.cpc_feature=='rnn' else 49,
                                                    dimOutputEncoder=80,
                                                    negativeSamplingExt=self.n_negatives)
       self.cpc_criterion = cuda(self.cpc_criterion, self.cuda)
@@ -106,7 +107,7 @@ class Solver(object):
           masks = Variable(cuda(masks, self.cuda))
 
           # Compute IB loss
-          in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat='rnn')
+          in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat=self.cpc_feature)
           logit = logits.sum(-2)
           class_loss = F.cross_entropy(logit,y).div(math.log(2))
           info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
@@ -169,7 +170,7 @@ class Solver(object):
           masks = Variable(cuda(masks, self.cuda))
 
           in_logit, logits, encoding = self.net(x, masks=masks, return_feat='bottleneck')
-          _, _, c_feature = self.net(x, masks=masks, return_feat='rnn')
+          _, _, c_feature = self.net(x, masks=masks, return_feat=self.cpc_feature)
           logit = logits.sum(dim=-2)
 
           # Word prediction
@@ -188,7 +189,8 @@ class Solver(object):
 
           total_loss += cur_cpc_loss.sum().item() + cur_ib_loss.item()
           total_num += x.size(0)
-          
+
+          _, _, c_feature = self.net(x, masks=masks, return_feat='rnn') # XXX
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             example_id = self.data_loader['test'].dataset.dataset[global_idx][0].split('/')[-1]
@@ -240,8 +242,9 @@ class Solver(object):
 
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
-                'net':self.net.state_dict(),
-                }
+      'net':self.net.state_dict(),
+      'cpc_criterion':self.cpc_criterion.state_dict()
+    }
     optim_states = {
                 'optim':self.optim.state_dict(),
                 }
@@ -268,6 +271,7 @@ class Solver(object):
       self.history = checkpoint['history']
 
       self.net.load_state_dict(checkpoint['model_states']['net'])
+      self.cpc_criterion.load_state_dict(checkpoint['model_states']['cpc_criterion'])
       print("=> loaded checkpoint '{} (iter {})'".format(
                 file_path, self.global_iter))
     else:
