@@ -74,6 +74,7 @@ class MSCOCO2kSegmentDataset(torch.utils.data.Dataset):
     duration = [(example['interval'][1] - example['interval'][0]) // 10 for example in data]
     interval = [example['interval'] for example in data]
     self.dataset = list(zip(audio, text, duration, interval))    
+
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
       create_gold_file(data_path, sample_rate) 
@@ -228,10 +229,10 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   examples = []
@@ -322,7 +323,7 @@ def create_gold_file(data_path, sample_rate):
       prefix = filenames.split('/')[-1] 
       example_id = f"{prefix}_{global_idx}"
       global_idx += 1
-      for phone_token in word_info[2]:
+      for phn_idx, phone_token in enumerate(word_info[2]):
         if not word_token in phone_to_word_counts[phone_token[0]]:
             phone_to_word_counts[phone_token[0]][word_token] = 1
         else:
@@ -336,7 +337,17 @@ def create_gold_file(data_path, sample_rate):
         if (begin_word + begin_phone + dur_phone) // 10 > durations[idx]:
           print('In {}: end frame exceeds duration of audio, {} > {}'.format(filenames[idx], (begin_word + begin_phone + dur_phone) // 10, durations[idx]))
           break
-        triplets.append(f'{example_id} {begin_phone / 1000.0:.4f} {(begin_phone + dur_phone)/ 1000.0:.4f} {token} {NULL} {NULL} 0')
+
+        if phn_idx == 0:
+            prev_token = NULL
+        else:
+            prev_token = word_info[2][phn_idx-1][0]
+
+        if phn_idx == len(word_info[2]) - 1:
+            next_token = NULL
+        else:
+            next_token = word_info[2][phn_idx+1][0]
+        triplets.append(f'{example_id} {begin_phone / 1000.0:.4f} {(begin_phone + dur_phone)/ 1000.0:.4f} {token} {prev_token} {next_token} 0')
 
         for t in range(begin_frame, end_frame):
           gold_dict["units"][t] = phone_to_index[token]
