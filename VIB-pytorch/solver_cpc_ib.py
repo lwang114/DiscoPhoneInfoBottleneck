@@ -73,7 +73,8 @@ class Solver(object):
       # History
       self.history = dict()
       self.history['acc']=0. 
-      self.history['abx_acc']=0.
+      self.history['token_f1']=0.
+      self.history['abx']=0.5
       self.history['total_loss']=0.
       self.history['avg_loss']=0.
       self.history['epoch']=0
@@ -191,7 +192,7 @@ class Solver(object):
           total_loss += cur_cpc_loss.sum().item() + cur_ib_loss.item()
           total_num += x.size(0)
 
-          _, _, c_feature = self.net(x, masks=masks, return_feat='rnn') # XXX
+          _, _, c_feature = self.net(x, masks=masks, return_feat='rnn')
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             example_id = self.data_loader['test'].dataset.dataset[global_idx][0].split('/')[-1]
@@ -215,6 +216,7 @@ class Solver(object):
         self.history['loss'] = avg_loss
         self.history['epoch'] = self.global_epoch
         self.history['iter'] = self.global_iter
+        self.history['token_f1'] = token_f1
         if save_ckpt : self.save_checkpoint('best_acc.tar')
 
       token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
@@ -234,8 +236,8 @@ class Solver(object):
                            distance_mode='cosine',
                            step_feature=160,
                            modes=['within'])
-        # XXX if self.history['abx_acc'] < (1-abx_score).item():
-        #   self.history['abx_acc'] = (1-abx_score).item() 
+        if self.history['abx'] > abx_score.item():
+          self.history['abx'] = abx_score.item() 
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
         
               
