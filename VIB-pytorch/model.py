@@ -5,9 +5,74 @@ import torch.nn.init as init
 from torch.autograd import Variable
 from utils import cuda
 
-import time
-from numbers import Number
+class VQCPCEncoder(nn.Module):
+    def __init__(self, in_channels, channels=256, n_embeddings=0, z_dim=256, c_dim=256):
+        super(VQCPCEncoder, self).__init__()
+        self.conv = nn.Conv1d(in_channels, channels, 4, 2, 1, bias=False)
+        self.encoder = nn.Sequential(
+            nn.LayerNorm(channels),
+            nn.ReLU(True),
+            nn.Linear(channels, channels, bias=False),
+            nn.LayerNorm(channels),
+            nn.ReLU(True),
+            nn.Linear(channels, channels, bias=False),
+            nn.LayerNorm(channels),
+            nn.ReLU(True),
+            nn.Linear(channels, channels, bias=False),
+            nn.LayerNorm(channels),
+            nn.ReLU(True),
+            nn.Linear(channels, channels, bias=False),
+            nn.LayerNorm(channels),
+            nn.ReLU(True),
+            nn.Linear(channels, z_dim),
+        )
+        self.rnn = nn.LSTM(z_dim, c_dim, batch_first=True)
 
+    def encode(self, mel):
+        z = self.conv(mel)
+        z = self.encoder(z.transpose(1, 2))
+        # z, indices = self.codebook.encode(z)
+        c, _ = self.rnn(z)
+        return z, c #, indices
+
+    def forward(self, mels):
+        z = self.conv(mels)
+        z = self.encoder(z.transpose(1, 2))
+        # z, loss, perplexity = self.codebook(z)
+        c, _ = self.rnn(z)
+        return z, c #, loss, perplexity
+
+class GumbelEmbeddingEMA(nn.Module):
+    def __init__(self, n_embeddings, embedding_dim, decay=0.999, epsilon=1e-5):
+        super(GumbelEmbeddingEMA, self).__init__()
+        self.decay = decay
+        self.epsilon = epsilon
+
+        init_bound = 10
+        embedding = torch.Tensor(n_embeddings, embedding_dim)
+        embedding.uniform_(-init_bound, init_bound)
+        self.register_buffer('embedding', embedding)
+        self.register_buffer('ema_count', torch.zeros(n_embeddings))
+        self.register_buffer('ema_weight', self.embedding.clone())
+
+    def forward(self, logit, x):
+        M, D = self.embedding.size()
+        prob = F.softmax(logit, dim=-1)
+        quantized = torch.mm(prob, self.embedding)
+
+        if self.training:
+            # indices = torch.argmin(prob, dim=-1)
+            # encodings = F.one_hot(indices, M).float()
+            encodings = prob.detach()
+            self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
+
+            n = torch.sum(self.ema_count)
+            self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
+            dw = torch.matmul(encodings.t(), x)
+            self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
+            self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
+        return quantized
+            
 class Davenet(nn.Module):
     def __init__(self, embedding_dim=512):
         super(Davenet, self).__init__()

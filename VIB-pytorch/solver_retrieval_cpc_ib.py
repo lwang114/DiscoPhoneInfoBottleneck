@@ -16,7 +16,7 @@ from datasets.datasets import return_data
 from utils import cuda
 import cpc.criterion as cr
 import cpc.eval as ev
-from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM
+from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM, GumbelEmbeddingEMA
 from pathlib import Path
 from evaluate import evaluate
 
@@ -37,7 +37,6 @@ class Solver(object):
     self.global_iter = 0
     self.global_epoch = 0
 
-    self.codebook = cuda(nn.Linear(65, 512), self.cuda)
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
@@ -50,7 +49,13 @@ class Solver(object):
       self.ds_ratio = 1
       self.net = cuda(GumbelMarkovBLSTM(self.K, n_class=512), self.cuda)
       self.net.weight_init()
-
+    elif args.model_type == 'blstm':
+      self.ds_ratio = 1
+      self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+      self.codebook = cuda(nn.Linear(512, 512), self.cuda)
+      self.K = 2*self.K
+    self.codebook = cuda(GumbelEmbeddingEMA(65, 512), self.cuda)
+      
     self.crossmodal_criterion = cr.TripletLoss()
     self.cpc_criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
                                                    dimOutputAR=self.K,
@@ -86,8 +91,12 @@ class Solver(object):
   def set_mode(self,mode='train'):
     if mode == 'train':
       self.net.train()
+      self.cpc_criterion.train()
+      self.codebook.train()
     elif mode == 'eval':
       self.net.eval()
+      self.cpc_criterion.eval()
+      self.codebook.eval()
     else : raise('mode error. It should be either train or eval')
   
   def train(self):
@@ -112,7 +121,7 @@ class Solver(object):
           # Compute IB loss
           in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat='rnn')
           logit = logits.sum(-2)
-          a = self.codebook(F.softmax(logit, dim=-1))
+          a = self.codebook(logit,image_feats)
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
           class_loss, prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1),
                                                              dummy_mask, dummy_mask)
@@ -147,7 +156,7 @@ class Solver(object):
 
         if (self.global_epoch % 2) == 0 : self.scheduler.step()
         compute_abx = False
-        if self.global_epoch % 5 == 0:
+        if self.global_epoch % 100 == 0:
           compute_abx = True
         self.test(compute_abx=compute_abx)
 
@@ -178,7 +187,7 @@ class Solver(object):
           in_logit, logits, encoding = self.net(x, masks=masks, return_feat='bottleneck')
           _, _, c_feature = self.net(x, masks=masks, return_feat='rnn')
           logit = logits.sum(dim=-2)
-          a = self.codebook(F.softmax(logit, dim=-1))
+          a = self.codebook(logit, image_feats)
 
           # Word prediction
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
@@ -226,11 +235,11 @@ class Solver(object):
       token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
       conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
       print('[TEST RESULT]')
-      print('e:{} IZY:{:.2f} IZX:{:.4f}'
-                .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')
+      print('e:{} loss:{:.2f} IZY:{:.2f} IZX:{:.4f}'
+                .format(self.global_epoch, avg_loss, izy_bound.item(), izx_bound.item()), end=' ')
       print('token precision:{:.4f} token recall:{:.4f} token f1:{:.4f} word acc:{:.4f} word err:{:.4f} best word acc:{:.4f}'
                 .format(token_prec, token_recall, token_f1, word_acc.item(), 1-word_acc.item(), self.history['acc']), end=' ')   
-      print('e:{} loss:{:.2f} cpc acc:{:.4f} cpc err:{:.4f}'.format(self.global_epoch, avg_loss, avg_cpc_acc, 1 - avg_cpc_acc))
+      print('cpc acc:{:.4f} cpc err:{:.4f}'.format(avg_cpc_acc, 1 - avg_cpc_acc))
       if compute_abx:
         # Compute ABX score
         path_item_file = os.path.join(self.data_loader['test'].dataset.data_path, 'abx_triplets.item')
