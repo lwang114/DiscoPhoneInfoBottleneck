@@ -25,6 +25,25 @@ def main(args):
 
   if args.mode == 'train' : net.train()
   elif args.mode == 'test' : net.test(save_ckpt=False, compute_abx=True)
+  elif args.mode == 'train_sweep':
+    args.beta = 1.
+    args.epoch = 50
+    df_results = {'Model': [],
+                  'Loss': [],
+                  r'$\beta$': [],
+                  'Token F1': [],
+                  'ABX': [],
+                  'WER': []}
+    for _ in range(4):
+      net = Solver(args)
+      net.train()
+      df_results['Model'].append(args.model_type)
+      df_results['Loss'].append(args.loss_type)
+      df_results[r'$\beta$'].append(args.beta)
+      df_results['Token F1'].append(net.history['token_f1'])
+      df_results['WER'].append(1.-net.history['acc'])
+      df_results['ABX'].append(net.history['abx'])
+      args.beta /= 10
   else : return 0
 
 if __name__ == '__main__':
@@ -37,6 +56,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
     parser.add_argument('--env_name', default='main', type=str, help='visdom env name')
     parser.add_argument('--dataset', default='MSCOCO2K', type=str, help='dataset name')
+    parser.add_argument('--loss_type', choices={'IB-only', 'IB+CPC', 'IB+CPC+VQ'})
     parser.add_argument('--model_type', choices={'gumbel_blstm', 'pyramidal_blstm', 'gumbel_markov_blstm'}, default='gumbel_blstm')
     parser.add_argument('--cpc_feature', choices={'rnn', 'bottleneck'}, default='rnn')
     parser.add_argument('--dset_dir', default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k', type=str, help='dataset directory path')
@@ -44,9 +64,9 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt_dir', default='checkpoints', type=str, help='checkpoint directory path')
     parser.add_argument('--load_ckpt',default='', type=str, help='checkpoint name')
     parser.add_argument('--cuda',default=True, type=str2bool, help='enable cuda')
-    parser.add_argument('--mode',default='train', type=str, help='train or test')
-    parser.add_argument('--n_predicts', type=int, default=12, help='number of prediction samples for CPC')
-    parser.add_argument('--n_negatives', type=int, default=128, help='number of prediction samples for CPC')
+    parser.add_argument('--mode',default='train', type=str, choices={'train', 'test', 'train_sweep'}, help='train or test')
+    parser.add_argument('--n_predicts', type=int, default=6, help='number of prediction samples for CPC')
+    parser.add_argument('--n_negatives', type=int, default=17, help='number of prediction samples for CPC')
     parser.add_argument('--tensorboard', action='store_true', help='enable tensorboard')
     args = parser.parse_args()
 
