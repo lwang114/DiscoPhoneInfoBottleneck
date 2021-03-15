@@ -229,10 +229,10 @@ def load_data_split(data_path, split, wordsep, sample_rate):
   split_file = os.path.join(data_path, 'mscoco2k_retrieval_split.txt')
 
   if split == 'train':
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)][:20] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if not int(is_test)] # XXX
     print('Number of training examples={}'.format(len(select_idxs)))  
   else:
-    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)][:20] # XXX
+    select_idxs = [idx for idx, is_test in enumerate(open(split_file, 'r')) if int(is_test)] # XXX
     print('Number of test examples={}'.format(len(select_idxs)))  
 
   examples = []

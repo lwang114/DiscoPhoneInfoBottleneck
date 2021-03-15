@@ -16,7 +16,7 @@ from datasets.datasets import return_data
 from utils import cuda
 import cpc.criterion as cr
 import cpc.eval as ev
-from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM, GumbelEmbeddingEMA
+from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM, GumbelEmbeddingEMA, VQEmbeddingEMA
 from pathlib import Path
 from evaluate import evaluate
 
@@ -37,6 +37,7 @@ class Solver(object):
     self.global_iter = 0
     self.global_epoch = 0
 
+    self.codebook = cuda(GumbelEmbeddingEMA(65, 512), self.cuda)
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
@@ -54,8 +55,13 @@ class Solver(object):
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.codebook = cuda(nn.Linear(512, 512), self.cuda)
       self.K = 2*self.K
-    self.codebook = cuda(GumbelEmbeddingEMA(65, 512), self.cuda)
-      
+    elif args.model_type == 'vq_blstm':
+      self.ds_ratio = 1
+      self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+      self.K = 2*self.K
+      self.codebook = cuda(VQEmbeddingEMA(65, 512), self.cuda)
+
+    self.model_type = args.model_type
     self.crossmodal_criterion = cr.TripletLoss()
     self.cpc_criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
                                                    dimOutputAR=self.K,
@@ -121,7 +127,13 @@ class Solver(object):
           # Compute IB loss
           in_logit, logits, c_feature = self.net(x, masks=masks, temp=temp, return_feat='rnn')
           logit = logits.sum(-2)
-          a = self.codebook(logit,image_feats)
+          if self.model_type == 'vq_blstm':
+            a, vq_loss = self.codebook(c_feature.sum(-2))
+          elif self.model_type == 'blstm':
+            a = self.codebook(c_feature.sum(-2))
+          else:
+            a = self.codebook(logit,image_feats)
+            
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
           class_loss, prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1),
                                                              dummy_mask, dummy_mask)
@@ -141,6 +153,9 @@ class Solver(object):
           cpc_acc = cpc_acc.mean(0).cpu().numpy()
 
           loss = ib_loss # XXX + cpc_loss
+          if self.model_type == 'vq_blstm':
+            loss = loss + vq_loss
+          
           total_loss += loss.cpu().detach().numpy()
           total_step += audios.size(0)
 
@@ -187,7 +202,12 @@ class Solver(object):
           in_logit, logits, encoding = self.net(x, masks=masks, return_feat='bottleneck')
           _, _, c_feature = self.net(x, masks=masks, return_feat='rnn')
           logit = logits.sum(dim=-2)
-          a = self.codebook(logit, image_feats)
+          if self.model_type == 'vq_blstm':
+            a, vq_loss = self.codebook(c_feature.sum(-2))
+          elif self.model_type == 'blstm':
+            a = self.codebook(c_feature.sum(-2))
+          else:
+            a = self.codebook(logit, image_feats)
 
           # Word prediction
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))

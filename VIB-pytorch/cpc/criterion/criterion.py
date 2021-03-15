@@ -413,7 +413,7 @@ class TripletLoss(nn.Module):
           self.compute_matchmap(text_outputs[i, :nT],
                                 image_outputs[I_imp_ind, :nRimp])
       )
-      
+
       S2I_simdif = margin + Iimpsim - anchorsim
       if (S2I_simdif.data > 0).all():
         loss = loss + S2I_simdif
@@ -421,7 +421,6 @@ class TripletLoss(nn.Module):
       if (I2S_simdif.data > 0).all():
         loss = loss + I2S_simdif
     loss = loss / B
-
     _, S2I_idxs = self.retrieve(text_outputs, image_outputs,
                                 text_masks, image_masks, k=1)
     return loss, S2I_idxs.squeeze(-1)
@@ -445,7 +444,7 @@ class TripletLoss(nn.Module):
     S = torch.zeros((n, n), dtype=torch.float, requires_grad=False)
     for s_idx in range(n):
       for v_idx in range(n):
-        S[s_idx, v_idx] = -self.matchmap_similarity(
+        S[s_idx, v_idx] = self.matchmap_similarity(
                             self.compute_matchmap(text_outputs[s_idx][:nF[s_idx]],
                                                   image_outputs[v_idx][:nR[v_idx]])
                             )

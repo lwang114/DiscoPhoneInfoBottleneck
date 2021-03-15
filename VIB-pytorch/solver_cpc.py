@@ -13,7 +13,7 @@ from datasets.datasets import return_data
 from utils import cuda
 import cpc.criterion as cr
 import cpc.eval as ev
-from model import BLSTM, GumbelBLSTM
+from model import BLSTM, GumbelBLSTM, VQCPCEncoder
 from pathlib import Path
 import os
 import json
@@ -33,18 +33,24 @@ class Solver(object):
       self.n_negatives = args.n_negatives # Number of negative samples per step
       self.global_iter = 0
       self.global_epoch = 0
- 
+      self.D = 80
+      self.ds_ratio = 1
+      
       if args.model_type == 'blstm':
         self.encoder = cuda(BLSTM(self.K), self.cuda)
         self.K = 2*self.K
       if args.model_type == 'gumbel_blstm':
         self.encoder = cuda(GumbelBLSTM(self.K), self.cuda)
         self.K = 49
-
+      if args.model_type == 'vq_cpc':
+        self.encoder = cuda(VQCPCEncoder(80), self.cuda)
+        self.D = 256
+        self.K = 256
+        self.ds_ratio = 2
       self.model_type = args.model_type
       self.criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
                                                    dimOutputAR=self.K,
-                                                   dimOutputEncoder=80,
+                                                   dimOutputEncoder=self.D,
                                                    negativeSamplingExt=self.n_negatives)
       self.criterion = cuda(self.criterion, self.cuda)
 
@@ -98,8 +104,12 @@ class Solver(object):
           spk_labels = torch.zeros((x.size(0),), dtype=torch.int, device=x.device)
           if self.model_type == 'blstm':
             c_feature = self.encoder(x, masks=masks)
+          elif self.model_type == 'vq_cpc':
+            x, c_feature = self.encoder(x)
+            x = x.permute(0, 2, 1)
           else:
-            _, _, c_feature = self.encoder(x, masks=masks, return_feat='bottleneck')
+            _, _, c_feature = self.encoder(x, masks=masks, return_feat='rnn')
+          
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels)
           loss = loss.sum()
           acc = acc.mean(0).cpu().numpy()
@@ -143,6 +153,9 @@ class Solver(object):
           spk_labels = torch.zeros((audios.size(0),), dtype=torch.int, device=x.device)
           if self.model_type == 'blstm':
             c_feature = self.encoder(x, masks=masks)
+          elif self.model_type == 'vq_cpc':
+            x, c_feature = self.encoder(x)
+            x = x.permute(0, 2, 1)
           else:
             _, _, c_feature = self.encoder(x, masks=masks, return_feat='bottleneck')
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels) 
@@ -176,7 +189,7 @@ class Solver(object):
                            path_item_file,
                            seq_list,
                            distance_mode='cosine',
-                           step_feature=160,
+                           step_feature=160*self.ds_ratio,
                            modes=['within'])
         # XXX if self.history['abx_acc'] < (1-abx_score).item():
         #   self.history['abx_acc'] = (1-abx_score).item() 

@@ -52,9 +52,10 @@ class Solver(object):
         self.net.weight_init()
 
       self.cpc_criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
-                                                   dimOutputAR=self.K if self.cpc_feature=='rnn' else 49,
-                                                   dimOutputEncoder=80,
-                                                   negativeSamplingExt=self.n_negatives)
+                                                       dimOutputAR=self.K if self.cpc_feature=='rnn' else 49,
+                                                       dimOutputEncoder=80,
+                                                       negativeSamplingExt=self.n_negatives,
+                                                       rnnMode=False)
       self.cpc_criterion = cuda(self.cpc_criterion, self.cuda)
 
       trainables = [p for p in self.net.parameters()]

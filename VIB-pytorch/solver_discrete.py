@@ -217,7 +217,7 @@ class Solver(object):
                   pred_dicts.append({'sent_id': example_id,
                                      'units': units.cpu().detach().numpy().tolist(),  
                                      'text': text})
-                  if global_idx <= 1000:
+                  if global_idx < 5000:
                       pred_scores['{}_{}'.format(example_id, global_idx)] = logits[idx].cpu().detach().numpy()
                       pred_features['{}_{}'.format(example_id, global_idx)] = embed[idx].cpu().detach().numpy()
               

@@ -48,6 +48,7 @@ def plot_tsne(feat_file, label_file,
   
   # Load feature files 
   feat_mat_all = np.concatenate(feat_mat_all)
+  print(feat_mat_all.shape, len(labels_all))
   
   # Subsample data
   feat_mat = []
@@ -88,6 +89,107 @@ def plot_tsne(feat_file, label_file,
   plt.savefig(out_prefix+'_word.png')
   plt.close()
 
+
+def plot_word_tsne(feat_file, label_file,
+                   out_prefix='tsne', n_class=10):
+  # Extract word labels
+  label_dicts = json.load(open(label_file))
+  tokens = set()
+  word_labels_all = []
+  feat_npz = np.load(feat_file)
+  feat_mat_all = [feat_npz[k].sum(0, keepdims=True) for i, k in\
+                  enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))]
+  feat_mat_all = np.concatenate(feat_mat_all)
+  n_examples = feat_mat_all.shape[0]
+  print(n_examples, len(label_dicts))
+  for i in range(n_examples):
+    label_dict = label_dicts[i]
+    word_label = label_dict['word_text']
+    word_labels_all.append(word_label[0])
+    tokens.update(word_label)
+  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###']
+  
+  # Subsample data
+  feat_mat = []
+  word_labels = []
+  for y, token in enumerate(tokens):
+    if y >= n_class:
+      break
+    y_indices = [i for i in range(len(word_labels_all)) if word_labels_all[i] == token]
+    y_indices = [y_indices[i] for i in np.random.permutation(len(y_indices))[:200]]
+    feat_mat.append(feat_mat_all[y_indices])
+    word_labels.extend(word_labels_all[i] for i in y_indices)
+  feat_mat = np.concatenate(feat_mat)
+  
+  # Compute t-SNE representation
+  tsne = TSNE(n_components=2)
+  feat_2d_mat = tsne.fit_transform(feat_mat)
+  df = {'t-SNE dim0': feat_2d_mat[:, 0],
+        't-SNE dim1': feat_2d_mat[:, 1],
+        'words': word_labels}
+  df = pd.DataFrame(df)
+  df.to_csv(out_prefix+'.csv')
+  
+  # Plot and annotate word labels
+  fig, ax = plt.subplots(figsize=(20, 20))
+  sns.scatterplot(data=df, x='t-SNE dim0', y='t-SNE dim1',
+                  hue='words', style='words')
+  plt.title('Word level t-SNE plot')
+  plt.savefig(out_prefix+'_avg_word.png')
+  plt.close()
+
+def plot_image_tsne(image_feat_file, label_file,
+              select_idx_file, out_prefix='tsne', n_class=10):
+  with open(select_idx_file, 'r') as f:
+    select_indices = [i for i, line in enumerate(f) if int(line)]
+  
+  # Extract word labels
+  label_dicts = json.load(open(label_file))
+  tokens = set()
+  word_labels_all = []
+  feat_npz = np.load(image_feat_file)
+  feat_mat_all = [feat_npz[k] for i, k in\
+                  enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1]))) if i in select_indices]
+  feat_mat_all = np.concatenate(feat_mat_all)
+  n_examples = feat_mat_all.shape[0]
+  print(n_examples, len(label_dicts))
+  for i in range(n_examples):
+    label_dict = label_dicts[i]
+    word_label = label_dict['word_text']
+    word_labels_all.append(word_label[0])
+    tokens.update(word_label)
+  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###']
+  
+  # Subsample data
+  feat_mat = []
+  word_labels = []
+  for y, token in enumerate(tokens):
+    if y >= n_class:
+      break
+    y_indices = [i for i in range(len(word_labels_all)) if word_labels_all[i] == token]
+    y_indices = [y_indices[i] for i in np.random.permutation(len(y_indices))[:200]]
+    feat_mat.append(feat_mat_all[y_indices])
+    word_labels.extend(word_labels_all[i] for i in y_indices)
+  feat_mat = np.concatenate(feat_mat)
+  
+  # Compute t-SNE representation
+  tsne = TSNE(n_components=2)
+  feat_2d_mat = tsne.fit_transform(feat_mat)
+  df = {'t-SNE dim0': feat_2d_mat[:, 0],
+        't-SNE dim1': feat_2d_mat[:, 1],
+        'words': word_labels}
+  df = pd.DataFrame(df)
+  df.to_csv(out_prefix+'.csv')
+  
+  # Plot and annotate word labels
+  fig, ax = plt.subplots(figsize=(20, 20))
+  sns.scatterplot(data=df, x='t-SNE dim0', y='t-SNE dim1',
+                  hue='words', style='words')
+  plt.title('Word level t-SNE plot')
+  plt.savefig(out_prefix+'_visual_word.png')
+  plt.close()
+
+  
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('--exp_dir', '-e', type=str, required=True)
@@ -102,4 +204,10 @@ if __name__ == '__main__':
   out_prefix = os.path.join(exp_dir, 'tsne')
 
   plot_tsne(feat_file, label_file, out_prefix=out_prefix, ds_ratio=args.ds_ratio)  
-  
+  # plot_image_tsne(f'{data_dir}/feats/mscoco2k_res34_embed512dim_test.npz',
+  #                 label_file,
+  #                 select_idx_file=f'{data_dir}/mscoco2k_retrieval_split.txt',
+  #                 out_prefix=out_prefix)
+  # plot_word_tsne(feat_file,
+  #                label_file,
+  #                out_prefix=out_prefix)
