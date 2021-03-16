@@ -218,8 +218,8 @@ class Solver(object):
       word_acc = word_correct / total_num
       avg_cpc_acc = cpc_correct / total_num
       token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
-      if self.history['acc'] < word_acc:
-        self.history['acc'] = word_acc
+      if self.history['acc'] < word_acc.item():
+        self.history['acc'] = word_acc.item()
         self.history['loss'] = avg_loss
         self.history['epoch'] = self.global_epoch
         self.history['iter'] = self.global_iter
