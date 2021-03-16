@@ -190,23 +190,26 @@ def plot_image_tsne(image_feat_file, label_file,
   plt.close()
 
 def plot_score_vs_compression(in_files, out_path):
-  if not out_path:
+  if not os.path.exists(out_path):
     os.makedirs(out_path)
   for idx, in_file in enumerate(in_files):
     if idx == 0:
       df = pd.read_csv(in_file)
-    else
+    else:
       df = df.append(pd.read_csv(in_file)) 
   fig, ax = plt.subplots(figsize=(8, 6))
-  sns.lineplot(data=df, x=r'$\beta$', y='WER', hue='Loss')
+  sns.lineplot(data=df, x=r'$\beta$', y='WER', hue='Loss', style='Loss', markers=True)
+  plt.xscale('log')
   plt.savefig(os.path.join(out_path, 'wer_vs_beta.png'))
 
   fig, ax = plt.subplots(figsize=(8, 6))
-  sns.lineplot(data=df, x=r'$\beta$', y='Token F1', hue='Loss')
+  sns.lineplot(data=df, x=r'$\beta$', y='Token F1', hue='Loss', style='Loss', markers=True)
+  plt.xscale('log')
   plt.savefig(os.path.join(out_path, 'token_f1_vs_beta.png'))
 
   fig, ax = plt.subplots(figsize=(8, 6))
-  sns.lineplot(data=df, x=r'$\beta$', y='ABX', hue='Loss')
+  sns.lineplot(data=df, x=r'$\beta$', y='ABX', hue='Loss', style='Loss', markers=True)
+  plt.xscale('log')
   plt.savefig(os.path.join(out_path, 'abx_vs_beta.png'))
 
 
@@ -215,7 +218,7 @@ if __name__ == '__main__':
   parser.add_argument('--exp_dir', '-e', type=str, required=True)
   parser.add_argument('--data_dir', '-d', type=str, default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k/')
   parser.add_argument('--ds_ratio', type=int, default=1)
-  parser.add_argument('--task', '-t', type=int)
+  parser.add_argument('--task', '-t', type=int, required=True)
   args = parser.parse_args()
   data_dir = args.data_dir
   exp_dir = args.exp_dir
@@ -236,7 +239,6 @@ if __name__ == '__main__':
                    label_file,
                    out_prefix=out_prefix)
   else:
-    plot_score_vs_compression(['checkpoints/main_cpc_ib_beta1e-3',
-                               'checkpoints/main_ib_only_beta1e-3'],
+    plot_score_vs_compression(['checkpoints/main_ib_cpc_gumbel_blstm_sweep/results.csv',
+                               'checkpoints/main_ib_only_gumbel_blstm_sweep/results.csv'], # 'checkpoints/main_cpc_only_gumbel_blstm_sweep/results.csv'],
                               out_path='checkpoints/word_supervision_results')
-                               )

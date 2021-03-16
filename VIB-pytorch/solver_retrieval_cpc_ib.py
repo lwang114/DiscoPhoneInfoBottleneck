@@ -62,6 +62,7 @@ class Solver(object):
       self.codebook = cuda(VQEmbeddingEMA(65, 512), self.cuda)
 
     self.model_type = args.model_type
+    self.loss_type = args.loss_type
     self.crossmodal_criterion = cr.TripletLoss()
     self.cpc_criterion = cr.CPCUnsupervisedCriterion(nPredicts=self.n_predicts,
                                                    dimOutputAR=self.K,
@@ -85,7 +86,7 @@ class Solver(object):
     # History
     self.history = dict()
     self.history['acc']=0. 
-    self.history['abx_acc']=0.
+    self.history['abx']=1.
     self.history['total_loss']=0.
     self.history['avg_loss']=0.
     self.history['epoch']=0
@@ -152,7 +153,11 @@ class Solver(object):
           
           cpc_acc = cpc_acc.mean(0).cpu().numpy()
 
-          loss = ib_loss # XXX + cpc_loss
+          if self.loss_type == 'IB-only':
+            loss = ib_loss
+          else:
+            loss = ib_loss + cpc_loss
+
           if self.model_type == 'vq_blstm':
             loss = loss + vq_loss
           
@@ -245,8 +250,8 @@ class Solver(object):
       avg_loss = total_loss / total_num
       word_acc = word_correct / total_num
       avg_cpc_acc = cpc_correct / total_num
-      if self.history['acc'] < word_acc:
-        self.history['acc'] = word_acc
+      if self.history['acc'] < word_acc.item():
+        self.history['acc'] = word_acc.item()
         self.history['loss'] = avg_loss
         self.history['epoch'] = self.global_epoch
         self.history['iter'] = self.global_iter
@@ -269,8 +274,9 @@ class Solver(object):
                            distance_mode='cosine',
                            step_feature=160,
                            modes=['within'])
-        # XXX if self.history['abx_acc'] < (1-abx_score).item():
-        #   self.history['abx_acc'] = (1-abx_score).item() 
+        abx_score = abx_score['within']
+        if self.history['abx'] > abx_score:
+          self.history['abx'] = abx_score
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
         
               
