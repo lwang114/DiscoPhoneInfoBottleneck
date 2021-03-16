@@ -26,21 +26,22 @@ class VQCPCEncoder(nn.Module):
             nn.ReLU(True),
             nn.Linear(channels, z_dim),
         )
+        self.codebook = VQEmbeddingEMA(n_embeddings, z_dim)
         self.rnn = nn.LSTM(z_dim, c_dim, batch_first=True)
 
     def encode(self, mel):
         z = self.conv(mel)
         z = self.encoder(z.transpose(1, 2))
-        # z, indices = self.codebook.encode(z)
+        z, indices = self.codebook.encode(z)
         c, _ = self.rnn(z)
-        return z, c #, indices
+        return z, c, indices
 
     def forward(self, mels):
         z = self.conv(mels)
         z = self.encoder(z.transpose(1, 2))
-        # z, loss, perplexity = self.codebook(z)
+        z, loss, perplexity = self.codebook(z)
         c, _ = self.rnn(z)
-        return z, c #, loss, perplexity
+        return z, c, loss, perplexity
 
 class VQEmbeddingEMA(nn.Module):
     def __init__(self, n_embeddings, embedding_dim, commitment_cost=0.25, decay=0.999, epsilon=1e-5):
