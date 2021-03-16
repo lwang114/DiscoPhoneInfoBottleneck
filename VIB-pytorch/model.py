@@ -6,7 +6,7 @@ from torch.autograd import Variable
 from utils import cuda
 
 class VQCPCEncoder(nn.Module):
-    def __init__(self, in_channels, channels=256, n_embeddings=0, z_dim=256, c_dim=256):
+    def __init__(self, in_channels, channels, n_embeddings, z_dim, c_dim):
         super(VQCPCEncoder, self).__init__()
         self.conv = nn.Conv1d(in_channels, channels, 4, 2, 1, bias=False)
         self.encoder = nn.Sequential(
@@ -39,9 +39,9 @@ class VQCPCEncoder(nn.Module):
     def forward(self, mels):
         z = self.conv(mels)
         z = self.encoder(z.transpose(1, 2))
-        z, loss, perplexity = self.codebook(z)
+        z, loss = self.codebook(z)
         c, _ = self.rnn(z)
-        return z, c, loss, perplexity
+        return z, c, loss
 
 class VQEmbeddingEMA(nn.Module):
     def __init__(self, n_embeddings, embedding_dim, commitment_cost=0.25, decay=0.999, epsilon=1e-5):
@@ -79,7 +79,6 @@ class VQEmbeddingEMA(nn.Module):
                                 torch.sum(x_flat ** 2, dim=1, keepdim=True),
                                 x_flat, self.embedding.t(),
                                 alpha=-2.0, beta=1.0)
-
         indices = torch.argmin(distances.float(), dim=-1)
         encodings = F.one_hot(indices, M).float()
         quantized = F.embedding(indices, self.embedding)

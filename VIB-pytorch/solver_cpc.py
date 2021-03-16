@@ -42,8 +42,13 @@ class Solver(object):
       if args.model_type == 'gumbel_blstm':
         self.encoder = cuda(GumbelBLSTM(self.K), self.cuda)
         self.K = 49
-      if args.model_type == 'vq_cpc':
-        self.encoder = cuda(VQCPCEncoder(80), self.cuda)
+      if args.model_type == 'vq_lstm':
+        self.encoder = cuda(VQCPCEncoder(80,
+                                         channels=self.K,
+                                         n_embeddings=512,
+                                         z_dim=self.K,
+                                         c_dim=self.K),
+                            self.cuda)
         self.D = 256
         self.K = 256
         self.ds_ratio = 2
@@ -105,7 +110,7 @@ class Solver(object):
           if self.model_type == 'blstm':
             c_feature,  = self.encoder(x, masks=masks)
           elif self.model_type == 'vq_lstm':
-            x, c_feature, vq_loss, _ = self.encoder(x)
+            x, c_feature, vq_loss = self.encoder(x)
             x = x.permute(0, 2, 1)
           else:
             _, _, c_feature = self.encoder(x, masks=masks, return_feat='rnn')
@@ -156,12 +161,15 @@ class Solver(object):
           spk_labels = torch.zeros((audios.size(0),), dtype=torch.int, device=x.device)
           if self.model_type == 'blstm':
             c_feature = self.encoder(x, masks=masks)
-          elif self.model_type == 'vq_cpc':
-            x, c_feature = self.encoder(x)
+          elif self.model_type == 'vq_lstm':
+            x, c_feature, vq_loss = self.encoder(x)
             x = x.permute(0, 2, 1)
           else:
             _, _, c_feature = self.encoder(x, masks=masks, return_feat='bottleneck')
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels) 
+          if self.model_type == 'vq_lstm':
+            loss = loss + vq_loss
+          
           total_loss += loss.sum().cpu().detach().numpy()
           correct += acc.sum(dim=0).mean().item() * x.size(0)
           total_num += x.size(0)
@@ -194,6 +202,7 @@ class Solver(object):
                            distance_mode='cosine',
                            step_feature=160*self.ds_ratio,
                            modes=['within'])
+        abx_score = abx_score['within']
         # XXX if self.history['abx_acc'] < (1-abx_score).item():
         #   self.history['abx_acc'] = (1-abx_score).item() 
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
