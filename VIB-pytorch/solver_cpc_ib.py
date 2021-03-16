@@ -37,6 +37,7 @@ class Solver(object):
       self.global_iter = 0
       self.global_epoch = 0
       self.cpc_feature = args.cpc_feature
+      self.loss_type = args.loss_type
       
       if args.model_type == 'gumbel_blstm':
         self.ds_ratio = 1
@@ -127,7 +128,12 @@ class Solver(object):
           
           cpc_acc = cpc_acc.mean(0).cpu().numpy()
 
-          loss = ib_loss + cpc_loss
+          if self.loss_type == 'IB-only':
+            loss = ib_loss
+          elif self.loss_type == 'CPC-only':
+            loss = cpc_loss
+          else:
+            loss = ib_loss + cpc_loss
           total_loss += loss.cpu().detach().numpy()
           total_step += audios.size(0)
 
@@ -211,6 +217,7 @@ class Solver(object):
       avg_loss = total_loss / total_num
       word_acc = word_correct / total_num
       avg_cpc_acc = cpc_correct / total_num
+      token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
       if self.history['acc'] < word_acc:
         self.history['acc'] = word_acc
         self.history['loss'] = avg_loss
@@ -218,9 +225,7 @@ class Solver(object):
         self.history['iter'] = self.global_iter
         self.history['token_f1'] = token_f1
         if save_ckpt : self.save_checkpoint('best_acc.tar')
-
-      token_f1, conf_df, token_prec, token_recall = evaluate(pred_dicts, self.data_loader['test'].dataset.gold_dicts, ds_rate=self.ds_ratio)
-      conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
+        conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
       print('[TEST RESULT]')
       print('e:{} IZY:{:.2f} IZX:{:.4f}'
                 .format(self.global_epoch, izy_bound.item(), izx_bound.item()), end=' ')
@@ -236,8 +241,9 @@ class Solver(object):
                            distance_mode='cosine',
                            step_feature=160,
                            modes=['within'])
-        if self.history['abx'] > abx_score.item():
-          self.history['abx'] = abx_score.item() 
+        abx_score = abx_score['within']
+        if self.history['abx'] > abx_score:
+          self.history['abx'] = abx_score 
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
         
               

@@ -3,6 +3,8 @@ import torch
 import argparse
 from utils import str2bool
 from solver_cpc_ib import Solver
+import pandas as pd
+import os
 
 def main(args):
   torch.backends.cudnn.enabled = True
@@ -27,7 +29,7 @@ def main(args):
   elif args.mode == 'test' : net.test(save_ckpt=False, compute_abx=True)
   elif args.mode == 'train_sweep':
     args.beta = 1.
-    args.epoch = 50
+    args.epoch = 25
     df_results = {'Model': [],
                   'Loss': [],
                   r'$\beta$': [],
@@ -44,6 +46,9 @@ def main(args):
       df_results['WER'].append(1.-net.history['acc'])
       df_results['ABX'].append(net.history['abx'])
       args.beta /= 10
+
+    df_results = pd.DataFrame(df_results)
+    df_results.to_csv(os.path.join('checkpoints', args.env_name, 'results.csv'))
   else : return 0
 
 if __name__ == '__main__':
@@ -56,7 +61,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
     parser.add_argument('--env_name', default='main', type=str, help='visdom env name')
     parser.add_argument('--dataset', default='MSCOCO2K', type=str, help='dataset name')
-    parser.add_argument('--loss_type', choices={'IB-only', 'IB+CPC', 'IB+CPC+VQ'})
+    parser.add_argument('--loss_type', choices={'IB-only', 'IB+CPC', 'IB+CPC+VQ', 'CPC-only'})
     parser.add_argument('--model_type', choices={'gumbel_blstm', 'pyramidal_blstm', 'gumbel_markov_blstm'}, default='gumbel_blstm')
     parser.add_argument('--cpc_feature', choices={'rnn', 'bottleneck'}, default='rnn')
     parser.add_argument('--dset_dir', default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k', type=str, help='dataset directory path')
