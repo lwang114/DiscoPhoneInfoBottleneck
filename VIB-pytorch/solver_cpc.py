@@ -103,15 +103,18 @@ class Solver(object):
           masks = Variable(cuda(masks, self.cuda))
           spk_labels = torch.zeros((x.size(0),), dtype=torch.int, device=x.device)
           if self.model_type == 'blstm':
-            c_feature = self.encoder(x, masks=masks)
-          elif self.model_type == 'vq_cpc':
-            x, c_feature = self.encoder(x)
+            c_feature,  = self.encoder(x, masks=masks)
+          elif self.model_type == 'vq_lstm':
+            x, c_feature, vq_loss, _ = self.encoder(x)
             x = x.permute(0, 2, 1)
           else:
             _, _, c_feature = self.encoder(x, masks=masks, return_feat='rnn')
           
           loss, acc = self.criterion(c_feature, x.permute(0, 2, 1), spk_labels)
           loss = loss.sum()
+          if self.model_type == 'vq_lstm':
+            loss = loss + vq_loss
+
           acc = acc.mean(0).cpu().numpy()
           total_loss += loss.cpu().detach().numpy()
           total_step += audios.size(0)
