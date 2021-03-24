@@ -1,26 +1,13 @@
 import torch
-import torchaudio
-import nltk
-from nltk.stem import WordNetLemmatizer
-from allennlp.predictors.predictor import Predictor
-import allennlp_models.structured_prediction
+import torchvision
 import numpy as np
 import re
 import os
 import json
 from tqdm import tqdm
 
-dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
-dep_parser._model = dep_parser._model.cuda()
-lemmatizer = WordNetLemmatizer()
 UNK = "###UNK###"
 NULL = "###NULL###"
-
-def log_normalize(x):
-    x.add_(1e-6).log_()
-    mean = x.mean()
-    std = x.std()
-    return x.sub_(mean).div_(std + 1e-6)
 
 def fix_embedding_length(emb, L):
   size = emb.size()[1:]
@@ -31,7 +18,7 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
-class FlickrSegmentDataset(torch.utils.data.Dataset):
+class FlickrImageDataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path, 
       preprocessor, split,
