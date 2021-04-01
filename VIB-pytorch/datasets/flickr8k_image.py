@@ -1,5 +1,6 @@
 import torch
 import torchvision
+import torchvision.transforms as transforms
 import torchvision.models as imagemodels
 import torch.utils.model_zoo as model_zoo
 import numpy as np
@@ -8,6 +9,7 @@ import os
 import json
 from tqdm import tqdm
 from PIL import Image
+import numpy as np
 
 class FlickrImageDataset(torch.utils.data.Dataset):
   def __init__(
@@ -27,8 +29,7 @@ class FlickrImageDataset(torch.utils.data.Dataset):
       data.extend(examples)    
   
     # Set up transforms
-    self.image_model = Resnet34(pretrained=True) 
-    self.transforms = transforms.Compose(
+    self.transform = transforms.Compose(
                 [transforms.Scale(256),
                  transforms.CenterCrop(224),
                  transforms.ToTensor(),
@@ -37,28 +38,19 @@ class FlickrImageDataset(torch.utils.data.Dataset):
 
     # Load each image metadata
     image = [example["image"] for example in data]
-    boxes = [example["boxes"] for example in data]
+    boxes = [example["box"] for example in data]
     self.dataset = list(zip(image, boxes))
      
 
   def __getitem__(self, idx):
-    image_file, boxes = self.dataset[idx]
-    image = Image.open(image_file + self.image_keys[idx]).convert("RGB")
+    image_file, box = self.dataset[idx]
+    image = Image.open(image_file).convert("RGB")
     if len(np.asarray(image).shape) == 2:
-      print(f"Gray scale image {image_file}, convert to RGB".format(image_file)
+      print(f"Gray scale image {image_file}, convert to RGB".format(image_file))
       image = np.tile(np.array(image)[:, :, np.newaxis], (1, 1, 3))
-    outputs = []
-    for box in boxes:
-      region = image.crop(box=box)
-
-      if self.transform:
-        region = self.transform(region)
-      image_inputs = torch.FloatTensor(region)
-      emb = self.image_model(image_inputs)
-      outputs.append(emb) 
-    outputs = torch.cat(outputs)
-
-    return outputs
+    region = image.crop(box=box)
+    region = self.transform(region)
+    return region
 
   def __len__(self):
     return len(self.dataset)
@@ -77,21 +69,18 @@ def load_data_split(data_path, split):
           }
   """
   examples = []
-  cur_image_id = ''
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
   for line in phrase_f:
     phrase = json.loads(line.rstrip("\n"))
     image_id = "_".join(phrase["utterance_id"].split("_")[:-1])
     box = phrase["bbox"]
-    filename = os.path.join(data_path, "Flicker8k_Dataset", image_id + ".jpg")
     
-    if image_id != cur_image_id:
-      example = {"image": filename,
-                 "boxes": [box]}
-      examples.append(example)
-    else:
-      examples[-1]["boxes"].append(box)
-  print(f"Number of images = {len(examples)}")
+    filename = os.path.join(data_path, "Flicker8k_Dataset", image_id + ".jpg")
+    example = {"image": filename,
+               "box": box}
+    examples.append(example)
+
+  print(f"Number of bounding boxes = {len(examples)}")
   phrase_f.close()
   return examples
 
@@ -126,7 +115,7 @@ class Resnet34(imagemodels.ResNet):
               p.requires_grad = False
 
     def forward(self, x):
-        if x.ndim == 3:
+        if x.dim() == 3:
           x = x.unsqueeze(0)
         x = self.conv1(x)
         x = self.bn1(x)
@@ -138,19 +127,38 @@ class Resnet34(imagemodels.ResNet):
         x = self.layer4(x)
         x = self.avgpool(x)
         emb = x.view(x.size(0), -1)
-        print(emb.size()) # XXX
         return emb
 
 if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/"
   trainset = FlickrImageDataset(data_path=data_path, split="train")
-  testset = FlickrImageDataset(data_path=data_path, split="test")
-
+  batch_size = 128
+  train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=0)   
+  image_model = Resnet34(pretrained=True) 
+  
   feats = {}
-  for idx, feat in enumerate(trainset):
-    image_id = trainset.dataset[idx][0].split("/")[-1].split(".")[0]
-    feat_id = f"{image_id}_{idx}"
-    print(feat_id, feat.size())
-    feats[feat_id] = feat.numpy()
+  cur_image_id = ''
+  feat_id = ''
+  image_idx = 0
+  for batch_idx, regions in enumerate(train_loader):    
+    # if batch_idx > 2: XXX
+    #   break
+    feat = image_model(regions).cpu().detach()
+    for i in range(feat.size(0)):
+      box_idx = batch_idx * batch_size + i
+      image_id = trainset.dataset[box_idx][0].split("/")[-1].split(".")[0]
 
-  np.savez(os.path.join(data_path, "flickr8k_res34.npz"), **feats)
+      if cur_image_id != image_id:
+        if len(cur_image_id):
+          feats[feat_id] = torch.stack(feats[feat_id])
+          print(feat_id, feats[feat_id].size())
+        feat_id = f"{image_id}_{image_idx}"
+        feats[feat_id] = [feat[i]] 
+        cur_image_id = image_id
+        image_idx += 1  
+      else:
+        feats[feat_id].append(feat[i])
+
+  feats[feat_id] = torch.stack(feats[feat_id])
+  print(feat_id, feats[feat_id].size())
+  np.savez("flickr8k_res34.npz", **feats)

@@ -5,6 +5,8 @@ from torchvision.datasets import MNIST
 from datasets.mscoco2k_segment import MSCOCO2kSegmentDataset, MSCOCO2kSegmentPreprocessor
 from datasets.mscoco2k_segment_image import MSCOCO2kSegmentImageDataset, MSCOCO2kSegmentImagePreprocessor
 from datasets.speechcoco_segment import SpeechCOCOSegmentDataset, SpeechCOCOSegmentPreprocessor
+from datasets.flickr8k import FlickrSegmentDataset, FlickrSegmentPreprocessor
+from datasets.flickr8k_segment_image import FlickrSegmentImageDataset, FlickrSegmentImagePreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -42,6 +44,18 @@ def return_data(args):
                                               preprocessor, 'train')
         test_data = SpeechCOCOSegmentDataset(dset_dir,
                                               preprocessor, 'test')
+    elif 'FLICKR' == name:
+        preprocessor = FlickrSegmentPreprocessor(dset_dir, 80)
+        train_data = FlickrSegmentDataset(dset_dir,
+                                          preprocessor, 'train')
+        test_data = FlickrSegmentDataset(dset_dir,
+                                         preprocessor, 'test') 
+    elif 'FLICKR_SEGMENT_IMAGE' == name :
+        preprocessor = FlickrSegmentImagePreprocessor(dset_dir, 80)
+        train_data = FlickrSegmentImageDataset(dset_dir,
+                                          preprocessor, 'train')
+        test_data = FlickrSegmentImageDataset(dset_dir,
+                                         preprocessor, 'test') 
     else : raise UnknownDatasetError()
 
 
