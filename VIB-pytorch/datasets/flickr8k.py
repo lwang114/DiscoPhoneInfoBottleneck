@@ -11,9 +11,9 @@ import os
 import json
 from tqdm import tqdm
 
-# dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
-# dep_parser._model = dep_parser._model.cuda()
-# lemmatizer = WordNetLemmatizer()
+dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
+dep_parser._model = dep_parser._model.cuda()
+lemmatizer = WordNetLemmatizer()
 UNK = "###UNK###"
 NULL = "###NULL###"
 
@@ -206,6 +206,7 @@ class FlickrSegmentPreprocessor:
     bbox_f = open(os.path.join(data_path, "flickr8k_bboxes.txt"), "r")
     sent_f = open(os.path.join(data_path, "flickr8k_sentences.txt"), "r")
     out_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "w")
+    classes = {}
 
     # Build a mapping form file id to caption text
     id_to_text = {} 
@@ -296,10 +297,15 @@ class FlickrSegmentPreprocessor:
                     id_to_phrase[cur_utterance_id],
                     id_to_text[cur_utterance_id])
     for phrase in utt.phrases:
+      if not phrase["label"] in classes:
+        classes[phrase["label"]] = 1
+      else:
+        classes[phrase["label"]] += 1
       out_f.write(json.dumps(phrase)+"\n")
     phone_f.close()
     phrase_f.close()
     sent_f.close()
+    json.dump(classes, open("phrase_classes.json", "w"), indent=2)
     
 class Utterance:
   def __init__(self, phones, words, phrases, rawtext):
@@ -316,8 +322,9 @@ class Utterance:
 
     words, phrases = self.extract_char_offsets(words, phrases, rawtext)
     words = self.align_time(phones, words)
-    phrases = self.align_char(words, phrases)
-    self.phrases = self.extract_phrase_labels(phrases)
+    phrases = self.extract_phrase_labels(phrases)
+    self.phrases = self.match(words, phrases)
+
 
   def extract_char_offsets(self, words, phrases, rawtext):
     # Extract char offsets for text words
@@ -343,6 +350,18 @@ class Utterance:
     
     return words, phrases
 
+  def match(self, children, parents):
+    parent_idx = 0
+    n_parents = len(parents)
+
+    for child in children:
+      parent = parents[parent_idx]
+      if not "children" in parent:
+        parent["children"] = []
+      if lemmatizer.lemmatize(child["text"].lower()) == parent["text"]:
+        parent["children"].append(child)
+    return parents
+  
   def align_char(self, children, parents):
     parent_idx = 0
     n_parents = len(parents)
@@ -390,11 +409,30 @@ class Utterance:
   def extract_phrase_labels(self, phrases):
     for phrase in phrases:
       text = phrase["text"].split()
+
       pos_tags = [t[1] for t in nltk.pos_tag(text, tagset="universal")]
       instance = dep_parser._dataset_reader.text_to_instance(text, pos_tags)
       parsed_text = dep_parser.predict_batch_instance([instance])[0]
       head_idx = np.where(np.asarray(parsed_text["predicted_heads"]) <= 0)[0][0]
-      phrase["label"] = lemmatizer.lemmatize(text[head_idx])
+
+      pos_tags = nltk.pos_tag(text)
+      found = 0
+      for loc in range(len(text)-1, -1, -1):
+        if pos_tags[loc] in ['NNS', 'NNPS']:
+          phrase["label"] = lemmatizer.lemmatize(text[loc])
+          found = 1
+          break
+
+      if not found:
+        for loc in range(len(text)-1, -1, -1):
+          if pos_tags[head_idx][0] != 'N' and pos_tag[loc][0] == 'N': 
+            phrase["label"] = lemmatizer.lemmatize(text[loc])
+            found = 1
+            break
+
+      if not found:
+        phrase["label"] = lemmatizer.lemmatize(text[head_idx])
+
     return phrases
 
 def load_data_split(data_path, split):
@@ -419,8 +457,8 @@ def load_data_split(data_path, split):
   examples = []
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
   for line in phrase_f:
-    # if len(examples) > 100: # XXX
-    #     break
+    if len(examples) > 100: # XXX
+        break
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
     fn = utterance_id + ".wav"
