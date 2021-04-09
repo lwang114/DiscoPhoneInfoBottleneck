@@ -38,14 +38,19 @@ class Solver(object):
       self.global_epoch = 0
       self.cpc_feature = args.cpc_feature
       self.loss_type = args.loss_type
+      self.dataset = args.dataset
+
+      # Dataset
+      self.data_loader = return_data(args)
+      self.n_class = self.data_loader['train'].dataset.preprocessor.num_tokens
       
       if args.model_type == 'gumbel_blstm':
         self.ds_ratio = 1
-        self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+        self.net = cuda(GumbelBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda)
         self.K = 2*self.K
       elif args.model_type == 'pyramidal_blstm':
         self.ds_ratio = 4
-        self.net = cuda(GumbelPyramidalBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
+        self.net = cuda(GumbelPyramidalBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda)
         self.net.weight_init()
       elif args.model_type == 'gumbel_markov_blstm':
         self.ds_ratio = 1
@@ -80,9 +85,6 @@ class Solver(object):
       self.history['avg_loss']=0.
       self.history['epoch']=0
       self.history['iter']=0
-
-      # Dataset
-      self.data_loader = return_data(args)
       
   def set_mode(self,mode='train'):
       if mode == 'train':
@@ -116,7 +118,7 @@ class Solver(object):
           info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
           ib_loss = class_loss + self.beta * info_loss
           
-          izy_bound = math.log(65,2) - class_loss
+          izy_bound = math.log(self.n_class,2) - class_loss
           izx_bound = info_loss
           prediction = F.softmax(logit,dim=1).max(1)[1]
           word_acc = torch.eq(prediction,y).float().mean()
@@ -185,7 +187,7 @@ class Solver(object):
           cur_class_loss = F.cross_entropy(logit,y,size_average=False).div(math.log(2))
           cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
           cur_ib_loss = cur_class_loss + self.beta * cur_info_loss
-          izy_bound = izy_bound + y.size(0) * math.log(65,2) - cur_class_loss
+          izy_bound = izy_bound + y.size(0) * math.log(self.n_class,2) - cur_class_loss
           izx_bound = izx_bound + cur_info_loss
           word_prediction = F.softmax(logit,dim=1).max(1)[1]
           word_correct += torch.eq(word_prediction,y).float().sum()
@@ -203,14 +205,16 @@ class Solver(object):
             global_idx = b_idx * B + idx
             example_id = self.data_loader['test'].dataset.dataset[global_idx][0].split('/')[-1]
             text = self.data_loader['test'].dataset.dataset[global_idx][1]
-            feat_id = f'{example_id}_{global_idx}'
-            feat_fn = self.ckpt_dir.joinpath(f'feats/{feat_id}.npy')
+            feat_id = f'{example_id}_{global_idx}'      
             units = encoding[idx].max(-1)[1]
             pred_dicts.append({'sent_id': example_id,
                                'units': units.cpu().detach().numpy().tolist(),  
                                'text': text})
-            np.save(feat_fn, c_feature[idx].cpu().detach().numpy())
-            seq_list.append((feat_id, feat_fn))
+
+            if global_idx <= 100:
+              feat_fn = self.ckpt_dir.joinpath(f'feats/{feat_id}.npy')
+              np.save(feat_fn, c_feature[idx].cpu().detach().numpy())
+              seq_list.append((feat_id, feat_fn))
       izy_bound /= total_num
       izx_bound /= total_num
       
@@ -244,8 +248,7 @@ class Solver(object):
         abx_score = abx_score['within']
         if self.history['abx'] > abx_score:
           self.history['abx'] = abx_score 
-        # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
-        
+        # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))        
               
       self.set_mode('train')
 

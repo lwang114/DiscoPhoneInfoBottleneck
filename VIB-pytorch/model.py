@@ -94,7 +94,7 @@ class VQEmbeddingEMA(nn.Module):
             self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
 
             self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
-
+            
         e_latent_loss = F.mse_loss(x, quantized.detach())
         loss = self.commitment_cost * e_latent_loss
 
@@ -131,7 +131,7 @@ class GumbelEmbeddingEMA(nn.Module):
 
             n = torch.sum(self.ema_count)
             self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
-            dw = torch.matmul(encodings.t(), x)
+            dw = torch.matmul(encodings.t(), x.detach())
             self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
             self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
         return quantized
@@ -349,7 +349,7 @@ class GumbelBLSTM(nn.Module):
       # param n: number of samples
       # return encoding: FloatTensor of size (n, batch size, num. frames, num. classes)
       def expand(v):
-          if isinstance(v, Number):
+          if v.ndim < 1:
               return torch.Tensor([v]).expand(n, 1)
           else:
               return v.expand(n, *v.size())

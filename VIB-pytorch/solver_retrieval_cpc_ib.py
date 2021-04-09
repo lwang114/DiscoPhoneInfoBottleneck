@@ -86,6 +86,7 @@ class Solver(object):
     # History
     self.history = dict()
     self.history['acc']=0. 
+    self.history['token_f1']=0.
     self.history['abx']=1.
     self.history['total_loss']=0.
     self.history['avg_loss']=0.
@@ -133,7 +134,7 @@ class Solver(object):
           elif self.model_type == 'blstm':
             a = self.codebook(c_feature.sum(-2))
           else:
-            a = self.codebook(logit,image_feats)
+            a = self.codebook(logit, c_feature.sum(-2))
             
           dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
           class_loss, prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1),
@@ -150,9 +151,8 @@ class Solver(object):
           spk_labels = torch.zeros((x.size(0),), dtype=torch.int, device=x.device)
           cpc_loss, cpc_acc = self.cpc_criterion(c_feature, x.permute(0, 2, 1), spk_labels)
           cpc_loss = cpc_loss.sum()
-          
           cpc_acc = cpc_acc.mean(0).cpu().numpy()
-
+          
           if self.loss_type == 'IB-only':
             loss = ib_loss
           else:
@@ -189,6 +189,9 @@ class Solver(object):
       cpc_correct = 0
       word_correct = 0
       total_num = 0
+      a_feats = []
+      v_feats = []
+      ys = []
       pred_dicts = []
       seq_list = []
       if not self.ckpt_dir.joinpath('feats').is_dir():
@@ -202,6 +205,7 @@ class Solver(object):
           x = Variable(cuda(audios, self.cuda))
           v = Variable(cuda(image_feats, self.cuda))
           y = Variable(cuda(labels, self.cuda))
+          ys.append(labels)
           masks = Variable(cuda(masks, self.cuda))
 
           in_logit, logits, encoding = self.net(x, masks=masks, return_feat='bottleneck')
@@ -212,24 +216,19 @@ class Solver(object):
           elif self.model_type == 'blstm':
             a = self.codebook(c_feature.sum(-2))
           else:
-            a = self.codebook(logit, image_feats)
-
-          # Word prediction
-          dummy_mask = Variable(cuda(torch.ones(logit.size(0), 1), self.cuda))
-          cur_class_loss, word_prediction = self.crossmodal_criterion(a.unsqueeze(1), v.unsqueeze(1), dummy_mask, dummy_mask)
-          cur_class_loss = cur_class_loss.squeeze(-1)
+            a = self.codebook(logit, c_feature.sum(-2))
+          a_feats.append(a.cpu())
+          v_feats.append(v.cpu())
+          
           cur_info_loss = (F.softmax(in_logit,dim=-1) * F.log_softmax(in_logit,dim=-1)).sum(1).mean().div(math.log(2))
-          cur_ib_loss = cur_class_loss + self.beta * cur_info_loss
-          izy_bound = izy_bound + y.size(0) * math.log(65,2) - cur_class_loss
           izx_bound = izx_bound + cur_info_loss
-          word_correct += torch.eq(y[word_prediction],y).float().sum()
           
           # CPC prediction
           spk_labels = torch.zeros((audios.size(0),), dtype=torch.int, device=x.device)
           cur_cpc_loss, cpc_acc = self.cpc_criterion(c_feature, x.permute(0, 2, 1), spk_labels) 
           cpc_correct += cpc_acc.sum(dim=0).mean().item() * x.size(0)
-
-          total_loss += cur_cpc_loss.sum().item() + cur_ib_loss.item()
+          
+          total_loss += cur_cpc_loss.sum().item()
           total_num += x.size(0)
           
           for idx in range(audios.size(0)):
@@ -237,17 +236,32 @@ class Solver(object):
             example_id = self.data_loader['test'].dataset.dataset[global_idx][0].split('/')[-1]
             text = self.data_loader['test'].dataset.dataset[global_idx][1]
             feat_id = f'{example_id}_{global_idx}'
-            feat_fn = self.ckpt_dir.joinpath(f'feats/{feat_id}.npy')
             units = encoding[idx].max(-1)[1]
             pred_dicts.append({'sent_id': example_id,
                                'units': units.cpu().detach().numpy().tolist(),  
                                'text': text})
-            np.save(feat_fn, c_feature[idx].cpu().detach().numpy())
-            seq_list.append((feat_id, feat_fn))
-      izy_bound /= total_num
+
+            if global_idx <= 100:
+              feat_fn = self.ckpt_dir.joinpath(f'feats/{feat_id}.npy')
+              np.save(feat_fn, c_feature[idx].cpu().detach().numpy())
+              seq_list.append((feat_id, feat_fn))
+      a_feats = torch.cat(a_feats)
+      v_feats = torch.cat(v_feats)
+      ys = torch.cat(ys)
+      print('a_feats.size(), v_feats.size(), ys.size(): ', a_feats.size(), v_feats.size(), ys.size())
       izx_bound /= total_num
-      
+       
+      # Word prediction (retrieval)
+      dummy_mask = Variable(cuda(torch.ones(a_feats.size(0), 1), self.cuda))
+      class_loss, word_prediction = self.crossmodal_criterion(a_feats.unsqueeze(1), v_feats.unsqueeze(1), dummy_mask, dummy_mask)
+      word_correct += torch.eq(ys[word_prediction],ys).float().sum()
+      class_loss = class_loss.squeeze(-1)
+      izy_bound = y.size(0) * math.log(65,2) - class_loss
+      izy_bound /= total_num
+
       avg_loss = total_loss / total_num
+      avg_loss = avg_loss + izy_bound + self.beta * izx_bound
+
       word_acc = word_correct / total_num
       avg_cpc_acc = cpc_correct / total_num
       if self.history['acc'] < word_acc.item():
@@ -278,13 +292,14 @@ class Solver(object):
         if self.history['abx'] > abx_score:
           self.history['abx'] = abx_score
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))
-        
-              
+                      
       self.set_mode('train')
 
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
-                'net':self.net.state_dict(),
+      'net':self.net.state_dict(),
+      'codebook':self.codebook.state_dict(),
+      'cpc_criterion':self.cpc_criterion.state_dict()
                 }
     optim_states = {
                 'optim':self.optim.state_dict(),

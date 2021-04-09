@@ -3,6 +3,8 @@ import torchvision
 import torchvision.transforms as transforms
 import torchvision.models as imagemodels
 import torch.utils.model_zoo as model_zoo
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
 import re
 import os
@@ -23,9 +25,12 @@ class FlickrImageDataset(torch.utils.data.Dataset):
     self.data_path = data_path
  
     data = []
+    class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
+    class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] > 20}
+    self.n_class = len(class_to_idx)
     for sp in self.splits[split]:
       # Load data paths to audio and visual features
-      examples = load_data_split(data_path, split)
+      examples = load_data_split(data_path, split, class_to_idx)
       data.extend(examples)    
   
     # Set up transforms
@@ -39,23 +44,24 @@ class FlickrImageDataset(torch.utils.data.Dataset):
     # Load each image metadata
     image = [example["image"] for example in data]
     boxes = [example["box"] for example in data]
-    self.dataset = list(zip(image, boxes))
+    labels = [example["label"] for example in data]
+    self.dataset = list(zip(image, boxes, labels))
      
-
   def __getitem__(self, idx):
-    image_file, box = self.dataset[idx]
+    image_file, box, label = self.dataset[idx]
     image = Image.open(image_file).convert("RGB")
     if len(np.asarray(image).shape) == 2:
       print(f"Gray scale image {image_file}, convert to RGB".format(image_file))
       image = np.tile(np.array(image)[:, :, np.newaxis], (1, 1, 3))
     region = image.crop(box=box)
     region = self.transform(region)
-    return region
+    
+    return region, label
 
   def __len__(self):
     return len(self.dataset)
 
-def load_data_split(data_path, split):
+def load_data_split(data_path, split, class_to_idx):
   """
   Returns:
       examples : a list of mappings of
@@ -68,24 +74,36 @@ def load_data_split(data_path, split):
             "feat_idx": int, image feature idx
           }
   """
+  with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
+    filenames = ['_'.join(line.rstrip("\n").split("/")[-1].split('_')[:-1]) for line in f]
+  
   examples = []
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
+  idx = 0
   for line in phrase_f:
+    # if idx > 800: # XXX
+    #   break
+    idx += 1
     phrase = json.loads(line.rstrip("\n"))
     image_id = "_".join(phrase["utterance_id"].split("_")[:-1])
     box = phrase["bbox"]
-    
-    filename = os.path.join(data_path, "Flicker8k_Dataset", image_id + ".jpg")
-    example = {"image": filename,
-               "box": box}
-    examples.append(example)
+    label = phrase["label"]
+    if not label in class_to_idx:
+      continue
+
+    if image_id in filenames:
+      filename = os.path.join(data_path, "Flicker8k_Dataset", image_id + ".jpg")
+      example = {"image": filename,
+                 "box": box,
+                 "label": class_to_idx[label]}
+      examples.append(example)
 
   print(f"Number of bounding boxes = {len(examples)}")
   phrase_f.close()
   return examples
 
 class Resnet34(imagemodels.ResNet):
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=True, n_class=1):
         super(Resnet34, self).__init__(imagemodels.resnet.BasicBlock, [3, 4, 6, 3])
         if pretrained:
           self.load_state_dict(model_zoo.load_url(imagemodels.resnet.model_urls['resnet34']))
@@ -108,13 +126,14 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer4.children():
             for p in child.parameters():
-              p.requires_grad = False
+              p.requires_grad = True # XXX
           
           for child in list(self.avgpool.children()):
             for p in child.parameters():
-              p.requires_grad = False
-
-    def forward(self, x):
+              p.requires_grad = True # XXX
+        self.classifier = nn.Linear(512, n_class)
+              
+    def forward(self, x, return_score=False):
         if x.dim() == 3:
           x = x.unsqueeze(0)
         x = self.conv1(x)
@@ -127,38 +146,89 @@ class Resnet34(imagemodels.ResNet):
         x = self.layer4(x)
         x = self.avgpool(x)
         emb = x.view(x.size(0), -1)
-        return emb
+        score = self.classifier(emb)
+
+        if return_score:
+          return score, emb
+        else:
+          return emb
 
 if __name__ == "__main__":
+  tasks = [0]
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/"
   trainset = FlickrImageDataset(data_path=data_path, split="train")
+  testset = FlickrImageDataset(data_path=data_path, split="test")
   batch_size = 128
-  train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=0)   
-  image_model = Resnet34(pretrained=True) 
+  train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False if 1 in tasks else True, num_workers=0)
+  test_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
+  image_model = Resnet34(pretrained=True, n_class=trainset.n_class) 
+  trainables = [p for p in image_model.parameters() if p.requires_grad]
   
-  feats = {}
-  cur_image_id = ''
-  feat_id = ''
-  image_idx = 0
-  for batch_idx, regions in enumerate(train_loader):    
-    # if batch_idx > 2: XXX
-    #   break
-    feat = image_model(regions).cpu().detach()
-    for i in range(feat.size(0)):
-      box_idx = batch_idx * batch_size + i
-      image_id = trainset.dataset[box_idx][0].split("/")[-1].split(".")[0]
+  if 0 in tasks:
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(trainables, lr=0.0001)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma=0.97)
+    for epoch in range(100):
+      image_model.train()
+      for batch_idx, (regions, label) in enumerate(train_loader):
+        score, feat = image_model(regions, return_score=True)
+        loss = criterion(score, label)
 
-      if cur_image_id != image_id:
-        if len(cur_image_id):
-          feats[feat_id] = torch.stack(feats[feat_id])
-          print(feat_id, feats[feat_id].size())
-        feat_id = f"{image_id}_{image_idx}"
-        feats[feat_id] = [feat[i]] 
-        cur_image_id = image_id
-        image_idx += 1  
-      else:
-        feats[feat_id].append(feat[i])
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if batch_idx % 100 == 0:
+          print(f"Iter:{batch_idx}, loss:{loss.item()}")
 
-  feats[feat_id] = torch.stack(feats[feat_id])
-  print(feat_id, feats[feat_id].size())
-  np.savez("flickr8k_res34.npz", **feats)
+      if (epoch % 2) == 0 : scheduler.step()
+      
+      with torch.no_grad():
+        image_model.eval()
+        correct = 0
+        total = 0
+        class_acc = torch.zeros(trainset.n_class,)
+        class_count = torch.zeros(trainset.n_class,)
+        for batch_idx, (regions, label) in enumerate(test_loader):
+          score, feat = image_model(regions, return_score=True)
+          pred = torch.max(score, dim=-1)[1]
+          correct += torch.sum(pred == label).float().cpu()
+          total += float(score.size(0))
+          for idx in range(regions.size(0)):
+            class_acc[label[idx]] += (pred[idx] == label[idx]).float().cpu()
+            class_count[label[idx]] += 1.
+
+        acc = (correct / total).item()
+        for c in range(trainset.n_class):
+          if class_count[c] > 0:
+            class_acc[c] = class_acc[c] / class_count[c]
+
+        print(f"Epoch {epoch}, overall accuracy: {acc}")
+        print(f"Most frequent 10 class average accuracy: {class_acc[:10].mean().item()}")
+        torch.save(image_model.state_dict(), f"image_model.pth")
+  if 1 in tasks:
+    feats = {}
+    cur_image_id = ''
+    feat_id = ''
+    image_idx = 0
+    for batch_idx, regions, label in enumerate(train_loader):    
+      # if batch_idx > 2: XXX
+      #   break
+      feat = image_model(regions).cpu().detach()
+      for i in range(feat.size(0)):
+        box_idx = batch_idx * batch_size + i
+        image_id = trainset.dataset[box_idx][0].split("/")[-1].split(".")[0]
+
+        if cur_image_id != image_id:
+          if len(cur_image_id):
+            feats[feat_id] = torch.stack(feats[feat_id])
+            print(feat_id, feats[feat_id].size())
+          feat_id = f"{image_id}_{image_idx}"
+          feats[feat_id] = [feat[i]] 
+          cur_image_id = image_id
+          image_idx += 1  
+        else:
+          feats[feat_id].append(feat[i])
+
+    feats[feat_id] = torch.stack(feats[feat_id])
+    print(feat_id, feats[feat_id].size())
+    np.savez("flickr8k_res34.npz", **feats)
