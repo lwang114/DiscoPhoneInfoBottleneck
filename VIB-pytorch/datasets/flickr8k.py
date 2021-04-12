@@ -52,18 +52,22 @@ class FlickrSegmentDataset(torch.utils.data.Dataset):
     self.max_feat_len = 64
     if split == "train":
         self.max_class_size = 200
+        self.min_class_size = 80
     elif split == "test":
-        self.max_class_size = 1
-    
+        self.max_class_size = 100
+        self.min_class_size = 80
+
     data = []
     for sp in self.splits[split]:
       # Load data paths to audio and visual features
       if self.preprocessor.balance_strategy:
         examples = load_data_split_balanced(data_path, split,
                                             balance_strategy=self.preprocessor.balance_strategy,
-                                            max_class_size=self.max_class_size)
+                                            max_class_size=self.max_class_size,
+                                            min_class_size=self.min_class_size)
       else:
         examples = load_data_split(data_path, split)
+      print("Number of {} audio files = {}".format(sp, len(examples)))
       data.extend(examples)    
   
     # Set up transforms
@@ -93,16 +97,8 @@ class FlickrSegmentDataset(torch.utils.data.Dataset):
     image_ids = [example["image_id"] for example in data]
     feat_idxs = [example["feat_idx"] for example in data]
     self.dataset = list(zip(audio, text, duration, interval, image_ids, feat_idxs))
-
-    # Create gold unit file
-    if not os.path.exists(os.path.join(data_path, "gold_units.json")) or not os.path.exists(os.path.join(data_path, "abx_triplets.item")):
-      if balanced_strategy:
-        create_gold_file_balanced(data_path, sample_rate,
-                                  balanced_strategy=self.preprocessor.balanced_strategy,
-                                  max_class_size=self.max_class_size)
-      else:
-        create_gold_file(data_path, sample_rate)
-    self.gold_dicts = json.load(open(os.path.join(data_path, "gold_units.json")))
+   
+    self.gold_dicts = self.preprocessor.gold_dicts   
     self.image_feats = np.load(os.path.join(data_path, "flickr8k_res34.npz"))
     
   def sample_sizes(self):
@@ -176,12 +172,16 @@ class FlickrSegmentPreprocessor:
     use_words=False,
     prepend_wordsep=False,
     sample_rate=16000,
-    balance_strategy="augment"
+    balance_strategy="truncate"
   ):
     self.balance_strategy = balance_strategy
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
     self.num_features = num_features
+    self.max_training_class_size = 200
+    self.min_training_class_size = 80
+    self.max_test_class_size = 100
+    self.min_test_class_size = 80 
 
     metadata_file = os.path.join(data_path, "flickr8k_phrases.json")
     if not os.path.exists(metadata_file):
@@ -191,23 +191,39 @@ class FlickrSegmentPreprocessor:
     for _, spl in splits.items(): 
       for sp in spl:
           if sp == "train":
-              self.max_class_size = 200
+              max_class_size = self.max_training_class_size
+              min_class_size = self.min_training_class_size
           elif sp == "test":
-              self.max_class_size = 1
+              max_class_size = self.max_test_class_size
+              min_class_size = self.min_test_class_size
           if balance_strategy:
               data.extend(load_data_split_balanced(data_path, sp,
                                                    balance_strategy=balance_strategy,
-                                                   max_class_size=self.max_class_size))
+                                                   max_class_size=max_class_size,
+                                                   min_class_size=min_class_size))
           else:
               data.extend(load_data_split(data_path, sp))
    
+    # Create gold unit file
+    if not os.path.exists(os.path.join(data_path, "flickr8k_gold_units.json")) or not os.path.exists(os.path.join(data_path, "flickr8k_abx_triplets.item")):
+      if self.balance_strategy:
+        print('Creating gold file balanced ...')
+        create_gold_file_balanced(data_path, sample_rate,
+                                  balance_strategy=self.balance_strategy,
+                                  max_class_size=self.max_test_class_size,
+                                  min_class_size=self.min_test_class_size)
+      else:
+        print('Creating gold file ...')
+        create_gold_file(data_path, sample_rate)
+    self.gold_dicts = json.load(open(os.path.join(data_path, "flickr8k_gold_units.json"))) 
+
     tokens = set()
     lexicon = {}
     for ex in data:
       tokens.add(ex["text"])
     self.tokens = sorted(tokens)
     self.tokens_to_index = {t: i for i, t in enumerate(self.tokens)}
-    print(f"Number of types: {self.num_tokens}")
+    print(f"Number of word types: {self.num_tokens}")
   
   @property
   def num_tokens(self):
@@ -472,12 +488,10 @@ def load_data_split(data_path, split):
                        "feat_idx": phrase["feat_idx"],
                        "image_id": utt_to_feat["_".join(phrase["utterance_id"].split("_")[:-1])]}
             examples.append(example)
-
-  print("Number of {} audio files = {}".format(split, len(examples)))
   phrase_f.close()
   return examples
 
-def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_class_size=200):
+def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_class_size=200, min_class_size=80):
   """
   Returns:
       examples : a list of mappings of
@@ -489,7 +503,7 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
             "image_id": str,
             "feat_idx": int, image feature idx
           }
-  """
+  """  
   with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
     filenames = [line.rstrip("\n").split("/")[-1] for line in f]
 
@@ -502,10 +516,11 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
   class_counts = {c:0 for c in class_freqs}
   class_to_example = {c:[] for c in class_freqs}
+  gold_dicts = []
   
   for line in phrase_f:
-    # if len(examples) > 100: # XXX
-    #     break
+    # if len(examples) > 1000: # XXX
+    #    break
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
     fn = utterance_id + ".wav"
@@ -513,7 +528,7 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
     label = phrase["label"]
     
     if fn in filenames and "children" in phrase:
-        if len(phrase["children"]) > 0 and class_freqs[label] >= 20 and class_counts[label] < max_class_size: # Filter out low-frequency words
+        if len(phrase["children"]) > 0 and class_freqs[label] >= min_class_size and class_counts[label] < max_class_size: # Filter out low-frequency words
             class_counts[label] += 1
             image_id = utt_to_feat["_".join(phrase["utterance_id"].split("_")[:-1])]
             feat_idx = phrase["feat_idx"]
@@ -527,9 +542,15 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
                        "image_id": image_id}
             class_to_example[label].append(example)
             examples.append(example)
+            if split == 'test':
+              nframes = int((phrase["children"][-1]["end"] - phrase["children"][0]["begin"])*100)+1
+              gold_dicts.append({"sentence_id": fn,
+                                 "units": [-1]*nframes,
+                                 "phoneme_text": [NULL]*nframes,
+                                 "word_text": [label]*nframes,
+                                 "word_full_text": [NULL]*nframes})
 
-  # Augment the dataset by reverse mismatch the audio and image of the same type
-  if balance_strategy == "augment":
+    if balance_strategy == "augment" and split in ['validation', 'test']:
       for c in class_to_example:
           if len(class_to_example[c]) > 1 and class_counts[c] < max_class_size:
               n_augment_examples = max_class_size - class_counts[c] 
@@ -543,17 +564,17 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
                   example = deepcopy(example_list[speech_idx])
                   example["image_id"] = example_list[image_idx]["image_id"]
                   example["feat_idx"] = example_list[image_idx]["feat_idx"]
-                  # print(example_list[speech_idx]["audio"], example_list[image_idx]["image_id"]) # XXX
                   examples.append(example)
 
-  print("Number of {} audio files = {}".format(split, len(examples)))
+  print(split, sorted(class_counts.items(), key=lambda x:x[1], reverse=True)[:10]) # XXX
   phrase_f.close()
   return examples
-  
+
+
 def create_gold_file(data_path, sample_rate):
   """
   Create the following files:
-      gold_units.json : contains gold_dicts, a list of mappings 
+     gold_units.json : contains gold_dicts, a list of mappings 
           {"sentence_id" : str,
            "units" : a list of ints representing phoneme id for each feature frame,
            "text" : a list of strs representing phoneme tokens for each feature frame}
@@ -634,7 +655,7 @@ def create_gold_file(data_path, sample_rate):
   with open(os.path.join(data_path, "abx_triplets.item"), "w") as triplet_f:
     triplet_f.write('\n'.join(triplets))
 
-def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate", max_class_size=20):
+def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate", max_class_size=200, min_class_size=80):
   """
   Create the following files:
       gold_units.json : contains gold_dicts, a list of mappings 
@@ -649,13 +670,16 @@ def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate
   """
   class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  filenames = [line.rstrip("\n").split("/")[-1] for line in open(os.path.join(data_path, "splits/flickr40k_test.txt"), "r")] 
+  with open(os.path.join(data_path, "splits/flickr40k_test.txt"), "r") as f:
+    filenames = [line.rstrip("\n").split("/")[-1] for line in f]
   phone_to_index = {}
   class_counts = {c:0 for c in class_freqs}
   gold_dicts = []
   triplets = ['#file_ID onset offset #phone prev-phone next-phone speaker']
 
   phrase_idx = 0
+
+  print('In gold unit, min_class_size, max_class_size: ', min_class_size, max_class_size) # XXX
   for line in phrase_f:
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
@@ -664,62 +688,61 @@ def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate
     label = phrase["label"]
 
     if fn in filenames and "children" in phrase:
-      if len(phrase["children"]) == 0 or class_freqs[label] < 20 or class_counts[label] >= max_class_size: # Filter out low-frequency words
-          continue
+      if len(phrase["children"]) > 0 and class_freqs[label] >= min_class_size and class_counts[label] < max_class_size: # Filter out low-frequency words
+        class_counts[label] += 1
+        nframes = int((phrase["children"][-1]["end"] - phrase["children"][0]["begin"])*100)+1
 
-      class_counts[label] += 1
-      nframes = int((phrase["children"][-1]["end"] - phrase["children"][0]["begin"])*100)+1
-
-      gold_dict = {"sentence_id": fn,
-                   "units": [-1]*nframes,
-                   "phoneme_text": [NULL]*nframes,
-                   "word_text": [label]*nframes,
-                   "word_full_text": [NULL]*nframes
-      }
+        gold_dict = {"sentence_id": fn,
+                     "units": [-1]*nframes,
+                     "phoneme_text": [NULL]*nframes,
+                     "word_text": [label]*nframes,
+                     "word_full_text": [NULL]*nframes
+        }
       
-      begin_phone = 0
-      begin_word = 0
-      example_id = f"{fn}_{phrase_idx}"
-      phrase_idx += 1
-      for word in phrase["children"]:
-        dur_word = int((word["end"] - word["begin"])*100) 
-        end_word = begin_word + dur_word
-        for x in range(begin_word, end_word):
+        begin_phone = 0
+        begin_word = 0
+        example_id = f"{fn}_{phrase_idx}"
+        phrase_idx += 1
+        for word in phrase["children"]:
+          dur_word = int((word["end"] - word["begin"])*100) 
+          end_word = begin_word + dur_word
+          for x in range(begin_word, end_word):
             gold_dict["word_full_text"][x] = word["text"]
-        begin_word += dur_word
+          begin_word += dur_word
             
-        for phn_idx, phone in enumerate(word["children"]):
-          if "SIL" in phone["text"] or "+" in phone["text"]:
+          for phn_idx, phone in enumerate(word["children"]):
+            if "SIL" in phone["text"] or "+" in phone["text"]:
               continue
-          if not phone["text"] in phone_to_index:
-            phone_to_index[phone["text"]] = len(phone_to_index)
-          dur_phone = int((phone["end"] - phone["begin"])*100)
-          end_phone = begin_phone + dur_phone
-          for t in range(begin_phone, end_phone):
+            if not phone["text"] in phone_to_index:
+              phone_to_index[phone["text"]] = len(phone_to_index)
+            dur_phone = int((phone["end"] - phone["begin"])*100)
+            end_phone = begin_phone + dur_phone
+            for t in range(begin_phone, end_phone):
               gold_dict["phoneme_text"][t] = phone["text"]
               gold_dict["units"][t] = phone_to_index[phone["text"]]
           
-          if phn_idx == 0:
-            prev_token = NULL
-          else:
-            prev_token = word["children"][phn_idx-1]["text"]
+            if phn_idx == 0:
+              prev_token = NULL
+            else:
+              prev_token = word["children"][phn_idx-1]["text"]
 
-          if phn_idx == len(word["children"]) - 1:
-            next_token = NULL
-          else:
-            next_token = word["children"][phn_idx+1]["text"]
+            if phn_idx == len(word["children"]) - 1:
+              next_token = NULL
+            else:
+              next_token = word["children"][phn_idx+1]["text"]
 
-          if len(gold_dicts) < 5000:
+            if len(gold_dicts) < 5000:
               triplets.append(f"{example_id} {begin_phone} {begin_phone + dur_phone} {phone['text']} {prev_token} {next_token} 0")
 
-          begin_phone += dur_phone
+            begin_phone += dur_phone
 
-      gold_dicts.append(gold_dict)
-  
-  with open(os.path.join(data_path, "gold_units.json"), "w") as gold_f:
+        gold_dicts.append(gold_dict)
+
+  print(f'Number of gold dicts {len(gold_dicts)}') # XXX 
+  with open(os.path.join(data_path, "flickr8k_gold_units.json"), "w") as gold_f:
     json.dump(gold_dicts, gold_f, indent=2)
 
-  with open(os.path.join(data_path, "abx_triplets.item"), "w") as triplet_f:
+  with open(os.path.join(data_path, "flickr8k_abx_triplets.item"), "w") as triplet_f:
     triplet_f.write('\n'.join(triplets))
 
     

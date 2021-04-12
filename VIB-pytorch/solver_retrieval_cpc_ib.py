@@ -34,32 +34,33 @@ class Solver(object):
     self.K = args.K
     self.n_predicts = args.n_predicts # Number of prediction steps
     self.n_negatives = args.n_negatives # Number of negative samples per step
+    self.image_dim = args.image_dimension
     self.global_iter = 0
     self.global_epoch = 0
 
-    self.codebook = cuda(GumbelEmbeddingEMA(65, 512), self.cuda)
+    self.codebook = cuda(GumbelEmbeddingEMA(65, self.image_dim), self.cuda)
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.K = 2*self.K
     elif args.model_type == 'pyramidal_blstm':
       self.ds_ratio = 4
-      self.net = cuda(GumbelPyramidalBLSTM(self.K, n_class=512, ds_ratio=self.ds_ratio), self.cuda)
+      self.net = cuda(GumbelPyramidalBLSTM(self.K, n_class=self.image_dim, ds_ratio=self.ds_ratio), self.cuda)
       self.net.weight_init()
     elif args.model_type == 'gumbel_markov_blstm':
       self.ds_ratio = 1
-      self.net = cuda(GumbelMarkovBLSTM(self.K, n_class=512), self.cuda)
+      self.net = cuda(GumbelMarkovBLSTM(self.K, n_class=self.image_dim), self.cuda)
       self.net.weight_init()
     elif args.model_type == 'blstm':
-      self.ds_ratio = 1
+      self.ds_ratio = 8 # XXX
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
-      self.codebook = cuda(nn.Linear(512, 512), self.cuda)
+      self.codebook = cuda(nn.Linear(512, self.image_dim), self.cuda)
       self.K = 2*self.K
     elif args.model_type == 'vq_blstm':
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.K = 2*self.K
-      self.codebook = cuda(VQEmbeddingEMA(65, 512), self.cuda)
+      self.codebook = cuda(VQEmbeddingEMA(65, self.image_dim), self.cuda)
 
     self.model_type = args.model_type
     self.loss_type = args.loss_type
@@ -248,7 +249,6 @@ class Solver(object):
       a_feats = torch.cat(a_feats)
       v_feats = torch.cat(v_feats)
       ys = torch.cat(ys)
-      print('a_feats.size(), v_feats.size(), ys.size(): ', a_feats.size(), v_feats.size(), ys.size())
       izx_bound /= total_num
        
       # Word prediction (retrieval)

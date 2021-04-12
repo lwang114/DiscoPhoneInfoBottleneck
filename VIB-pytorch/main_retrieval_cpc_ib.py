@@ -56,6 +56,7 @@ if __name__ == '__main__':
     parser.add_argument('--beta', default=1e-3, type=float, help='beta')
     parser.add_argument('--lr', default = 1e-4, type=float, help='learning rate')
     parser.add_argument('--K', default = 256, type=int, help='dimension of encoding Z')
+    parser.add_argument('--image_dimension', default=512, type=int)
     parser.add_argument('--seed', default = 1, type=int, help='random seed')
     parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
     parser.add_argument('--env_name', default='main', type=str, help='visdom env name')

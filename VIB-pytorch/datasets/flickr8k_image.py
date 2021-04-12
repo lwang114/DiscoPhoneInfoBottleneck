@@ -15,23 +15,17 @@ import numpy as np
 
 class FlickrImageDataset(torch.utils.data.Dataset):
   def __init__(
-      self, data_path, split,
-      splits = {
-        "train": ["train"],
-        "test": ["test"],           
-      }
-  ):
-    self.splits = splits
+      self, data_path, split
+    ):
     self.data_path = data_path
  
     data = []
     class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-    class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] > 20}
+    class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] > 0} # XXX
     self.n_class = len(class_to_idx)
-    for sp in self.splits[split]:
-      # Load data paths to audio and visual features
-      examples = load_data_split(data_path, split, class_to_idx)
-      data.extend(examples)    
+
+    # Load data paths to audio and visual features
+    data = load_data_split(data_path, split, class_to_idx)
   
     # Set up transforms
     self.transform = transforms.Compose(
@@ -74,9 +68,16 @@ def load_data_split(data_path, split, class_to_idx):
             "feat_idx": int, image feature idx
           }
   """
-  with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
-    filenames = ['_'.join(line.rstrip("\n").split("/")[-1].split('_')[:-1]) for line in f]
-  
+  if not split:
+    filenames = []
+    for split in ['train', 'val', 'test']:
+      with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
+        filenames.extend(['_'.join(line.rstrip("\n").split("/")[-1].split('_')[:-1]) for line in f])
+  else:
+    with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
+      filenames = ['_'.join(line.rstrip("\n").split("/")[-1].split('_')[:-1]) for line in f]
+  print(f'Number of audio files: {len(filenames)}')
+
   examples = []
   phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
   idx = 0
@@ -122,7 +123,7 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer3.children():
             for p in child.parameters():
-              p.requires_grad = False
+              p.requires_grad = True # XXX
 
           for child in self.layer4.children():
             for p in child.parameters():
@@ -154,17 +155,26 @@ class Resnet34(imagemodels.ResNet):
           return emb
 
 if __name__ == "__main__":
-  tasks = [0]
-  data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/"
-  trainset = FlickrImageDataset(data_path=data_path, split="train")
-  testset = FlickrImageDataset(data_path=data_path, split="test")
+  import argparse
+  parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+  parser.add_argument('--task', type=int, required=True)
+  parser.add_argument('--pretrain_model', default=None)
+  args = parser.parse_args()
+
+  task = args.task
+  data_path = "/home/lwang114/data/flickr/" #/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/"
   batch_size = 128
-  train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False if 1 in tasks else True, num_workers=0)
-  test_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
-  image_model = Resnet34(pretrained=True, n_class=trainset.n_class) 
-  trainables = [p for p in image_model.parameters() if p.requires_grad]
   
-  if 0 in tasks:
+  if task == 0:
+    trainset = FlickrImageDataset(data_path=data_path, split="train")
+    testset = FlickrImageDataset(data_path=data_path, split="test")
+   
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False if args.task == 1 else True, num_workers=0)
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    image_model = Resnet34(pretrained=True, n_class=trainset.n_class) 
+    trainables = [p for p in image_model.parameters() if p.requires_grad]
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(trainables, lr=0.0001)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma=0.97)
@@ -205,13 +215,19 @@ if __name__ == "__main__":
         print(f"Epoch {epoch}, overall accuracy: {acc}")
         print(f"Most frequent 10 class average accuracy: {class_acc[:10].mean().item()}")
         torch.save(image_model.state_dict(), f"image_model.pth")
-  if 1 in tasks:
+  elif task == 1:
+    trainset = FlickrImageDataset(data_path=data_path, split=None)
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    image_model = Resnet34(pretrained=True, n_class=455) # XXX 
+    if args.pretrain_model:
+      image_model.load_state_dict(torch.load(args.pretrain_model))
     feats = {}
     cur_image_id = ''
     feat_id = ''
     image_idx = 0
-    for batch_idx, regions, label in enumerate(train_loader):    
-      # if batch_idx > 2: XXX
+    for batch_idx, (regions, label) in enumerate(train_loader):    
+      # if batch_idx > 2: # XXX
       #   break
       feat = image_model(regions).cpu().detach()
       for i in range(feat.size(0)):
@@ -228,7 +244,6 @@ if __name__ == "__main__":
           image_idx += 1  
         else:
           feats[feat_id].append(feat[i])
-
     feats[feat_id] = torch.stack(feats[feat_id])
     print(feat_id, feats[feat_id].size())
     np.savez("flickr8k_res34.npz", **feats)

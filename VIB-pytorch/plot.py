@@ -47,7 +47,7 @@ def plot_tsne(feat_file, label_file,
     labels_all.extend(phone_label)
     word_labels_all.extend(word_label)
     tokens.update(phone_label)
-  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###']
+  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###' and not 'NULL' in token]
   
   # Load feature files 
   feat_mat_all = np.concatenate(feat_mat_all)
@@ -319,6 +319,7 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('--exp_dir', '-e', type=str, required=True)
   parser.add_argument('--data_dir', '-d', type=str, default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k/')
+  parser.add_argument('--label_file', type=str, default='gold_units.json')
   parser.add_argument('--ds_ratio', type=int, default=1)
   parser.add_argument('--task', '-t', type=int, required=True)
   args = parser.parse_args()
@@ -326,7 +327,7 @@ if __name__ == '__main__':
   exp_dir = args.exp_dir
 
   feat_file = os.path.join(exp_dir, 'best_rnn_feats.npz')
-  label_file = os.path.join(data_dir, 'gold_units.json')
+  label_file = os.path.join(data_dir, args.label_file)
   out_prefix = os.path.join(exp_dir, 'tsne')
 
   if not os.path.exists(exp_dir):

@@ -338,7 +338,7 @@ class GumbelBLSTM(nn.Module):
         if return_feat == 'bottleneck':
             return in_logit, logit, encoding
         elif return_feat == 'rnn':
-            return in_logit, logit, embed
+            return in_logit, logit, embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
     else:
         return in_logit, logit
     
