@@ -60,7 +60,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default = 1, type=int, help='random seed')
     parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
     parser.add_argument('--env_name', default='main', type=str, help='visdom env name')
-    parser.add_argument('--dataset', default='MSCOCO2K', type=str, help='dataset name')
+    parser.add_argument('--dataset', default='MSCOCO2K', choices={'MSCOCO2K', 'FLICKR'}, type=str, help='dataset name')
     parser.add_argument('--loss_type', choices={'IB-only', 'IB+CPC', 'IB+CPC+VQ', 'CPC-only'})
     parser.add_argument('--model_type', choices={'gumbel_blstm', 'pyramidal_blstm', 'gumbel_markov_blstm'}, default='gumbel_blstm')
     parser.add_argument('--cpc_feature', choices={'rnn', 'bottleneck'}, default='rnn')

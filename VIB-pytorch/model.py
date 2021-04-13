@@ -289,14 +289,21 @@ class GaussianBLSTM(nn.Module):
       pass
 
 class GumbelBLSTM(nn.Module):
-  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1):
+  def __init__(self, 
+               embedding_dim=100, 
+               n_layers=1, 
+               n_class=65, 
+               input_size=80, 
+               ds_ratio=1,
+               bidirectional=True):
     super(GumbelBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
     self.ds_ratio = ds_ratio
-    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
-    self.bottleneck = nn.Linear(2*embedding_dim, 49)
+    self.bidirectional = bidirectional
+    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=bidirectional)
+    self.bottleneck = nn.Linear(2*embedding_dim if bidirectional else embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
 
   def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
@@ -310,8 +317,13 @@ class GumbelBLSTM(nn.Module):
         
     B = x.size(0)
     T = x.size(1)
-    h0 = torch.zeros((2 * self.n_layers, B, self.K))
-    c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    if self.bidirectional:
+      h0 = torch.zeros((2 * self.n_layers, B, self.K))
+      c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    else:
+      h0 = torch.zeros((self.n_layers, B, self.K))
+      c0 = torch.zeros((self.n_layers, B, self.K))
+
     if torch.cuda.is_available():
       h0 = h0.cuda()
       c0 = c0.cuda()
@@ -404,15 +416,23 @@ class ExactDiscreteBLSTM(nn.Module):
         pass
 
 class GumbelPyramidalBLSTM(nn.Module):
-  def __init__(self, embedding_dim=100, n_layers=1, n_class=65, input_size=80, ds_ratio=1.):
+  def __init__(self, 
+               embedding_dim=100, 
+               n_layers=1, 
+               n_class=65, 
+               input_size=80, 
+               ds_ratio=1.,
+               bidirectional=True):
     super(GumbelPyramidalBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
-    self.rnn1 = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
-    self.rnn2 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
-    self.rnn3 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=True)
-    self.bottleneck = nn.Linear(2*embedding_dim, 49)
+    self.bidirectional = bidirectional
+    self.rnn1 = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=bidirectional)
+    self.rnn2 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=bidirectional)
+    self.rnn3 = nn.LSTM(input_size=embedding_dim*4, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=bidirectional)
+    self.bottleneck = nn.Linear(2*embedding_dim if bidirectional else embedding_dim, 
+                                49)
     self.decode = nn.Linear(49, self.n_class)
     
   def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
@@ -424,8 +444,14 @@ class GumbelPyramidalBLSTM(nn.Module):
 
     B = x.size(0)
     T = x.size(1)
-    h0 = torch.zeros((2 * self.n_layers, B, self.K))
-    c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    if self.bidirectional:
+      h0 = torch.zeros((2 * self.n_layers, B, self.K))
+      c0 = torch.zeros((2 * self.n_layers, B, self.K))
+    else:
+      h0 = torch.zeros((self.n_layers, B, self.K))
+      c0 = torch.zeros((self.n_layers, B, self.K))
+
+
     if torch.cuda.is_available():
       h0 = h0.cuda()
       c0 = c0.cuda()

@@ -52,10 +52,10 @@ class FlickrSegmentDataset(torch.utils.data.Dataset):
     self.max_feat_len = 64
     if split == "train":
         self.max_class_size = 200
-        self.min_class_size = 80
+        self.min_class_size = 20
     elif split == "test":
         self.max_class_size = 100
-        self.min_class_size = 80
+        self.min_class_size = 20
 
     data = []
     for sp in self.splits[split]:

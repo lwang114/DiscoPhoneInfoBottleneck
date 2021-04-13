@@ -123,8 +123,6 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
       inputs = self.transforms(audio[:, begin:end]).squeeze(0)
     except:
       inputs = self.transforms(audio)[:, :, int(begin // 160):int(end // 160)].squeeze(0)
-    image_feat = self.image_feats[image_id][feat_idx]
-    image_inputs = torch.FloatTensor(image_feat)
 
     nframes = inputs.size(-1)
     input_mask = torch.zeros(self.max_feat_len)
@@ -132,6 +130,9 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
 
     inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
     outputs = self.preprocessor.to_index(label).squeeze(0)
+    image_feat = self.image_feats[image_id][feat_idx]
+    # XXX image_inputs = torch.FloatTensor(image_feat)
+    image_inputs = torch.FloatTensor(np.eye(512)[outputs])
     
     return inputs, image_inputs, outputs, input_mask 
 
@@ -195,10 +196,10 @@ class FlickrSegmentImagePreprocessor:
       for sp in spl:
           if sp == "train":
               self.max_class_size = 200
-              self.min_class_size = 80
+              self.min_class_size = 500
           elif sp == "test":
               self.max_class_size = 50
-              self.min_class_size = 80
+              self.min_class_size = 500
           if balance_strategy:
               data.extend(load_data_split_balanced(data_path, sp,
                                                    balance_strategy=balance_strategy,

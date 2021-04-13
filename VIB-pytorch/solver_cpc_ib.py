@@ -46,11 +46,20 @@ class Solver(object):
       
       if args.model_type == 'gumbel_blstm':
         self.ds_ratio = 1
-        self.net = cuda(GumbelBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda)
-        self.K = 2*self.K
+        bidirectional = False if 'CPC' in args.loss_type else True
+        self.net = cuda(GumbelBLSTM(self.K, 
+                                    n_class=self.n_class, 
+                                    ds_ratio=self.ds_ratio,
+                                    bidirectional=bidirectional), self.cuda)
+        self.K = 2*self.K if bidirectional else self.K 
       elif args.model_type == 'pyramidal_blstm':
         self.ds_ratio = 4
-        self.net = cuda(GumbelPyramidalBLSTM(self.K, n_class=self.n_class, ds_ratio=self.ds_ratio), self.cuda)
+        bidirectional = False if 'CPC' in args.loss_type else True
+        self.net = cuda(GumbelPyramidalBLSTM(self.K, 
+                                             n_class=self.n_class, 
+                                             ds_ratio=self.ds_ratio, 
+                                             bidirectional=bidirectional), self.cuda)
+        self.K = 2*self.K if bidirectional else self.K
         self.net.weight_init()
       elif args.model_type == 'gumbel_markov_blstm':
         self.ds_ratio = 1
@@ -151,8 +160,8 @@ class Solver(object):
 
         if (self.global_epoch % 2) == 0 : self.scheduler.step()
         compute_abx = False
-        if self.global_epoch % 5 == 0:
-          compute_abx = True
+        # XXX if self.global_epoch % 5 == 0:
+        #   compute_abx = True
         self.test(compute_abx=compute_abx)
 
           
