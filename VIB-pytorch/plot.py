@@ -210,8 +210,9 @@ def plot_image_tsne_flickr(image_feat_file, label_file,
       word_count[word_label] = 1
     else:
       word_count[word_label] += 1
-  tokens = [token for token in sorted(word_count, key=lambda x:word_count[x], reverse=True)
-            if token != '#' and token != '###UNK###']
+  tokens = ["tree", "person"]
+  # [token for token in sorted(word_count, key=lambda x:word_count[x], reverse=True)
+  #          if token != '#' and token != '###UNK###']
 
   # Extract image features
   feat_npz = np.load(image_feat_file)
