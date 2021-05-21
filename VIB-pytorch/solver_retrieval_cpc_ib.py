@@ -34,11 +34,14 @@ class Solver(object):
     self.K = args.K
     self.n_predicts = args.n_predicts # Number of prediction steps
     self.n_negatives = args.n_negatives # Number of negative samples per step
-    self.image_dim = args.image_dimension
+    self.image_dim = 512 if 'res34' in args.image_feature else 2048
     self.global_iter = 0
     self.global_epoch = 0
+    # Dataset
+    self.data_loader = return_data(args)
+    self.num_tokens = self.data_loader['train'].dataset.preprocessor.num_tokens
 
-    self.codebook = cuda(GumbelEmbeddingEMA(65, self.image_dim), self.cuda)
+    self.codebook = cuda(GumbelEmbeddingEMA(self.num_tokens, self.image_dim), self.cuda)
     if args.model_type == 'gumbel_blstm':
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
@@ -52,7 +55,7 @@ class Solver(object):
       self.net = cuda(GumbelMarkovBLSTM(self.K, n_class=self.image_dim), self.cuda)
       self.net.weight_init()
     elif args.model_type == 'blstm':
-      self.ds_ratio = 8 # XXX
+      self.ds_ratio = 1 # XXX
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.codebook = cuda(nn.Linear(512, self.image_dim), self.cuda)
       self.K = 2*self.K
@@ -60,7 +63,7 @@ class Solver(object):
       self.ds_ratio = 1
       self.net = cuda(GumbelBLSTM(self.K, ds_ratio=self.ds_ratio), self.cuda)
       self.K = 2*self.K
-      self.codebook = cuda(VQEmbeddingEMA(65, self.image_dim), self.cuda)
+      self.codebook = cuda(VQEmbeddingEMA(self.num_toknes, self.image_dim), self.cuda)
 
     self.model_type = args.model_type
     self.loss_type = args.loss_type
@@ -93,9 +96,6 @@ class Solver(object):
     self.history['avg_loss']=0.
     self.history['epoch']=0
     self.history['iter']=0
-
-    # Dataset
-    self.data_loader = return_data(args)
  
   def set_mode(self,mode='train'):
     if mode == 'train':

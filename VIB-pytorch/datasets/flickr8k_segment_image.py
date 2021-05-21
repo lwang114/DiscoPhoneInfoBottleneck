@@ -43,6 +43,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
         "test": ["test"],           
       },
       augment = True,
+      image_feature = 'rcnn',
       sample_rate = 16000
   ):
     self.preprocessor = preprocessor
@@ -104,7 +105,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
       else:
         create_gold_file(data_path, sample_rate)
     self.gold_dicts = json.load(open(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")))
-    self.image_feats = np.load(os.path.join(data_path, "flickr8k_res34_finetuned.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
+    self.image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
     
   def sample_sizes(self):
     """
@@ -131,8 +132,8 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
     outputs = self.preprocessor.to_index(label).squeeze(0)
     image_feat = self.image_feats[image_id][feat_idx]
-    # XXX image_inputs = torch.FloatTensor(image_feat)
-    image_inputs = torch.FloatTensor(np.eye(512)[outputs])
+    image_inputs = torch.FloatTensor(image_feat)
+    # image_inputs = torch.FloatTensor(np.eye(512)[outputs])
     
     return inputs, image_inputs, outputs, input_mask 
 
@@ -179,6 +180,7 @@ class FlickrSegmentImagePreprocessor:
     lexicon_path=None,
     use_words=False,
     prepend_wordsep=False,
+    image_feature="rcnn",
     sample_rate=16000,
     balance_strategy="truncate"
   ):
@@ -203,10 +205,11 @@ class FlickrSegmentImagePreprocessor:
           if balance_strategy:
               data.extend(load_data_split_balanced(data_path, sp,
                                                    balance_strategy=balance_strategy,
+                                                   image_feature=image_feature,
                                                    max_class_size=self.max_class_size,
                                                    min_class_size=self.min_class_size))
           else:
-              data.extend(load_data_split(data_path, sp))
+              data.extend(load_data_split(data_path, sp, image_feature=image_feature))
    
     tokens = set()
     lexicon = {}
@@ -438,7 +441,9 @@ class Utterance:
       phrase["label"] = lemmatizer.lemmatize(text[head_idx])
     return phrases
 
-def load_data_split(data_path, split):
+def load_data_split(data_path, 
+                    image_feature,
+                    split):
   """
   Returns:
       examples : a list of mappings of
@@ -454,7 +459,7 @@ def load_data_split(data_path, split):
   with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
     filenames = [line.rstrip("\n").split("/")[-1] for line in f]
 
-  image_feats = np.load(os.path.join(data_path, "flickr8k_res34_finetuned.npz")) # XXX
+  image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz"))
   utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
   
   examples = []
@@ -483,7 +488,11 @@ def load_data_split(data_path, split):
   phrase_f.close()
   return examples
 
-def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_class_size=200, min_class_size=500):
+def load_data_split_balanced(data_path, split, 
+                             balance_strategy="truncate", 
+                             image_feature="rcnn",
+                             max_class_size=200, 
+                             min_class_size=500):
   """
   Returns:
       examples : a list of mappings of
@@ -499,7 +508,7 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
   with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
     filenames = [line.rstrip("\n").split("/")[-1] for line in f]
 
-  image_feats = np.load(os.path.join(data_path, "flickr8k_res34_finetuned.npz")) # XXX
+  image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz")) # XXX
   utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
   
   examples = []
@@ -510,7 +519,7 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
   class_to_example = {c:[] for c in class_freqs}
   
   for line in phrase_f:
-    # if len(examples) > 800: # XXX
+    # if len(examples) > 100: # XXX
     #     break
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
