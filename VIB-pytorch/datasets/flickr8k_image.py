@@ -22,6 +22,7 @@ class FlickrImageDataset(torch.utils.data.Dataset):
     data = []
     class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
     class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] > 0} # XXX
+    self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
     self.n_class = len(class_to_idx)
 
     # Load data paths to audio and visual features
@@ -159,12 +160,16 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('--task', type=int, required=True)
   parser.add_argument('--pretrain_model', default=None)
+  parser.add_argument('--exp_dir', default=None)
   args = parser.parse_args()
 
   task = args.task
   data_path = "/home/lwang114/data/flickr/" #/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/"
   batch_size = 128
   
+  if not os.path.exists(args.exp_dir):
+    os.makedirs(args.exp_dir)
+
   if task == 0:
     trainset = FlickrImageDataset(data_path=data_path, split="train")
     testset = FlickrImageDataset(data_path=data_path, split="test")
@@ -178,8 +183,13 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(trainables, lr=0.0001)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma=0.97)
-    for epoch in range(100):
+    
+    for epoch in range(10):
       image_model.train()
+      out_file = os.path.join(args.exp_dir, f'predictions.{epoch}.readable')
+      f = open(out_file, 'w')
+      f.write('Image ID\tGold label\tPredicted label\n')
+     
       for batch_idx, (regions, label) in enumerate(train_loader):
         score, feat = image_model(regions, return_score=True)
         loss = criterion(score, label)
@@ -204,6 +214,11 @@ if __name__ == "__main__":
           correct += torch.sum(pred == label).float().cpu()
           total += float(score.size(0))
           for idx in range(regions.size(0)):
+            box_idx = batch_idx * batch_size + idx
+            image_id = trainset.dataset[box_idx][0].split("/")[-1].split(".")[0] 
+            gold_name = trainset.class_names[label[idx]]
+            pred_name = trainset.class_names[pred[idx]] 
+            f.write(f'{image_id} {gold_name} {pred_name}\n')
             class_acc[label[idx]] += (pred[idx] == label[idx]).float().cpu()
             class_count[label[idx]] += 1.
 
@@ -213,13 +228,16 @@ if __name__ == "__main__":
             class_acc[c] = class_acc[c] / class_count[c]
 
         print(f"Epoch {epoch}, overall accuracy: {acc}")
-        print(f"Most frequent 10 class average accuracy: {class_acc[:10].mean().item()}")
-        torch.save(image_model.state_dict(), f"image_model.pth")
+        print(f"Most frequent 10 class average accuracy: {class_acc[:10].mean().item()}") 
+        if acc > best_acc:
+          best_acc = acc
+          torch.save(image_model.state_dict(), f"{args.exp_dir}/image_model.{epoch}.pth")
+      f.close()
   elif task == 1:
     trainset = FlickrImageDataset(data_path=data_path, split=None)
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    image_model = Resnet34(pretrained=True, n_class=455) # XXX 
+    image_model = Resnet34(pretrained=True, n_class=455) 
     if args.pretrain_model:
       image_model.load_state_dict(torch.load(args.pretrain_model))
     feats = {}
