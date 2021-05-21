@@ -51,11 +51,16 @@ def return_data(args):
         test_data = FlickrSegmentDataset(dset_dir,
                                          preprocessor, 'test') 
     elif 'FLICKR_SEGMENT_IMAGE' == name :
-        preprocessor = FlickrSegmentImagePreprocessor(dset_dir, 80)
+        preprocessor = FlickrSegmentImagePreprocessor(dset_dir, 80, 
+                                                      image_feature=args.image_feature)
         train_data = FlickrSegmentImageDataset(dset_dir,
-                                               preprocessor, 'train')
+                                               preprocessor, 
+                                               'train',
+                                               image_feature=args.image_feature)
         test_data = FlickrSegmentImageDataset(dset_dir,
-                                         preprocessor, 'test') 
+                                              preprocessor, 
+                                              'test',
+                                              image_feature=args.image_feature) 
     else : raise UnknownDatasetError()
 
 

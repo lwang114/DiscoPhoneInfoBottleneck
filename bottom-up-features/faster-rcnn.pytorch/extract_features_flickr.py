@@ -12,28 +12,6 @@ from model.faster_rcnn.resnet import resnet
 from utils import get_image_blob, save_features
 from numpy_nms.cpu_nms import cpu_nms
 
-def IoU(b1, b2):
-  x_minmin, x_minmax = min(b1[0], b2[0]), max(b1[0], b2[0])
-  y_minmin, y_minmax = min(b1[1], b2[1]), max(b1[1], b2[1])
-  x_maxmin, x_maxmax = min(b1[2], b2[2]), max(b1[2], b2[2])
-  y_maxmin, y_maxmax = min(b1[3], b2[3]), max(b1[3], b2[3])
-
-  if x_minmax >= x_maxmin or y_minmax >= y_maxmin:
-    return 0
-
-  Si = (x_maxmin - x_minmax) * (y_maxmin - y_minmax)
-  So = (x_maxmax - x_minmin) * (y_maxmax - y_minmin)
-  return Si / So  
-
-def find_best_match_box(gt_box, pred_boxes, thres=0.4):
-  ious = [IoU(gt_box, p_box) for p_box in pred_boxes]
-  best_idx = np.argmax(ious)
-  print(gt_box, pred_boxes) # XXX
-  if ious[best_idx] < thres:
-    print(f'Best box IoU {ious[best_idx]} does not reach the IoU threshold {thres}')
-    return -1
-  return best_idx
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Extract Bottom-up features')
     parser.add_argument('--cfg', dest='cfg_file',
@@ -76,7 +54,7 @@ if __name__ == '__main__':
     np.random.seed(cfg.RNG_SEED)
 
     # Load the model.
-    fasterRCNN = resnet(list(range(N_CLASSES)), 101, pretrained=False) # XXX
+    fasterRCNN = resnet(list(range(N_CLASSES)), 101, pretrained=False)
     fasterRCNN.create_architecture()
     fasterRCNN.load_state_dict(torch.load(args.model_file))
     fasterRCNN.to(device)
@@ -86,16 +64,16 @@ if __name__ == '__main__':
     # Load images and ground truth boxes
     imglist = []
     image_to_box = dict()
-    phrase_f = open(os.path.join(args.image_dir, '../flickr8k_phrases'), 'r')
+    phrase_f = open(os.path.join(args.image_dir, '../flickr8k_phrases.json'), 'r')
     idx = 0
     
     for line in phrase_f:
       phrase = json.loads(line)
       idx += 1
-      if idx > 50: # XXX
-        break
-      gt_box = [0]+phrase['bbox']
-      im_file = phrase['image_id']+'.jpg'
+      # if idx > 50: # XXX
+      #   break
+      gt_box = [0.]+phrase['bbox']
+      im_file = '_'.join(phrase['utterance_id'].split('_')[:-1])+'.jpg'
       if not im_file in image_to_box:
         image_to_box[im_file] = [gt_box]
         imglist.append(im_file)
@@ -113,14 +91,12 @@ if __name__ == '__main__':
 
         im_data = torch.from_numpy(blobs).permute(0, 3, 1, 2).to(device)
         im_info = torch.tensor([[blobs.shape[1], blobs.shape[2], im_scales[0]]]).to(device)
-        gt_boxes = im_scales[0] * torch.tensor(image_to_box[im_file]).to(device)
-        num_boxes = torch.zeros(len(gt_boxes)).to(device)
+        gt_boxes = im_scales[0] * torch.FloatTensor(image_to_box[im_file]).unsqueeze(1).to(device)
+        num_boxes = torch.tensor(len(gt_boxes)).to(device)
 
         with torch.set_grad_enabled(False):
             rois, cls_prob, _, _, _, _, _, _, \
-            pooled_feat = fasterRCNN(im_data, im_info, gt_boxes, num_boxes) # TODO
-
-        print('rois.size(), num_boxes', rois.size(), num_boxes) # XXX
+            pooled_feat = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
         boxes = rois.data.cpu().numpy()[:, :, 1:5].squeeze()
         boxes /= im_scales[0]
         cls_prob = cls_prob.data.cpu().numpy().squeeze()
