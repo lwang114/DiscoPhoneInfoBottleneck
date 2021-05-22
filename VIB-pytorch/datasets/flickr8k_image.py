@@ -124,15 +124,15 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer3.children():
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
 
           for child in self.layer4.children():
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
           
           for child in list(self.avgpool.children()):
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
         self.classifier = nn.Linear(512, n_class)
               
     def forward(self, x, return_score=False):
@@ -183,7 +183,7 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(trainables, lr=0.0001)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma=0.97)
-    
+    best_acc = 0
     for epoch in range(10):
       image_model.train()
       out_file = os.path.join(args.exp_dir, f'predictions.{epoch}.readable')
@@ -215,9 +215,9 @@ if __name__ == "__main__":
           total += float(score.size(0))
           for idx in range(regions.size(0)):
             box_idx = batch_idx * batch_size + idx
-            image_id = trainset.dataset[box_idx][0].split("/")[-1].split(".")[0] 
-            gold_name = trainset.class_names[label[idx]]
-            pred_name = trainset.class_names[pred[idx]] 
+            image_id = testset.dataset[box_idx][0].split("/")[-1].split(".")[0] 
+            gold_name = testset.class_names[label[idx]]
+            pred_name = testset.class_names[pred[idx]] 
             f.write(f'{image_id} {gold_name} {pred_name}\n')
             class_acc[label[idx]] += (pred[idx] == label[idx]).float().cpu()
             class_count[label[idx]] += 1.
