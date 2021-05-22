@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import argparse
 import math
+import os
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -9,7 +10,8 @@ from torch.autograd import Variable
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from image_model import Resnet34 
+from image_model import Resnet34 # TODO 
+
 
 class Solver(object):
   
@@ -17,7 +19,7 @@ class Solver(object):
   def __init__(self, args):
     self.args = args
 
-    self.cuda = (args.cuda and torch.cuda.is_available())
+    self.cuda = torch.cuda.is_available()
     self.epoch = args.epoch
     self.batch_size = args.batch_size
 
@@ -35,10 +37,10 @@ class Solver(object):
     self.exp_dir = args.exp_dir
     self.evaluate_only = False 
     if args.mode == 'test':
-      self.load_checkpoint(self.image_model, 
+      self.image_model.load_state_dict(torch.load( 
                            os.path.join(
                              self.exp_dir, 
-                             'image_model.pth'))
+                             'image_model.pth')))
 
   def set_mode(self, mode='train'):
     if mode == 'train':
@@ -49,7 +51,7 @@ class Solver(object):
 
   def train(self, train_loader, test_loader):
     self.set_mode('train')
-    for epoch in range(10):
+    for epoch in range(self.epoch):
       self.image_model.train()     
       for batch_idx, (regions, label) in enumerate(train_loader):
         if batch_idx > 2: # XXX
@@ -103,3 +105,5 @@ class Solver(object):
     print(f"Epoch {epoch}, overall accuracy: {acc}")
     print(f'Most frequent 10 class average accuracy: {class_acc[:10].mean().item()}')
     return acc
+
+  def load_checkpoint(self, )
