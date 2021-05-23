@@ -70,8 +70,8 @@ class Solver(object):
     for epoch in range(self.epoch):
       self.image_model.train()     
       for batch_idx, (regions, label) in enumerate(train_loader):
-        if batch_idx > 2: # XXX
-          break
+        # if batch_idx > 2: # XXX
+        #   break
         score, feat = self.image_model(regions, return_score=True)
         label_onehot = F.one_hot(label, num_classes=self.n_class)
         loss = self.criterion(score, label_onehot.float())
@@ -109,11 +109,10 @@ class Solver(object):
       scores = []
       labels = []
       for batch_idx, (regions, label) in enumerate(test_loader):
-        if batch_idx > 2: # XXX
-          break
+        # if batch_idx > 2: # XXX
+        #   break
         score, feat = self.image_model(regions, return_score=True)
-        label_onehot = F.one_hot(label, num_classes=self.n_class)\
-                       .flatten().cpu()
+        label_onehot = F.one_hot(label, num_classes=self.n_class)
         scores.append(score.cpu())
         labels.append(label_onehot.cpu())
         for idx in range(regions.size(0)):
@@ -124,16 +123,16 @@ class Solver(object):
           image_id = test_loader.dataset.dataset[box_idx][0].split("/")[-1].split(".")[0]
           f.write(f'{image_id} {gold_name} {pred_name}\n') 
     
-
-    scores = (torch.cat(scores) > 0.5).long().detach().numpy()
+    pred_labels = (torch.cat(scores) > 0.5).long().detach().numpy()
     labels = torch.cat(labels).detach().numpy()
-    ps, rs, f1s, _ = precision_recall_fscore_support(labels.flatten(), scores.flatten())
+    ps, rs, f1s, _ = precision_recall_fscore_support(labels.flatten(), pred_labels.flatten())
     p, r, f1 = ps[1], rs[1], f1s[1]
     print(f'Epoch {self.history["epoch"]}\tPrecision: {p}\tRecall: {r}\tF1: {f1}')
   
     class_f1s = np.zeros(self.n_class)
     for c in range(self.n_class):
-      _, _, class_f1s[c], _ = precision_recall_fscore_support(labels[:, c], scores[:, c])  
+      _, _, class_f1, _ = precision_recall_fscore_support(labels[:, c], pred_labels[:, c]) 
+      class_f1s[c] = class_f1[-1] 
     print(f'Most frequent 10 class F1: {class_f1s[:10].mean()}')
 
     return f1

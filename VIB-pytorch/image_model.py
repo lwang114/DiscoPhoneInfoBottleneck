@@ -1,3 +1,4 @@
+import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
 import torchvision.models as imagemodels
@@ -23,15 +24,15 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer3.children():
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
 
           for child in self.layer4.children():
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
           
           for child in list(self.avgpool.children()):
             for p in child.parameters():
-              p.requires_grad = True # XXX
+              p.requires_grad = True
         self.classifier = nn.Linear(512, n_class)
               
     def forward(self, x, return_score=False):
@@ -53,5 +54,3 @@ class Resnet34(imagemodels.ResNet):
           return score, emb
         else:
           return emb
-
-
