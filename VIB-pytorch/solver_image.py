@@ -40,7 +40,8 @@ class Solver(object):
     self.optimizer = optim.Adam(trainables, lr=0.0001)
     self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, 
                                                       gamma=0.97)
-    self.criterion = nn.BCEWithLogitsLoss()
+    self.pos_weight = args.pos_weight * torch.ones(self.n_class)
+    self.criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
 
     self.history = dict()
     self.history['acc'] = 0.
@@ -69,8 +70,8 @@ class Solver(object):
     for epoch in range(self.epoch):
       self.image_model.train()     
       for batch_idx, (regions, label) in enumerate(train_loader):
-        # if batch_idx > 2: # XXX
-        #   break
+        if batch_idx > 2: # XXX
+          break
         score, feat = self.image_model(regions, return_score=True)
         label_onehot = F.one_hot(label, num_classes=self.n_class)
         loss = self.criterion(score, label_onehot.float())
@@ -108,13 +109,13 @@ class Solver(object):
       scores = []
       labels = []
       for batch_idx, (regions, label) in enumerate(test_loader):
-        # if batch_idx > 2: # XXX
-        #   break
+        if batch_idx > 2: # XXX
+          break
         score, feat = self.image_model(regions, return_score=True)
         label_onehot = F.one_hot(label, num_classes=self.n_class)\
                        .flatten().cpu()
-        scores.append(score.flatten().cpu())
-        labels.append(label_onehot.flatten().cpu())
+        scores.append(score.cpu())
+        labels.append(label_onehot.cpu())
         for idx in range(regions.size(0)):
           preds = np.where(score[idx].cpu().detach().numpy() > 0)[0] 
           pred_name = ','.join([self.class_names[pred] for pred in preds])
@@ -122,10 +123,17 @@ class Solver(object):
           box_idx = batch_idx * self.batch_size + idx
           image_id = test_loader.dataset.dataset[box_idx][0].split("/")[-1].split(".")[0]
           f.write(f'{image_id} {gold_name} {pred_name}\n') 
+    
 
     scores = (torch.cat(scores) > 0.5).long().detach().numpy()
     labels = torch.cat(labels).detach().numpy()
-    ps, rs, f1s, _ = precision_recall_fscore_support(labels, scores)
+    ps, rs, f1s, _ = precision_recall_fscore_support(labels.flatten(), scores.flatten())
     p, r, f1 = ps[1], rs[1], f1s[1]
     print(f'Epoch {self.history["epoch"]}\tPrecision: {p}\tRecall: {r}\tF1: {f1}')
+  
+    class_f1s = np.zeros(self.n_class)
+    for c in range(self.n_class):
+      _, _, class_f1s[c], _ = precision_recall_fscore_support(labels[:, c], scores[:, c])  
+    print(f'Most frequent 10 class F1: {class_f1s[:10].mean()}')
+
     return f1
