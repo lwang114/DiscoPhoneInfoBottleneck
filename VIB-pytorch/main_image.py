@@ -53,5 +53,6 @@ if __name__ == '__main__':
   parser.add_argument('--mode', choices={'train', 'test'})
   parser.add_argument('--epoch', default=10, type=int)
   parser.add_argument('--batch_size', default=128, type=int)
+  parser.add_argument('--pos_weight', default=1., type=int)
   args = parser.parse_args()
   main(args)
