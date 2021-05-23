@@ -40,7 +40,7 @@ class Solver(object):
     self.optimizer = optim.Adam(trainables, lr=0.0001)
     self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, 
                                                       gamma=0.97)
-    self.criterion = nn.BCELoss()
+    self.criterion = nn.BCEWithLogitsLoss()
 
     self.history = dict()
     self.history['acc'] = 0.
@@ -69,11 +69,11 @@ class Solver(object):
     for epoch in range(self.epoch):
       self.image_model.train()     
       for batch_idx, (regions, label) in enumerate(train_loader):
-        if batch_idx > 2: # XXX
-          break
+        # if batch_idx > 2: # XXX
+        #   break
         score, feat = self.image_model(regions, return_score=True)
         label_onehot = F.one_hot(label, num_classes=self.n_class)
-        loss = self.criterion(score, label_onehot)
+        loss = self.criterion(score, label_onehot.float())
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -108,15 +108,15 @@ class Solver(object):
       scores = []
       labels = []
       for batch_idx, (regions, label) in enumerate(test_loader):
-        if batch_idx > 2: # XXX
-          break
+        # if batch_idx > 2: # XXX
+        #   break
         score, feat = self.image_model(regions, return_score=True)
-        label_onehot = F.one_hot(label, num_classes=self.n_class)
+        label_onehot = F.one_hot(label, num_classes=self.n_class)\
                        .flatten().cpu()
         scores.append(score.flatten().cpu())
         labels.append(label_onehot.flatten().cpu())
         for idx in range(regions.size(0)):
-          preds = np.where(score[idx].cpu().detach().numpy() > 0) 
+          preds = np.where(score[idx].cpu().detach().numpy() > 0)[0] 
           pred_name = ','.join([self.class_names[pred] for pred in preds])
           gold_name = test_loader.dataset.class_names[label[idx]]
           box_idx = batch_idx * self.batch_size + idx
@@ -125,6 +125,7 @@ class Solver(object):
 
     scores = (torch.cat(scores) > 0.5).long().detach().numpy()
     labels = torch.cat(labels).detach().numpy()
-    p, r, f1, _ = precision_recall_fscore_support(labels, scores)
+    ps, rs, f1s, _ = precision_recall_fscore_support(labels, scores)
+    p, r, f1 = ps[1], rs[1], f1s[1]
     print(f'Epoch {self.history["epoch"]}\tPrecision: {p}\tRecall: {r}\tF1: {f1}')
     return f1
