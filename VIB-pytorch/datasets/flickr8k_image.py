@@ -18,22 +18,20 @@ class FlickrImageDataset(torch.utils.data.Dataset):
       self, data_path, split
     ):
     self.data_path = data_path
- 
-    data = []
 
-    self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
-    self.n_class = len(class_to_idx)
     if split == "train":
       self.max_keep_size = 200
     elif split == "test":
       self.max_keep_size = 50
 
     # Load data paths to audio and visual features
-    data = load_data_split(data_path, 
-                           split, 
-                           class_to_idx,
+    data, class_to_idx = load_data_split(
+                           data_path, split, 
                            max_keep_size=self.max_keep_size)
-  
+    self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
+    self.n_class = len(class_to_idx)
+    print(f'Number of classes: {self.n_class}')
+
     # Set up transforms
     self.transform = transforms.Compose(
                 [transforms.Scale(256),
@@ -62,8 +60,8 @@ class FlickrImageDataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.dataset)
 
-def load_data_split(data_path, split, class_to_idx, 
-                    max_keep_size=200, min_class_size=500):
+def load_data_split(data_path, split,
+                    max_keep_size=200, min_class_size=50):
   """
   Returns:
       examples : a list of mappings of
@@ -103,7 +101,7 @@ def load_data_split(data_path, split, class_to_idx,
     label = phrase["label"]
     if not label in class_to_idx:
       continue
-    elif keep_counts[label] > max_keep_size[label]:
+    elif keep_counts[label] > max_keep_size:
       continue
 
     if image_id in filenames:
@@ -116,7 +114,7 @@ def load_data_split(data_path, split, class_to_idx,
 
   print(f"Number of bounding boxes = {len(examples)}")
   phrase_f.close()
-  return examples
+  return examples, class_to_idx
 
 class Resnet34(imagemodels.ResNet):
     def __init__(self, pretrained=True, n_class=1):

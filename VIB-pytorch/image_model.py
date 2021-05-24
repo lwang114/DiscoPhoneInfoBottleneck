@@ -28,11 +28,7 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer4.children():
             for p in child.parameters():
-              p.requires_grad = True
-          
-          for child in list(self.avgpool.children()):
-            for p in child.parameters():
-              p.requires_grad = True
+              p.requires_grad = True 
         self.classifier = nn.Linear(512, n_class)
               
     def forward(self, x, return_score=False):
