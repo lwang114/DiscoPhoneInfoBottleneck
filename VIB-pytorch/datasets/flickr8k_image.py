@@ -20,13 +20,19 @@ class FlickrImageDataset(torch.utils.data.Dataset):
     self.data_path = data_path
  
     data = []
-    class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-    class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] > 0} # XXX
+
     self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
     self.n_class = len(class_to_idx)
+    if split == "train":
+      self.max_keep_size = 200
+    elif split == "test":
+      self.max_keep_size = 50
 
     # Load data paths to audio and visual features
-    data = load_data_split(data_path, split, class_to_idx)
+    data = load_data_split(data_path, 
+                           split, 
+                           class_to_idx,
+                           max_keep_size=self.max_keep_size)
   
     # Set up transforms
     self.transform = transforms.Compose(
@@ -56,7 +62,8 @@ class FlickrImageDataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.dataset)
 
-def load_data_split(data_path, split, class_to_idx):
+def load_data_split(data_path, split, class_to_idx, 
+                    max_keep_size=200, min_class_size=500):
   """
   Returns:
       examples : a list of mappings of
@@ -69,6 +76,10 @@ def load_data_split(data_path, split, class_to_idx):
             "feat_idx": int, image feature idx
           }
   """
+  class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
+  class_to_idx = {c:i for i, c in enumerate(sorted(class_freqs, key=lambda x:class_freqs[x], reverse=True)) if class_freqs[c] >= min_class_size} # XXX
+  keep_counts = {c:0 for c in class_to_idx} 
+
   if not split:
     filenames = []
     for split in ['train', 'val', 'test']:
@@ -92,12 +103,15 @@ def load_data_split(data_path, split, class_to_idx):
     label = phrase["label"]
     if not label in class_to_idx:
       continue
+    elif keep_counts[label] > max_keep_size[label]:
+      continue
 
     if image_id in filenames:
       filename = os.path.join(data_path, "Flicker8k_Dataset", image_id + ".jpg")
       example = {"image": filename,
                  "box": box,
                  "label": class_to_idx[label]}
+      keep_counts[label] += 1
       examples.append(example)
 
   print(f"Number of bounding boxes = {len(examples)}")
@@ -200,7 +214,8 @@ if __name__ == "__main__":
         if batch_idx % 100 == 0:
           print(f"Iter:{batch_idx}, loss:{loss.item()}")
 
-      if (epoch % 2) == 0 : scheduler.step()
+      if (epoch % 2) == 0: 
+        scheduler.step()
       
       with torch.no_grad():
         image_model.eval()
