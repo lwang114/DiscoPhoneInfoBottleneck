@@ -47,6 +47,8 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1):
     gold_units = gold_dict['units'][::ds_rate]
     gold_tokens = gold_dict['phoneme_text'][::ds_rate]
     for p_idx, g_idx, g_token in zip(pred_dict['units'], gold_units, gold_tokens):
+      if p_idx < 0:
+        continue
       confusion_dict[g_token][p_idx] += 1
       confusion_mat[g_idx][p_idx] += 1
 

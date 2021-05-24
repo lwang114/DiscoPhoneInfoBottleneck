@@ -123,7 +123,7 @@ class Solver(object):
           image_id = test_loader.dataset.dataset[box_idx][0].split("/")[-1].split(".")[0]
           f.write(f'{image_id} {gold_name} {pred_name}\n') 
     
-    pred_labels = (torch.cat(scores) > 0.5).long().detach().numpy()
+    pred_labels = (torch.cat(scores) > 0).long().detach().numpy()
     labels = torch.cat(labels).detach().numpy()
     ps, rs, f1s, _ = precision_recall_fscore_support(labels.flatten(), pred_labels.flatten())
     p, r, f1 = ps[1], rs[1], f1s[1]
