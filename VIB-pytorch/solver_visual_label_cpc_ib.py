@@ -18,8 +18,8 @@ from utils import cuda
 import cpc.criterion as cr
 import cpc.eval as ev
 from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM
-from image_model import Resnet34 
 from pathlib import Path
+from image_model import Resnet34 
 from evaluate import evaluate
 
 class Solver(object):
@@ -46,10 +46,20 @@ class Solver(object):
 
       # Dataset
       self.data_loader = return_data(args)
-      self.n_class = self.data_loader['train']\
-                     .dataset.preprocessor.num_tokens
-     
-      self.image_net = Resnet34(n_class=self.n_class)
+      # XXX self.n_class = self.data_loader['train']\
+      #                .dataset.preprocessor.num_tokens
+      class_freqs = json.load(open(os.path.join(
+                    args.dset_dir, 
+                    "phrase_classes.json"), "r"))
+      class_to_idx = {c:i for i, c in enumerate(sorted(
+                                      class_freqs, 
+                                      key=lambda x:class_freqs[x], 
+                                      reverse=True)) 
+                      if class_freqs[c] > 0}
+      self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
+      self.n_class = len(class_to_idx)
+ 
+      self.image_net = Resnet34(pretrained=True, n_class=self.n_class)
       self.image_net.load_state_dict(
                        torch.load(
                          os.path.join(args.image_model_dir,
@@ -57,6 +67,8 @@ class Solver(object):
                          )
                        )
                      ) 
+      self.image_net = cuda(self.image_net, self.cuda)
+
       if args.model_type == 'gumbel_blstm':
         self.ds_ratio = 1
         bidirectional = False if 'CPC' in args.loss_type else True
@@ -122,7 +134,8 @@ class Solver(object):
       elif mode == 'eval':
         self.audio_net.eval()
         self.image_net.eval()
-      else : raise('mode error. It should be either train or eval')
+      else: 
+        raise('mode error. It should be either train or eval')
   
   def train(self):
       self.set_mode('train')
@@ -132,22 +145,22 @@ class Solver(object):
 
       total_loss = 0.
       total_step = 0
-      pred_labels = []
-      pred_dicts = []
-      for e in range(self.epoch) :
+      for e in range(self.epoch):
         self.global_epoch += 1
-        
+        pred_labels = []
+        gold_labels = []
+        pred_dicts = []
         for idx, (audios, images, _, masks)\
             in enumerate(self.data_loader['train']):
           self.global_iter += 1
           x = cuda(audios, self.cuda)
           images = cuda(images, self.cuda)
-          image_logit, _ = self.image_net(images, 
-                             return_score=True) 
+          image_logit, _ = self.image_net(images, return_score=True) 
           if self.image_feature == 'label':
             y = F.one_hot(image_logit.topk(3, dim=-1)[1], self.n_class) # XXX
+            y = y.sum(dim=1).float()
           elif self.image_feature == 'multi_label':
-            y = (image_logit > 0).long()
+            y = (image_logit > 0).float()
           elif self.image_feature == 'soft_label':
             y = F.softmax(image_logit, dim=-1)
 
@@ -204,11 +217,11 @@ class Solver(object):
                   f'cpc acc at step 1:{cpc_acc[0]:.4f} cpc acc at step last:{cpc_acc[-1]:.4f}')
         pred_labels = torch.cat(pred_labels).detach().numpy()
         gold_labels = torch.cat(gold_labels).detach().numpy()
-        _, _, f1s, _ precision_recall_fscore_support(
+        _, _, f1s, _ = precision_recall_fscore_support(
                            gold_labels.flatten(),
                            pred_labels.flatten()
                        )
-        print('Epoch {self.global_epoch}\ttraining F1: {f1s[1]}')
+        print(f'Epoch {self.global_epoch}\ttraining F1: {f1s[1]}')
 
         if (self.global_epoch % 2) == 0: 
           self.scheduler.step()
@@ -242,7 +255,15 @@ class Solver(object):
             B = audios.size(0)
           x = cuda(audios, self.cuda)
           images = cuda(images, self.cuda)
-          y = self.image_net(images, output_type=self.image_feature)
+          image_logit, _ = self.image_net(images, return_score=self.image_feature)
+          if self.image_feature == 'label':
+            y = F.one_hot(image_logit.topk(3, dim=-1)[1], self.n_class) # XXX
+            y = y.sum(dim=1).float()
+          elif self.image_feature == 'multi_label':
+            y = (image_logit > 0).float()
+          elif self.image_feature == 'soft_label':
+            y = F.softmax(image_logit, dim=-1)
+
           masks = cuda(masks, self.cuda)
 
           in_logit, logits, encoding = self.audio_net(
@@ -253,7 +274,6 @@ class Solver(object):
                               x, masks=masks, 
                               return_feat=self.cpc_feature
                             )
-
 
           # Word prediction
           logit = logits.sum(dim=-2)
@@ -332,12 +352,12 @@ class Solver(object):
         conf_df.to_csv(self.ckpt_dir.joinpath('confusion_matrix.csv'))
       print('[TEST RESULT]')
       print('Epoch {}\tLoss: {:.2f}\tPrecision: {:.2f}\tRecall: {:.2f}\tF1: {:.2f}'\
-            .format(self.global_epoch, avg_loss, p, r, f))
+            .format(self.global_epoch, avg_loss, p, r, f1))
       print('Top 10 F1: {:.2f}\tBest F1: {:.2f}'\
             .format(class_f1s[:10].mean(), self.history['f1']))
-      print('Phone Token Precision:{:.4f}\tPhone Token Recall:{:.4f}\tPhone Token F1:{:.4f}'\
+      print('Phone Token Precision: {:.4f}\tPhone Token Recall: {:.4f}\tPhone Token F1: {:.4f}'\
             .format(token_prec, token_recall, token_f1), end=' ') 
-      print('CPC Average Accuracy:{:.4f}\tCPC Average Error:{:.4f}'\
+      print('CPC Average Accuracy: {:.4f}\tCPC Average Error: {:.4f}'\
             .format(avg_cpc_acc, 1 - avg_cpc_acc))
       if compute_abx:
         # Compute ABX score

@@ -1,6 +1,7 @@
 import torch
 import torchaudio
 import torchvision
+from torchvision import transforms
 # import nltk
 # from nltk.stem import WordNetLemmatizer
 # from allennlp.predictors.predictor import Predictor
@@ -12,6 +13,7 @@ import json
 from tqdm import tqdm
 from itertools import combinations
 from copy import deepcopy
+from PIL import Image
 # dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
 # dep_parser._model = dep_parser._model.cuda()
 # lemmatizer = WordNetLemmatizer()
@@ -69,7 +71,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
       print("Number of {} audio files = {}".format(split, len(examples)))
 
     # Set up transforms
-    self.transforms = [
+    self.audio_transforms = [
         torchaudio.transforms.MelSpectrogram(
           sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
           n_mels=preprocessor.num_features,
@@ -85,13 +87,21 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
                 torchaudio.transforms.TimeMasking(100, iid_masks=True),
                 torchaudio.transforms.TimeMasking(100, iid_masks=True),
             ]
-    self.transforms = torchvision.transforms.Compose(self.transforms)
+        self.audio_transforms.extend(augmentation)
+    self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms)
+
+    self.image_transforms = transforms.Compose(
+                [transforms.Scale(256),
+                 transforms.CenterCrop(224),
+                 transforms.ToTensor(),
+                 transforms.Normalize((0.485, 0.456, 0.406), 
+                                      (0.229, 0.224, 0.225))]
+                )
 
     # Load each image-caption pairs
     audio = [example["audio"] for example in data]
     image = [example["image"] for example in data]
     boxes = [example["box"] for example in data]
-    labels = [example["label"] for example in data]
     text = [example["text"] for example in data]
     duration = [example["duration"] for example in data]
     interval = [example["interval"] for example in data]
@@ -126,9 +136,11 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     end = int(interval[1] * self.sample_rate)
     audio, _ = torchaudio.load(audio_file)
     try:
-      inputs = self.transforms(audio[:, begin:end]).squeeze(0)
+      inputs = self.audio_transforms(audio[:, begin:end]).squeeze(0)
     except:
-      inputs = self.transforms(audio)[:, :, int(begin // 160):int(end // 160)].squeeze(0)
+      inputs = self.audio_transforms(audio)
+      inputs = inputs[:, :, int(begin // 160):int(end // 160)]
+      inputs = inputs.squeeze(0)
 
     nframes = inputs.size(-1)
     input_mask = torch.zeros(self.max_feat_len)
@@ -148,11 +160,11 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
         print(f"Gray scale image {image_file}, convert to RGB".format(image_file))
         image = np.tile(np.array(image)[:, :, np.newaxis], (1, 1, 3))
       region = image.crop(box=box)
-      region = self.transform(region)
+      region = self.image_transforms(region)
       return region
 
   def __getitem__(self, idx):
-    audio_file, image_file, label, dur, interval, box, image_id, feat_idx = self.dataset[idx]
+    audio_file, image_file, label, duration, interval, box, image_id, feat_idx = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file, duration, interval)
     image_inputs = self.load_image(image_file, image_id, box, feat_idx)
     outputs = self.preprocessor.to_index(label).squeeze(0)
@@ -532,6 +544,9 @@ def load_data_split_balanced(data_path, split,
   """
   with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
     filenames = [line.rstrip("\n").split("/")[-1] for line in f]
+  
+  if image_feature.split('_')[-1] == 'label':
+    image_feature = 'rcnn'
 
   image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz")) # XXX
   utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
