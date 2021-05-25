@@ -50,6 +50,7 @@ if __name__ == '__main__':
   parser.add_argument('--data_path', default='/home/lwang114/data/flickr/')
 
   parser.add_argument('--exp_dir', default='checkpoints/image_classification')
+  parser.add_argument('--loss_type', choices={'ce', 'bce'}, default='bce')
   parser.add_argument('--mode', choices={'train', 'test'})
   parser.add_argument('--epoch', default=10, type=int)
   parser.add_argument('--batch_size', default=128, type=int)

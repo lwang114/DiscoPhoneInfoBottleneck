@@ -231,7 +231,7 @@ class Solver(object):
         self.test(compute_abx=compute_abx)
 
           
-  def test(self, save_ckpt=True, compute_abx=False):
+  def test(self, save_ckpt=True, compute_abx=False, out_prefix='predictions'):
       self.set_mode('eval')
       testset = self.data_loader['test'].dataset
 
@@ -247,7 +247,13 @@ class Solver(object):
       gold_labels = []
       if not self.ckpt_dir.joinpath('feats').is_dir():
         self.ckpt_dir.joinpath('feats').mkdir()
-      
+
+      out_file = os.path.join(
+                   self.exp_dir,
+                   f'{out_prefix}.{self.global_epoch}.readable'
+                 )
+      f = open(out_file, 'r')
+      f.write('Image ID\tGold label\tPredicted label\n')      
       with torch.no_grad():
         B = 0
         for b_idx, (audios, images, _, masks) in enumerate(self.data_loader['test']):
@@ -263,7 +269,7 @@ class Solver(object):
             y = (image_logit > 0).float()
           elif self.image_feature == 'soft_label':
             y = F.softmax(image_logit, dim=-1)
-
+          
           masks = cuda(masks, self.cuda)
 
           in_logit, logits, encoding = self.audio_net(
@@ -277,6 +283,15 @@ class Solver(object):
 
           # Word prediction
           logit = logits.sum(dim=-2)
+          for idx in range(audios.size(0)):
+            global_idx = b_idx * B + idx
+            image_id = testset.dataset[global_idx][-2]
+            golds = y[idx].nonzero().cpu().detach().numpy()
+            gold_names = ','.join([self.class_names[c] for c in golds])
+            preds = (logit[idx] > 0).long().nonzero().detach().numpy()             
+            pred_names = ','.join([self.class_names[c] for c in preds])
+            f.write(f'{image_id}\t{gold_names}\t{pred_names}\n')
+
           pred_labels.append((logit > 0).long().cpu())
           gold_labels.append((y > 0).long().cpu())
           cur_class_loss = F.binary_cross_entropy_with_logits(

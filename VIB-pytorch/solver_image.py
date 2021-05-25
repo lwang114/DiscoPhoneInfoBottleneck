@@ -40,8 +40,13 @@ class Solver(object):
     self.optimizer = optim.Adam(trainables, lr=0.0001)
     self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, 
                                                       gamma=0.97)
+    
     self.pos_weight = args.pos_weight * torch.ones(self.n_class)
-    self.criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
+    self.loss_type = args.loss_type
+    if self.loss_type == 'bce':
+      self.criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
+    else:
+      self.criterion = nn.CrossEntropyLoss()
 
     self.history = dict()
     self.history['acc'] = 0.
@@ -73,8 +78,12 @@ class Solver(object):
         # if batch_idx > 2: # XXX
         #   break
         score, feat = self.image_model(regions, return_score=True)
-        label_onehot = F.one_hot(label, num_classes=self.n_class)
-        loss = self.criterion(score, label_onehot.float())
+        
+        if args.loss_type == 'bce': 
+          label_onehot = F.one_hot(label, num_classes=self.n_class)
+          loss = self.criterion(score, label_onehot.float())
+        else:
+          loss = self.criterion(score, label)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -101,8 +110,8 @@ class Solver(object):
       class_count = torch.zeros(test_loader.dataset.n_class)
 
       out_file = os.path.join(
-                    self.exp_dir, 
-                    f'{out_prefix}.{self.history["epoch"]}.readable'
+                   self.exp_dir, 
+                   f'{out_prefix}.{self.history["epoch"]}.readable'
                  )
       f = open(out_file, 'w')
       f.write('Image ID\tGold label\tPredicted label\n')
@@ -112,6 +121,9 @@ class Solver(object):
         # if batch_idx > 2: # XXX
         #   break
         score, feat = self.image_model(regions, return_score=True)
+        if self.loss_type == 'ce':
+          score = F.one_hot(score.max(-1)[1], num_classes=self.n_class)
+
         label_onehot = F.one_hot(label, num_classes=self.n_class)
         scores.append(score.cpu())
         labels.append(label_onehot.cpu())
@@ -121,7 +133,7 @@ class Solver(object):
           gold_name = test_loader.dataset.class_names[label[idx]]
           box_idx = batch_idx * self.batch_size + idx
           image_id = test_loader.dataset.dataset[box_idx][0].split("/")[-1].split(".")[0]
-          f.write(f'{image_id} {gold_name} {pred_name}\n') 
+          f.write(f'{image_id}\t{gold_name}\t{pred_name}\n') 
     
     pred_labels = (torch.cat(scores) > 0).long().detach().numpy()
     labels = torch.cat(labels).detach().numpy()
