@@ -71,6 +71,9 @@ if __name__ == '__main__':
         '--batch_size', default = 32, type=int, help='batch size'
     )
     parser.add_argument(
+        '--pos_weight', default = 1., type=float
+    )
+    parser.add_argument(
         '--dataset', 
         choices={'MSCOCO2K', 'FLICKR_SEGMENT_IMAGE'}, 
         default='FLICKR_SEGMENT_IMAGE', type=str, help='dataset name'
@@ -95,8 +98,12 @@ if __name__ == '__main__':
         default='label'
     )
     parser.add_argument(
+        '--min_class_size',
+        type=int, default=500
+    )
+    parser.add_argument(
         '--image_model_dir', 
-        type=str, default='checkpoints/flickr8k_image_classification'
+        type=str, default='checkpoints/image_classification_weight1_minfreq500/'
     )
     parser.add_argument(
         '--dset_dir', 

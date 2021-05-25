@@ -43,22 +43,16 @@ class Solver(object):
       self.image_feature = args.image_feature
       self.loss_type = args.loss_type
       self.dataset = args.dataset
+      self.pos_weight = args.pos_weight
 
       # Dataset
       self.data_loader = return_data(args)
-      # XXX self.n_class = self.data_loader['train']\
-      #                .dataset.preprocessor.num_tokens
-      class_freqs = json.load(open(os.path.join(
-                    args.dset_dir, 
-                    "phrase_classes.json"), "r"))
-      class_to_idx = {c:i for i, c in enumerate(sorted(
-                                      class_freqs, 
-                                      key=lambda x:class_freqs[x], 
-                                      reverse=True)) 
-                      if class_freqs[c] > 0}
-      self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
-      self.n_class = len(class_to_idx)
- 
+      self.n_class = self.data_loader['train']\
+                     .dataset.preprocessor.num_tokens
+      self.class_names = self.data_loader['train']\
+                         .dataset.preprocessor.tokens
+      print(f'visual label class: {self.n_class}') # XXX
+  
       self.image_net = Resnet34(pretrained=True, n_class=self.n_class)
       self.image_net.load_state_dict(
                        torch.load(
@@ -157,8 +151,9 @@ class Solver(object):
           images = cuda(images, self.cuda)
           image_logit, _ = self.image_net(images, return_score=True) 
           if self.image_feature == 'label':
-            y = F.one_hot(image_logit.topk(3, dim=-1)[1], self.n_class) # XXX
-            y = y.sum(dim=1).float()
+            # y = F.one_hot(image_logit.topk(1, dim=-1)[1], self.n_class) # XXX
+            # y = y.sum(dim=1).float()
+            y = image_logit.max(-1)[1]
           elif self.image_feature == 'multi_label':
             y = (image_logit > 0).float()
           elif self.image_feature == 'soft_label':
@@ -172,9 +167,14 @@ class Solver(object):
                                           temp=temp, 
                                           return_feat=self.cpc_feature)
           logit = logits.sum(-2)
-          class_loss = F.binary_cross_entropy_with_logits(
-                          logit, y
-                       ).div(math.log(2))
+          
+          if self.image_feature == 'label':
+            class_loss = F.cross_entropy(logit, y)
+          else:
+            class_loss = F.binary_cross_entropy_with_logits(
+                            logit, self.pos_weight * y
+                         ).div(math.log(2))
+
           info_loss = (F.softmax(in_logit, dim=-1)\
                         * F.log_softmax(in_logit, dim=-1)
                       ).sum(1).mean().div(math.log(2))
@@ -182,8 +182,15 @@ class Solver(object):
           
           izy_bound = math.log(self.n_class,2) - class_loss
           izx_bound = info_loss
-          pred_labels.append((logit > 0).long().cpu())
-          gold_labels.append((y > 0).long().cpu())
+
+          if self.image_feature == 'label': 
+            pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
+            gold_label = F.one_hot(y, self.n_class)
+            pred_labels.append(pred_label.cpu())
+            gold_labels.append(gold_label.cpu())
+          else:
+            pred_labels.append((logit > 0).long().cpu())
+            gold_labels.append((y > 0).long().cpu())
           
           # Compute CPC loss
           spk_labels = torch.zeros(x.size(0), 
@@ -249,10 +256,10 @@ class Solver(object):
         self.ckpt_dir.joinpath('feats').mkdir()
 
       out_file = os.path.join(
-                   self.exp_dir,
+                   self.ckpt_dir,
                    f'{out_prefix}.{self.global_epoch}.readable'
                  )
-      f = open(out_file, 'r')
+      f = open(out_file, 'w')
       f.write('Image ID\tGold label\tPredicted label\n')      
       with torch.no_grad():
         B = 0
@@ -263,8 +270,9 @@ class Solver(object):
           images = cuda(images, self.cuda)
           image_logit, _ = self.image_net(images, return_score=self.image_feature)
           if self.image_feature == 'label':
-            y = F.one_hot(image_logit.topk(3, dim=-1)[1], self.n_class) # XXX
-            y = y.sum(dim=1).float()
+            # y = F.one_hot(image_logit.topk(1, dim=-1)[1], self.n_class) # XXX
+            # y = y.sum(dim=1).float()
+            y = image_logit.max(-1)[1]
           elif self.image_feature == 'multi_label':
             y = (image_logit > 0).float()
           elif self.image_feature == 'soft_label':
@@ -286,17 +294,30 @@ class Solver(object):
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             image_id = testset.dataset[global_idx][-2]
-            golds = y[idx].nonzero().cpu().detach().numpy()
-            gold_names = ','.join([self.class_names[c] for c in golds])
-            preds = (logit[idx] > 0).long().nonzero().detach().numpy()             
+            if self.image_feature == 'label':
+              golds = [y[idx].cpu().detach().numpy()] 
+              preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
+            else:
+              golds = y[idx].nonzero()\
+                      .squeeze(-1).cpu().detach().numpy()
+              preds = (logit[idx] > 0)\
+                      .long().nonzero().squeeze(-1).cpu().detach().numpy() 
+
+            gold_names = ','.join([self.class_names[c] for c in golds])  
             pred_names = ','.join([self.class_names[c] for c in preds])
             f.write(f'{image_id}\t{gold_names}\t{pred_names}\n')
 
-          pred_labels.append((logit > 0).long().cpu())
-          gold_labels.append((y > 0).long().cpu())
-          cur_class_loss = F.binary_cross_entropy_with_logits(
-                              logit, y,
-                              size_average=False).div(math.log(2))
+          if self.image_feature == 'label': 
+            pred_labels.append(F.one_hot(y, self.n_class).cpu())
+            gold_labels.append(F.one_hot(logit.max(-1)[1], self.n_class).cpu())
+            cur_class_loss = F.cross_entropy(logit, y)
+          else:
+            pred_labels.append((logit > 0).long().cpu())
+            gold_labels.append((y > 0).long().cpu())
+            cur_class_loss = F.binary_cross_entropy_with_logits(
+                                logit, y,
+                                size_average=False).div(math.log(2))
+                    
           cur_info_loss = (F.softmax(in_logit,dim=-1)\
                             * F.log_softmax(in_logit, dim=-1)
                           ).sum(1).mean().div(math.log(2))
@@ -371,7 +392,7 @@ class Solver(object):
       print('Top 10 F1: {:.2f}\tBest F1: {:.2f}'\
             .format(class_f1s[:10].mean(), self.history['f1']))
       print('Phone Token Precision: {:.4f}\tPhone Token Recall: {:.4f}\tPhone Token F1: {:.4f}'\
-            .format(token_prec, token_recall, token_f1), end=' ') 
+            .format(token_prec, token_recall, token_f1)) 
       print('CPC Average Accuracy: {:.4f}\tCPC Average Error: {:.4f}'\
             .format(avg_cpc_acc, 1 - avg_cpc_acc))
       if compute_abx:
