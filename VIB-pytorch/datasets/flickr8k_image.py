@@ -15,7 +15,10 @@ import numpy as np
 
 class FlickrImageDataset(torch.utils.data.Dataset):
   def __init__(
-      self, data_path, split
+      self, 
+      data_path, 
+      split,
+      min_class_size=500
     ):
     self.data_path = data_path
 
@@ -26,7 +29,8 @@ class FlickrImageDataset(torch.utils.data.Dataset):
 
     # Load data paths to audio and visual features
     data, class_to_idx = load_data_split(
-                           data_path, split, 
+                           data_path, split,
+                           min_class_size=min_class_size,
                            max_keep_size=self.max_keep_size)
     self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
     self.n_class = len(class_to_idx)

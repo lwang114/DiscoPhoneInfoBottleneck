@@ -12,8 +12,8 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.metrics import precision_recall_fscore_support
-from image_model import Resnet34 
-
+from image_model import Resnet34, FFNN 
+from datasets import *
 
 class Solver(object):
   
@@ -25,17 +25,42 @@ class Solver(object):
     self.epoch = args.epoch
     self.batch_size = args.batch_size
 
-    class_freqs = json.load(open(os.path.join(
-                    args.data_path, 
-                    "phrase_classes.json"), "r"))
-    class_to_idx = {c:i for i, c in enumerate(sorted(
-                                      class_freqs, 
-                                      key=lambda x:class_freqs[x], 
-                                      reverse=True)) 
-                      if class_freqs[c] > 0}
-    self.class_names = sorted(class_to_idx, key=lambda x:class_to_idx[x])
-    self.n_class = len(class_to_idx)
-    self.image_model = Resnet34(pretrained=True, n_class=self.n_class)  
+    if args.feature_type == 'res34':
+      trainset = FlickrImageDataset(data_path=args.data_path, 
+                                    split="train",
+                                    min_class_size=args.min_class_size)
+      testset = FlickrImageDataset(data_path=args.data_path, 
+                                   split="test",
+                                   min_class_size=args.min_class_size)
+    elif args.feature_type == 'rcnn':
+      trainset = FlickrImageFeatureDataset(data_path=args.data_path,
+                                           split="train",
+                                           min_class_size=args.min_class_size)
+      testset = FlickrImageFeatureDataset(data_path=args.data_path,
+                                          split="test",
+                                          min_class_size=args.min_class_size)
+    else: Exception(f'Feature type {args.feature_type} not supported')
+
+    self.train_loader = torch.utils.data.DataLoader(
+                                     trainset, 
+                                     batch_size=args.batch_size, 
+                                     shuffle=False if args.mode == 'test'\
+                                                   else True)
+    self.test_loader = torch.utils.data.DataLoader(
+                                    testset, 
+                                    batch_size=args.batch_size, 
+                                    shuffle=False)
+
+    self.class_names = self.train_loader.dataset.class_names
+    self.n_class = len(self.class_names)
+    self.feature_type = args.feature_type
+    if self.feature_type == 'res34':
+      self.image_model = Resnet34(pretrained=True, n_class=self.n_class)  
+    elif self.feature_type == 'rcnn':
+      self.image_model = FFNN(n_class=self.n_class)
+
+    else: Exception(f'Feature type {self.feature_type} not supported')
+
     trainables = [p for p in self.image_model.parameters() if p.requires_grad]
     self.optimizer = optim.Adam(trainables, lr=0.0001)
     self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, 
@@ -79,7 +104,7 @@ class Solver(object):
         #   break
         score, feat = self.image_model(regions, return_score=True)
         
-        if args.loss_type == 'bce': 
+        if self.loss_type == 'bce': 
           label_onehot = F.one_hot(label, num_classes=self.n_class)
           loss = self.criterion(score, label_onehot.float())
         else:
@@ -99,7 +124,7 @@ class Solver(object):
         self.history['acc'] = acc
         self.history['best_epoch'] = epoch
         torch.save(self.image_model.state_dict(), 
-                   f"{self.exp_dir}/image_model.{epoch}.pth")
+                   f"{self.exp_dir}/best_image_model.pth")
   
   def test(self, test_loader, out_prefix='predictions'):
     with torch.no_grad():
