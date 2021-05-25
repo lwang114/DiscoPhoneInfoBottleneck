@@ -54,19 +54,17 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     self.sample_rate = sample_rate
     self.max_feat_len = 64
     if split == "train":
-        self.max_class_size = 200
+        self.max_keep_size = 200
     elif split == "test":
-        self.max_class_size = 50
+        self.max_keep_size = 50
     
     data = []
     for sp in self.splits[split]:
       # Load data paths to audio and visual features
-      if self.preprocessor.balance_strategy:
-        examples = load_data_split_balanced(data_path, split,
-                                            balance_strategy=self.preprocessor.balance_strategy,
-                                            max_class_size=self.max_class_size)
-      else:
-        examples = load_data_split(data_path, split)
+      examples = load_data_split_balanced(data_path, split,
+
+                                          max_class_size=self.max_class_size)
+      
       data.extend(examples)    
       print("Number of {} audio files = {}".format(split, len(examples)))
 
@@ -111,12 +109,8 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
 
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")) or not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_abx_triplets.item")):
-      if self.preprocessor.balance_strategy:
-        create_gold_file_balanced(data_path, sample_rate,
-                                  balance_strategy=self.preprocessor.balance_strategy,
-                                  max_class_size=self.max_class_size)
-      else:
-        create_gold_file(data_path, sample_rate)
+      create_gold_file_balanced(data_path, sample_rate,
+                                max_class_size=self.max_class_size)
     self.gold_dicts = json.load(open(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")))
 
     self.image_feats = None
@@ -214,10 +208,8 @@ class FlickrSegmentImagePreprocessor:
     use_words=False,
     prepend_wordsep=False,
     image_feature="rcnn",
-    sample_rate=16000,
-    balance_strategy="truncate"
+    sample_rate=16000
   ):
-    self.balance_strategy = balance_strategy
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
     self.num_features = num_features
@@ -230,16 +222,14 @@ class FlickrSegmentImagePreprocessor:
     for _, spl in splits.items(): 
       for sp in spl:
           if sp == "train":
-              self.max_class_size = 200
+              self.max_keep_size = 200
               self.min_class_size = 500
           elif sp == "test":
-              self.max_class_size = 50
+              self.max_keep_size = 50
               self.min_class_size = 500
-          if balance_strategy:
               data.extend(load_data_split_balanced(data_path, sp,
-                                                   balance_strategy=balance_strategy,
                                                    image_feature=image_feature,
-                                                   max_class_size=self.max_class_size,
+                                                   max_keep_size=self.max_keep_size,
                                                    min_class_size=self.min_class_size))
           else:
               data.extend(load_data_split(data_path, sp, image_feature=image_feature))
@@ -474,61 +464,9 @@ class Utterance:
       phrase["label"] = lemmatizer.lemmatize(text[head_idx])
     return phrases
 
-def load_data_split(data_path, 
-                    image_feature,
-                    split):
-  """
-  Returns:
-      examples : a list of mappings of
-          { "audio" : filename of audio,
-            "text" : a list of tokenized words for the class name,
-            "full_text" : a list of tokenized words for the whole phrase, 
-            "duration" : float,
-            "interval": [begin of the word in ms, end of the word in ms],
-            "image_id": str,
-            "feat_idx": int, image feature idx
-          }
-  """
-  with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
-    filenames = [line.rstrip("\n").split("/")[-1] for line in f]
-
-  image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz"))
-  utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
-  
-  examples = []
-
-  class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-  phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  for line in phrase_f:
-    # if len(examples) > 800: # XXX
-    #     break
-    phrase = json.loads(line.rstrip("\n"))
-    utterance_id = phrase["utterance_id"]
-    audio_file = utterance_id + ".wav"
-    audio_path = os.path.join(data_path, "flickr_audio/wavs", audio_file)
-    image_file = "_".join(utterance_id.split("_")[:-1]) + ".jpg"
-    image_path = os.path.join(data_path, "Flicker8k_Dataset", image_file) 
-
-    if audio_file in filenames and "children" in phrase:
-        if len(phrase["children"]) > 0 and class_freqs[phrase["label"]] >= 20: # Filter out low-frequency words
-            example = {"audio": audio_path,
-                       "image": image_path,
-                       "text": phrase["label"],
-                       "full_text": phrase["text"],
-                       "duration": phrase["children"][-1]["end"] - phrase["children"][0]["begin"],
-                       "interval": [phrase["children"][0]["begin"], phrase["children"][-1]["end"]],
-                       "box": phrase["bbox"],
-                       "feat_idx": phrase["feat_idx"],
-                       "image_id": utt_to_feat["_".join(phrase["utterance_id"].split("_")[:-1])]}
-            examples.append(example)
-
-  phrase_f.close()
-  return examples
-
-def load_data_split_balanced(data_path, split, 
-                             balance_strategy="truncate", 
+def load_data_split_balanced(data_path, split,
                              image_feature="rcnn",
-                             max_class_size=200, 
+                             max_keep_size=200,
                              min_class_size=500):
   """
   Returns:
@@ -570,7 +508,9 @@ def load_data_split_balanced(data_path, split,
     label = phrase["label"]
     
     if audio_file in filenames and "children" in phrase:
-        if len(phrase["children"]) > 0 and class_freqs[label] >= min_class_size and class_counts[label] < max_class_size: # Filter out low-frequency words
+        if len(phrase["children"]) > 0\
+           and class_freqs[label] >= min_class_size\
+           and class_counts[label] < max_keep_size: # Filter out low-frequency words
             class_counts[label] += 1
             image_id = utt_to_feat["_".join(phrase["utterance_id"].split("_")[:-1])]
             feat_idx = phrase["feat_idx"]
@@ -589,91 +529,8 @@ def load_data_split_balanced(data_path, split,
   phrase_f.close()
   return examples
   
-def create_gold_file(data_path, sample_rate):
-  """
-  Create the following files:
-      gold_units.json : contains gold_dicts, a list of mappings 
-          {"sentence_id" : str,
-           "units" : a list of ints representing phoneme id for each feature frame,
-           "text" : a list of strs representing phoneme tokens for each feature frame}
-     abx_triplets.item : contains ABX triplets in the format
-                         line 0 : whatever (not read)
-                         line > 0: #file_ID onset offset #phone prev-phone next-phone speaker
-                         onset : begining of the triplet (in s)
-                         offset : end of the triplet (in s)
-  """
-  class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-  phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  filenames = [line.rstrip("\n").split("/")[-1] for line in open(os.path.join(data_path, "splits/flickr40k_test.txt"), "r")] 
-  phone_to_index = {}
-  gold_dicts = []
-  triplets = ['#file_ID onset offset #phone prev-phone next-phone speaker']
-
-  phrase_idx = 0
-  for line in phrase_f:
-    phrase = json.loads(line.rstrip("\n"))
-    utterance_id = phrase["utterance_id"]
-    fn = utterance_id + ".wav"
-    filename = os.path.join(data_path, "flickr_audio/wavs", fn)
-    if fn in filenames and "children" in phrase:
-      if len(phrase["children"]) == 0 and class_freqs[phrase["label"]] < 20: # Filter out low-frequency words
-          continue
-      label = phrase["label"]
-      nframes = int((phrase["children"][-1]["end"] - phrase["children"][0]["begin"])*100)+1
-
-      gold_dict = {"sentence_id": fn,
-                   "units": [-1]*nframes,
-                   "phoneme_text": [NULL]*nframes,
-                   "word_text": [label]*nframes,
-                   "word_full_text": [NULL]*nframes
-      }
-      
-      begin_phone = 0
-      begin_word = 0
-      example_id = f"{fn}_{phrase_idx}"
-      phrase_idx += 1
-      for word in phrase["children"]:
-        dur_word = int((word["end"] - word["begin"])*100) 
-        end_word = begin_word + dur_word
-        for x in range(begin_word, end_word):
-            gold_dict["word_full_text"][x] = word["text"]
-        begin_word += dur_word
-            
-        for phn_idx, phone in enumerate(word["children"]):
-          if "SIL" in phone["text"] or "+" in phone["text"]:
-              continue
-          if not phone["text"] in phone_to_index:
-            phone_to_index[phone["text"]] = len(phone_to_index)
-          dur_phone = int((phone["end"] - phone["begin"])*100)
-          end_phone = begin_phone + dur_phone
-          for t in range(begin_phone, end_phone):
-              gold_dict["phoneme_text"][t] = phone["text"]
-              gold_dict["units"][t] = phone_to_index[phone["text"]]
-          
-          if phn_idx == 0:
-            prev_token = NULL
-          else:
-            prev_token = word["children"][phn_idx-1]["text"]
-
-          if phn_idx == len(word["children"]) - 1:
-            next_token = NULL
-          else:
-            next_token = word["children"][phn_idx+1]["text"]
-
-          if len(gold_dicts) < 5000:
-              triplets.append(f"{example_id} {begin_phone} {begin_phone + dur_phone} {phone['text']} {prev_token} {next_token} 0")
-
-          begin_phone += dur_phone
-
-      gold_dicts.append(gold_dict)
-  
-  with open(os.path.join(data_path, "gold_units.json"), "w") as gold_f:
-    json.dump(gold_dicts, gold_f, indent=2)
-
-  with open(os.path.join(data_path, "abx_triplets.item"), "w") as triplet_f:
-    triplet_f.write('\n'.join(triplets))
-
-def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate", max_class_size=100, min_class_size=80):
+def create_gold_file_balanced(data_path, sample_rate, 
+                              max_keep_size=100, min_class_size=80):
   """
   Create the following files:
       gold_units.json : contains gold_dicts, a list of mappings 
@@ -703,7 +560,7 @@ def create_gold_file_balanced(data_path, sample_rate, balance_strategy="truncate
     label = phrase["label"]
 
     if fn in filenames and "children" in phrase:
-      if len(phrase["children"]) == 0 or class_freqs[label] < min_class_size or class_counts[label] >= max_class_size: # Filter out low-frequency words
+      if len(phrase["children"]) == 0 or class_freqs[label] < min_class_size or class_counts[label] >= max_keep_size: # Filter out low-frequency words
           continue
 
       class_counts[label] += 1
