@@ -32,7 +32,7 @@ def main(args):
     net.train(train_loader, test_loader)
   elif args.mode == 'test': 
     net.test(test_loader, out_prefix='train_predictions')
-    net.test(train_loader, out_prefix='test_predictions')
+    # net.test(train_loader, out_prefix='test_predictions')
   else: Exception(f'Mode can only be from {train, test}')
 
 if __name__ == '__main__':

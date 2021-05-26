@@ -59,19 +59,19 @@ if __name__ == '__main__':
         '--epoch', default = 200, type=int, help='Number of epochs')
     parser.add_argument('--beta', default=1e-3, type=float, help='beta')
     parser.add_argument(
-        '--lr', default = 1e-3, type=float, help='learning rate'
+        '--lr', default=1e-3, type=float, help='learning rate'
     )
     parser.add_argument(
-        '--K', default = 256, type=int, help='dimension of encoding Z'
+        '--K', default=256, type=int, help='dimension of encoding Z'
     )
     parser.add_argument(
-        '--seed', default = 1, type=int, help='random seed'
+        '--seed', default=1, type=int, help='random seed'
     )
     parser.add_argument(
-        '--batch_size', default = 32, type=int, help='batch size'
+        '--batch_size', default=32, type=int, help='batch size'
     )
     parser.add_argument(
-        '--pos_weight', default = 1., type=float
+        '--pos_weight', default=1., type=float
     )
     parser.add_argument(
         '--dataset', 
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--image_model_dir', 
-        type=str, default='checkpoints/image_classification_weight1_minfreq500/'
+        type=str, default='checkpoints/image_classification_ce_minfreq500/'
     )
     parser.add_argument(
         '--dset_dir', 

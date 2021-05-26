@@ -44,9 +44,10 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
         "validation": ["test"],
         "test": ["test"],           
       },
-      augment = True,
-      image_feature = None,
-      sample_rate = 16000
+      augment=True,
+      image_feature=None,
+      sample_rate=16000,
+      min_class_size=500
   ):
     self.preprocessor = preprocessor
     self.splits = splits
@@ -63,7 +64,8 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
       # Load data paths to audio and visual features
       examples = load_data_split_balanced(data_path, split,
 
-                                          max_class_size=self.max_class_size)
+                                          min_class_size=min_class_size,
+                                          max_keep_size=self.max_keep_size)
       
       data.extend(examples)    
       print("Number of {} audio files = {}".format(split, len(examples)))
@@ -110,7 +112,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     # Create gold unit file
     if not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")) or not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_abx_triplets.item")):
       create_gold_file_balanced(data_path, sample_rate,
-                                max_class_size=self.max_class_size)
+                                max_keep_size=self.max_keep_size)
     self.gold_dicts = json.load(open(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")))
 
     self.image_feats = None
@@ -208,7 +210,8 @@ class FlickrSegmentImagePreprocessor:
     use_words=False,
     prepend_wordsep=False,
     image_feature="rcnn",
-    sample_rate=16000
+    sample_rate=16000,
+    min_class_size=500
   ):
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
@@ -223,24 +226,21 @@ class FlickrSegmentImagePreprocessor:
       for sp in spl:
           if sp == "train":
               self.max_keep_size = 200
-              self.min_class_size = 500
+              self.min_class_size = min_class_size
           elif sp == "test":
               self.max_keep_size = 50
-              self.min_class_size = 500
-              data.extend(load_data_split_balanced(data_path, sp,
-                                                   image_feature=image_feature,
-                                                   max_keep_size=self.max_keep_size,
-                                                   min_class_size=self.min_class_size))
-          else:
-              data.extend(load_data_split(data_path, sp, image_feature=image_feature))
-   
+              self.min_class_size = min_class_size
+          data.extend(load_data_split_balanced(data_path, sp,
+                                               image_feature=image_feature,
+                                               max_keep_size=self.max_keep_size,
+                                               min_class_size=self.min_class_size))   
     tokens = set()
     lexicon = {}
     for ex in data:
       tokens.add(ex["text"])
     self.tokens = sorted(tokens)
     self.tokens_to_index = {t: i for i, t in enumerate(self.tokens)}
-    print(f"Number of types: {self.num_tokens}")
+    print(f"Number of classes: {self.num_tokens}")
   
   @property
   def num_tokens(self):
@@ -497,7 +497,7 @@ def load_data_split_balanced(data_path, split,
   class_to_example = {c:[] for c in class_freqs}
   
   for line in phrase_f:
-    # if len(examples) > 100: # XXX
+    # if len(examples) > 800: # XXX
     #     break
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
