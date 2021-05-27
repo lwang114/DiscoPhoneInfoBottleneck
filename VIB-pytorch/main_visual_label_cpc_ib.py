@@ -94,7 +94,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--image_feature', 
-        choices={'label', 'soft_label', 'multi_label', 'rcnn', 'res34'},
+        choices={'label', 'multi_label', 'rcnn', 'res34'},
         default='label'
     )
     parser.add_argument(

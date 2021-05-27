@@ -26,13 +26,25 @@ class Solver(object):
     self.batch_size = args.batch_size
 
     if args.feature_type == 'res34':
-      trainset = FlickrImageDataset(data_path=args.data_path, 
-                                    split="train",
-                                    min_class_size=args.min_class_size)
-      testset = FlickrImageDataset(data_path=args.data_path, 
-                                   split="test",
-                                   min_class_size=args.min_class_size)
-    elif args.feature_type == 'rcnn':
+      if args.dataset == 'flickr8k':
+        trainset = FlickrImageDataset(data_path=args.data_path, 
+                                      split="train",
+                                      min_class_size=args.min_class_size)
+        testset = FlickrImageDataset(data_path=args.data_path, 
+                                     split="test",
+                                     min_class_size=args.min_class_size)
+      elif args.dataset == 'speechcoco':
+        preprocessor = SpeechCOCOPreprocessor(
+                           args.data_path, 
+                           num_features=80,
+                           image_feature=args.feature_type)
+        trainset = SpeechCOCOImageDataset(
+                       args.data_path,
+                       split="train")
+        testset = SpeechCOCOImageDataset(
+                       args.data_path,
+                       split="val")
+    elif args.feature_type == 'rcnn': # TODO
       trainset = FlickrImageFeatureDataset(data_path=args.data_path,
                                            split="train",
                                            min_class_size=args.min_class_size)
@@ -99,7 +111,7 @@ class Solver(object):
     self.set_mode('train')
     for epoch in range(self.epoch):
       self.image_model.train()     
-      for batch_idx, (regions, label) in enumerate(train_loader):
+      for batch_idx, (regions, label, region_mask) in enumerate(train_loader): # TODO
         # if batch_idx > 2: # XXX
         #   break
         score, feat = self.image_model(regions, return_score=True)

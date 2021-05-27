@@ -164,7 +164,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     audio_inputs, input_mask = self.load_audio(audio_file, duration, interval)
     image_inputs = self.load_image(image_file, image_id, box, feat_idx)
     outputs = self.preprocessor.to_index(label).squeeze(0)
-    return audio_inputs, image_inputs, outputs, input_mask 
+    return audio_inputs, image_inputs, outputs, input_mask, 1. 
 
   def __len__(self):
     return len(self.dataset)
@@ -239,7 +239,7 @@ class FlickrSegmentImagePreprocessor:
     for ex in data:
       tokens.add(ex["text"])
     self.tokens = sorted(tokens)
-    self.tokens_to_index = {t: i for i, t in enumerate(self.tokens)}
+    self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
     print(f"Number of classes: {self.num_tokens}")
   
   @property
