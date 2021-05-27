@@ -17,7 +17,7 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
-class SpeechCOCOSegmentImageDataset(torch.utils.data.Dataset):
+class SpeechCOCODataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path,
       preprocessor, split,
@@ -132,7 +132,7 @@ class SpeechCOCOSegmentImageDataset(torch.utils.data.Dataset):
     return audio_feats, region_feats, outputs, audio_mask, region_mask
 
 
-class SpeechCOCOSegmentImagePreprocessor:
+class SpeechCOCOPreprocessor:
   def __init__(
     self,
     data_path,
@@ -231,6 +231,8 @@ def extract_sentence_info(data_path, split):
     image_id = audio_id.split('_')[0]
     interval = [float(t) for t in line.split()[2:]]
     if not image_id in words:
+      if len(words) >= 100: # XXX
+        break
       words[image_id] = [{'audio_id': audio_id,
                           'label': label,
                           'interval': interval}]  
@@ -243,6 +245,11 @@ def extract_sentence_info(data_path, split):
     box = [int(x) for x in line.split()[2:]]
     x, y, w, h = box
     if not image_id in boxes:
+      if not image_id in words:
+        continue
+      if len(boxes) == len(words): # XXX
+        break
+
       boxes[image_id] = [{'image_id': fn,
                           'label': label,
                           'box': [x, y, x+w, y+h],
@@ -263,6 +270,11 @@ def extract_sentence_info(data_path, split):
       interval = (phone_info['begin'], phone_info['end'])
       
       if not image_id in phones:
+        if not image_id in words:
+          continue
+        if len(phones) == len(words): # XXX
+          break
+
         phones[image_id] = {interval:phone_info['phonemes']}
       else:
         phones[image_id][interval] = phone_info['phonemes']
@@ -413,3 +425,8 @@ def create_gold_file(data_path, sample_rate):
 
   with open(os.path.join(data_path, "speechcoco_abx_triplets.item"), "w") as triplet_f:
     triplet_f.write('\n'.join(triplets))
+
+if __name__ == "__main__":
+  data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/"
+  preprocessor = SpeechCOCOPreprocessor(data_path) 
+  dataset = SpeechCOCODataset(data_path, preprocessor, "train")
