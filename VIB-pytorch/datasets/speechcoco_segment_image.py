@@ -8,6 +8,12 @@ import json
 from PIL import Image
 
 NULL = "###NULL###"
+def log_normalize(x):
+    x.add_(1e-6).log_()
+    mean = x.mean()
+    std = x.std()
+    return x.sub_(mean).div_(std + 1e-6)
+
 def fix_embedding_length(emb, L):
   size = emb.size()[1:]
   if emb.size(0) < L:
@@ -21,10 +27,12 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path,
       preprocessor, split,
-      splits = {
+      splits={
         "train": ["train"],
         "test": ["val"]
-        }
+        },
+      sample_rate=16000,
+      augment=True
       ):
     self.preprocessor = preprocessor
     self.splits = splits
@@ -84,7 +92,7 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
       self.image_to_feat = None
       if image_feature.split("_")[-1] != "label":
         self.image_feats = np.load(os.path.join(data_path,
-                                                f"mscoco_{image_feature}.npz")) # TODO Check 
+                                                f"mscoco_{split}_{image_feature}.npz")) 
         self.image_to_feat = {'_'.join(feat_id.split('_')[:-1]):feat_id for feat_id in self.image_feats}
 
   def load_audio(self, audio_file, intervals):
@@ -125,7 +133,7 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
     return regions, region_mask
 
   def __getitem__(self, idx):
-    audio_file, image_file, labels,, intervals, boxes, box_idxs = self.dataset[idx]
+    audio_file, image_file, labels, intervals, boxes, box_idxs = self.dataset[idx]
     audio_feats, audio_mask = self.load_audio(audio_file, intervals)
     region_feats, region_mask = self.load_image(image_file, boxes, box_idxs)
     outputs = self.preprocessor.to_index(labels).squeeze(0)
@@ -151,7 +159,7 @@ class SpeechCOCOPreprocessor:
 
     for sp in splits:
       for split in splits[sp]:
-        metadata_file = os.path.join(data_path, "speechcoco_{split}.json")
+        metadata_file = os.path.join(data_path, f"{split}2014/speechcoco_{split}.json")
         if not os.path.exists(metadata_file):
           extract_sentence_info(data_path, split)
 
@@ -160,7 +168,7 @@ class SpeechCOCOPreprocessor:
       for sp in spl:
         data = load_data_split(data_path, sp)
         for ex in data:
-          tokens.add(ex["text"])
+          tokens.update(ex["labels"])
     
     self.tokens = sorted(tokens)
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
@@ -195,7 +203,7 @@ def extract_sentence_info(data_path, split):
       sentences : containing the following items:
         "audio_id" : str, 
         "image_id" : str,
-        "text" : list of strs, e.g., ["A", "little", "girl"],
+        "text": list of strs, e.g., ["a", "little", "girl"],
         "labels" : list of strs, e.g., ["girl"], 
         "boxes" : list of 4-tuples, e.g., [[8, 152, 108, 340]] in [xmin, ymin, xmax, ymax] format, 
         "box_idxs": list of ints,
@@ -227,15 +235,20 @@ def extract_sentence_info(data_path, split):
   word_f = open(word_info_file, 'r')
   words = dict()
   for line in word_f:
-    audio_id, label = line.split(:2)
+    audio_id, label = line.split()[:2]
     image_id = audio_id.split('_')[0]
     interval = [float(t) for t in line.split()[2:]]
     if not image_id in words:
-      if len(words) >= 100: # XXX
-        break
-      words[image_id] = [{'audio_id': audio_id,
-                          'label': label,
-                          'interval': interval}]  
+      # if len(words) >= 100: # XXX
+      #   break
+      words[image_id] = dict()
+    
+    if not audio_id in words[image_id]:
+      words[image_id][audio_id] = [{'label': label,
+                                    'interval': interval}]  
+    else:
+      words[image_id][audio_id].append({'label': label,
+                                        'interval': interval})
 
   box_f = open(box_info_file, 'r')
   boxes = dict() 
@@ -274,49 +287,47 @@ def extract_sentence_info(data_path, split):
           continue
         if len(phones) == len(words): # XXX
           break
-
-        phones[image_id] = {interval:phone_info['phonemes']}
+        phones[image_id] = dict()
+      
+      phns = [{'begin': phn['begin'],
+               'end': phn['end'],
+               'text': phn['value']} for phn in phone_info['phonemes']]
+      if not audio_id in phones[image_id]:
+        phones[image_id][audio_id] = {interval: phns}
       else:
-        phones[image_id][interval] = phone_info['phonemes']
+        phones[image_id][audio_id][interval] = phns
 
   word_f = open(word_info_file, 'r')
   sent_f = open(sentence_info_file, 'w')
-  cur_id = '' 
   sent_info = dict()
-  for image_id in sorted(words):
-    word_info = words[image_id]
+  for ex, image_id in enumerate(sorted(words)):
     box_info = boxes[image_id]
-    phn_info = []
-    if len(phones):
-      phn_info = phones[image_id]
 
-    if audio_id != cur_id:
-      if len(cur_id):
-        sent_f.write(json.dumps(sent_info)+'\n')
-      cur_id = audio_id
+    for audio_id in sorted(words[image_id]):
+      print(ex, audio_id)
       image_id = audio_id.split('_')[0]
+      word_info = words[image_id][audio_id]
+      if len(phones):
+        phns = phones[image_id][audio_id]
+        phns_info = [phns[tuple(w['interval'])] for w in word_info]
+      else:
+        phns_info = [[] for _ in word_info]
+
       sent_info = {'audio_id': audio_id,
-                   'image_id': box_info['image_id'],
-                   'text': [word_info['word']],
-                   'labels': [box_info['label']],
-                   'boxes': [box_info['box']],
-                   'box_idxs': [box_info['box_idx']],
+                   'image_id': box_info[0]['image_id'],
+                   'text': [w['label'] for w in word_info],
+                   'labels': [b['label'] for b in box_info],
+                   'boxes': [b['box'] for b in box_info],
+                   'box_idxs': [b['box_idx'] for b in box_info],
                    'audio': [
-                        {'begin': word_info['begin'],
-                         'end': word_info['end'],
-                         'text': word_info['word'],
-                         'phonemes': phn_info
-                        ]}
-    else:
-      sent_info['audio'].append({'begin': word_info['begin'],
-                                 'end': word_info['end'],
-                                 'text': word_info['word'],
-                                 'phonemes': phn_info
-                                 })
-      sent_info['image_id'].append(box_info['image_id'])
-      sent_info['labels'].append(box_info['label'])
-      sent_info['boxes'].append(box_info['box'])
-      sent_info['box_idxs'].append(box_info['box_idx'])
+                        {'begin': w['interval'][0],
+                         'end': w['interval'][1],
+                         'text': w['label'],
+                         'phonemes': phn_info}
+                        for w, phn_info in zip(word_info, phns_info)
+                        ]
+                  }      
+      sent_f.write(json.dumps(sent_info)+'\n')
   sent_f.write(json.dumps(sent_info))
   word_f.close()
   sent_f.close()
@@ -333,21 +344,21 @@ def load_data_split(data_path, split):
             "box_idxs": list of ints, image feature indices,
           }
   """
-  sent_f = open(os.path.join(data_path, f"speechcoco_{split}.json"), "r")
+  sent_f = open(os.path.join(data_path, f"{split}2014/speechcoco_{split}.json"), "r")
   examples = []
   for line in sent_f:
     sent = json.loads(line.rstrip("\n"))
-    audio_id = phrase["audio_id"]
-    image_id = phrase["image_id"]
+    audio_id = sent["audio_id"]
+    image_id = sent["image_id"]
     audio_file = audio_id + ".wav"
     audio_path = os.path.join(data_path, f"{split}2014/wav/", audio_file)
     image_file = image_id + ".jpg"
-    image_path = os.path.join(data_path, f"{split}2014/imgs/{split}2014/", image_file) # TODO Check
+    image_path = os.path.join(data_path, f"{split}2014/imgs/{split}2014/", image_file)
 
     labels = sent["labels"]
     intervals = [[word["begin"], word["end"]] for word in sent["audio"]] 
-    example = {"audio": audio_file,
-               "image": image_file,
+    example = {"audio": audio_path,
+               "image": image_path,
                "labels": labels,
                "intervals": intervals,
                "boxes": sent["boxes"],
@@ -369,21 +380,29 @@ def create_gold_file(data_path, sample_rate):
                           onset : begining of the triplet (in s)
                           offset : end of the triplet (in s) 
   """
-  sent_f = open(os.path.join(data_path, f"speechcoco_val.json"), "r")
+  sent_f = open(os.path.join(data_path, "val2014/speechcoco_val.json"), "r")
   phone_to_index = dict()
   gold_dicts = []
   triplets = ['#file_ID onset offset #phone prev-phone next-phone speaker']
 
+  sent_idx = 0
   for line in sent_f:
     sent = json.loads(line.rstrip("\n"))
     audio_id = sent["audio_id"]
     fn = audio_id+".wav"
     nframes = int((sent["audio"][-1]["end"] - sent["audio"][0]["begin"])*100)+1
+
     gold_dict = {
                  "sentence_id": fn,
                  "units": [-1]*nframes,
+                 "word_full_text": [NULL]*nframes,
                  "phoneme_text": [NULL]*nframes
                  }
+
+    begin_phone = 0
+    begin_word = 0
+    example_id = f"{fn}_{sent_idx}"
+    sent_idx += 1
     for word in sent["audio"]:
       dur_word = int((word["end"] - word["begin"])*100)
       end_word = begin_word + dur_word
@@ -408,12 +427,12 @@ def create_gold_file(data_path, sample_rate):
         if phn_idx == 0:
           prev_token = NULL
         else:
-          prev_token = word["children"][phn_idx-1]["text"]
+          prev_token = word["phonemes"][phn_idx-1]["text"]
 
-        if phn_idx == len(word["children"]) - 1:
+        if phn_idx == len(word["phonemes"]) - 1:
           next_token = NULL
         else:
-          next_token = word["children"][phn_idx+1]["text"]
+          next_token = word["phonemes"][phn_idx+1]["text"]
 
         triplets.append(f"{example_id} {begin_phone} {begin_phone + dur_phone} {phone['text']} {prev_token} {next_token} 0")
         
@@ -428,5 +447,5 @@ def create_gold_file(data_path, sample_rate):
 
 if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/"
-  preprocessor = SpeechCOCOPreprocessor(data_path) 
+  preprocessor = SpeechCOCOPreprocessor(data_path, num_features=80) 
   dataset = SpeechCOCODataset(data_path, preprocessor, "train")
