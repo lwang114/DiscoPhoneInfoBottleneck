@@ -86,7 +86,7 @@ class Solver(object):
       self.image_model.load_state_dict(torch.load( 
                            os.path.join(
                              self.exp_dir, 
-                             'image_model.pth')))
+                             'best_image_model.pth')))
 
   def set_mode(self, mode='train'):
     if mode == 'train':

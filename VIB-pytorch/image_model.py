@@ -24,7 +24,7 @@ class Resnet34(imagemodels.ResNet):
 
           for child in self.layer3.children():
             for p in child.parameters():
-              p.requires_grad = True
+              p.requires_grad = False
 
           for child in self.layer4.children():
             for p in child.parameters():
@@ -50,3 +50,24 @@ class Resnet34(imagemodels.ResNet):
           return score, emb
         else:
           return emb
+
+class FFNN(nn.Module):
+  def __init__(self, n_class):
+    super(FFNN, self).__init__()
+    self.feature_extractor = nn.Sequential(
+                                 nn.Linear(2048, 1024),
+                                 nn.ReLU(),
+                                 nn.Dropout(0.3),
+                                 nn.Linear(1024, 1024),
+                                 nn.ReLU(),
+                                 nn.Dropout(0.3)
+                             )
+    self.classifier = nn.Linear(1024, n_class)
+  
+  def forward(self, x, return_score=False):
+    emb = self.feature_extractor(x)
+    score = self.classifier(emb)
+    if return_score:
+      return score, emb
+    else:
+      return emb
