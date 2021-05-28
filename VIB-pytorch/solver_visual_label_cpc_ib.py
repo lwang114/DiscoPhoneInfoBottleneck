@@ -144,35 +144,48 @@ class Solver(object):
         pred_labels = []
         gold_labels = []
         pred_dicts = []
-        for idx, (audios, images, _, masks)\
+        for idx, (audios, images, _, audio_masks, image_masks)\
             in enumerate(self.data_loader['train']):
           self.global_iter += 1
           x = cuda(audios, self.cuda)
+          audio_masks = cuda(audio_masks, self.cuda)
           images = cuda(images, self.cuda)
-          image_logit, _ = self.image_net(images, return_score=True) 
-          if self.image_feature == 'label':
-            # y = F.one_hot(image_logit.topk(1, dim=-1)[1], self.n_class) # XXX
-            # y = y.sum(dim=1).float()
-            y = image_logit.max(-1)[1]
-          elif self.image_feature == 'multi_label':
-            y = (image_logit > 0).float()
-          elif self.image_feature == 'soft_label':
-            y = F.softmax(image_logit, dim=-1)
+          image_masks = cuda(image_masks.unsqueeze(-1), self.cuda)
+          image_size = images.size()
 
-          masks = cuda(masks, self.cuda)
+          if images.ndim in [2, 4]:
+            image_logit, _ = self.image_net(images, return_score=True) 
+          else:
+            image_logit_flat, _ = self.image_net(
+                                  images.view(-1, *image_size[2:])
+                                  )
+            image_logit = image_logit_flat.view(*image_size[:2], -1)
+
+          if self.image_feature == 'label':                 
+            if image_logit.ndim == 2:
+              y = image_logit.max(-1)[1]
+            else:
+              y = F.one_hot(image_logit.max(-1)[1], self.n_class)
+              y = (y * image_masks).max(1)[0]
+              print(y) # XXX
+          elif self.image_feature == 'multi_label':
+            if image_logit.ndim == 2:
+              y = (image_logit > 0).float() 
+            else:
+              y = ((image_logit > 0).float() * image_masks).max(1)[0]
 
           # Compute IB loss
           in_logit, logits, c_feature = self.audio_net(
-                                          x, masks=masks, 
+                                          x, masks=audio_masks, 
                                           temp=temp, 
                                           return_feat=self.cpc_feature)
           logit = logits.sum(-2)
           
-          if self.image_feature == 'label':
-            class_loss = F.cross_entropy(logit, y)
+          if self.image_feature == 'label' and images.ndim in [2, 4]:
+              class_loss = F.cross_entropy(logit, y).div(math.log(2))
           else:
             class_loss = F.binary_cross_entropy_with_logits(
-                            logit, self.pos_weight * y
+                            logit, y, pos_weight=self.pos_weight
                          ).div(math.log(2))
 
           info_loss = (F.softmax(in_logit, dim=-1)\
@@ -183,7 +196,7 @@ class Solver(object):
           izy_bound = math.log(self.n_class,2) - class_loss
           izx_bound = info_loss
 
-          if self.image_feature == 'label': 
+          if self.image_feature == 'label' and images.ndim in [2, 4]: 
             pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
             gold_label = F.one_hot(y, self.n_class)
             pred_labels.append(pred_label.cpu())
@@ -263,29 +276,30 @@ class Solver(object):
       f.write('Image ID\tGold label\tPredicted label\n')      
       with torch.no_grad():
         B = 0
-        for b_idx, (audios, images, _, masks) in enumerate(self.data_loader['test']):
+        for b_idx, (audios, images, _, audio_masks, image_masks) in enumerate(self.data_loader['test']):
           if b_idx == 0:
             B = audios.size(0)
-          x = cuda(audios, self.cuda)
+          audios = cuda(audios, self.cuda)
           images = cuda(images, self.cuda)
+          audio_masks = cuda(audio_masks, self.cuda)
+          image_masks = cuda(image_masks.unsqueeze(-1), self.cuda)
+
           image_logit, _ = self.image_net(images, return_score=self.image_feature)
           if self.image_feature == 'label':
-            # y = F.one_hot(image_logit.topk(1, dim=-1)[1], self.n_class) # XXX
-            # y = y.sum(dim=1).float()
-            y = image_logit.max(-1)[1]
+            if images.ndim in [2, 4]:
+              y = image_logit.max(-1)[1]
+            else:
+              y = F.one_hot(image_logit.max(-1)[1], self.n_class)
+              y = (y * image_masks).max(1)[0]
           elif self.image_feature == 'multi_label':
-            y = (image_logit > 0).float()
-          elif self.image_feature == 'soft_label':
-            y = F.softmax(image_logit, dim=-1)
-          
-          masks = cuda(masks, self.cuda)
+            y = (image_logit > 0).float()          
 
           in_logit, logits, encoding = self.audio_net(
-                                         x, masks=masks, 
+                                         audios, masks=masks, 
                                          return_feat='bottleneck'
                                        )
           _, _, c_feature = self.audio_net(
-                              x, masks=masks, 
+                              audios, masks=masks, 
                               return_feat=self.cpc_feature
                             )
 
@@ -294,7 +308,7 @@ class Solver(object):
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             image_id = testset.dataset[global_idx][-2]
-            if self.image_feature == 'label':
+            if (self.image_feature == 'label') and (images.ndim in [2, 4]):
               golds = [y[idx].cpu().detach().numpy()] 
               preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
             else:
@@ -307,10 +321,10 @@ class Solver(object):
             pred_names = ','.join([self.class_names[c] for c in preds])
             f.write(f'{image_id}\t{gold_names}\t{pred_names}\n')
 
-          if self.image_feature == 'label': 
+          if (self.image_feature == 'label') and (images.ndim in [2, 4]): 
             pred_labels.append(F.one_hot(y, self.n_class).cpu())
             gold_labels.append(F.one_hot(logit.max(-1)[1], self.n_class).cpu())
-            cur_class_loss = F.cross_entropy(logit, y)
+            cur_class_loss = F.cross_entropy(logit, y).div(math.log(2))
           else:
             pred_labels.append((logit > 0).long().cpu())
             gold_labels.append((y > 0).long().cpu())
@@ -333,13 +347,13 @@ class Solver(object):
                                    device=x.device)
           cur_cpc_loss, cpc_acc = self.cpc_criterion(
                                     c_feature, 
-                                    x.permute(0, 2, 1), 
+                                    audios.permute(0, 2, 1), 
                                     spk_labels
                                   ) 
-          cpc_correct += cpc_acc.sum(dim=0).mean().item() * x.size(0)
+          cpc_correct += cpc_acc.sum(dim=0).mean().item() * audios.size(0)
           total_loss += cur_cpc_loss.sum().item() + cur_ib_loss.item()
-          total_num += x.size(0)
-          _, _, c_feature = self.audio_net(x, masks=masks, return_feat='rnn')
+          total_num += audios.size(0)
+          _, _, c_feature = self.audio_net(audios, masks=masks, return_feat='rnn')
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             example_id = testset.dataset[global_idx][0].split('/')[-1]
