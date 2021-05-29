@@ -10,6 +10,18 @@ def main(args):
   torch.backends.cudnn.enabled = True
   torch.backends.cudnn.benchmark = True
 
+  if not args.dset_dir:
+    if args.dataset == 'FLICKR_SEGMENT_IMAGE':
+      args.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/flickr/'
+    else:
+      args.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/'
+  
+  if not args.image_model_dir:
+    if args.dataset == 'FLICKR_SEGMENT_IMAGE':
+      args.image_model_dir = 'checkpoints/image_classification_ce_minfreq500/'
+    else:
+      args.image_model_dir = 'checkpoints/image_classification_mscoco_ce/'
+
   seed = args.seed
   torch.manual_seed(seed)
   torch.cuda.manual_seed(seed)
@@ -68,14 +80,14 @@ if __name__ == '__main__':
         '--seed', default=1, type=int, help='random seed'
     )
     parser.add_argument(
-        '--batch_size', default=32, type=int, help='batch size'
+        '--batch_size', default=8, type=int, help='batch size'
     )
     parser.add_argument(
         '--pos_weight', default=1., type=float
     )
     parser.add_argument(
         '--dataset', 
-        choices={'MSCOCO2K', 'FLICKR_SEGMENT_IMAGE'}, 
+        choices={'MSCOCO2K', 'FLICKR_SEGMENT_IMAGE', 'SPEECHCOCO'}, 
         default='FLICKR_SEGMENT_IMAGE', type=str, help='dataset name'
     )
     parser.add_argument(
@@ -103,11 +115,11 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--image_model_dir', 
-        type=str, default='checkpoints/image_classification_ce_minfreq500/'
+        type=str, default=None
     )
     parser.add_argument(
         '--dset_dir', 
-        default='/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/', 
+        default=None, 
         type=str, help='dataset directory path'
     )
     parser.add_argument(

@@ -35,22 +35,26 @@ class Solver(object):
                                      min_class_size=args.min_class_size)
       elif args.dataset == 'speechcoco':
         preprocessor = SpeechCOCOPreprocessor(
-                           args.data_path, 
+                           data_path=args.data_path, 
                            num_features=80,
                            image_feature=args.feature_type)
-        trainset = SpeechCOCOImageDataset(
-                       args.data_path,
+        trainset = MSCOCOImageDataset(
+                       preprocessor=preprocessor,
+                       data_path=args.data_path,
                        split="train")
-        testset = SpeechCOCOImageDataset(
-                       args.data_path,
-                       split="val")
-    elif args.feature_type == 'rcnn': # TODO
-      trainset = FlickrImageFeatureDataset(data_path=args.data_path,
-                                           split="train",
-                                           min_class_size=args.min_class_size)
-      testset = FlickrImageFeatureDataset(data_path=args.data_path,
-                                          split="test",
-                                          min_class_size=args.min_class_size)
+        testset = MSCOCOImageDataset(
+                      preprocessor=preprocessor,
+                      data_path=args.data_path,
+                      split="val")
+    elif args.feature_type == 'rcnn':
+      if args.dataset == 'flickr8k':
+        trainset = FlickrImageFeatureDataset(data_path=args.data_path,
+                                             split="train",
+                                             min_class_size=args.min_class_size)
+        testset = FlickrImageFeatureDataset(data_path=args.data_path,
+                                            split="test",
+                                            min_class_size=args.min_class_size)
+      else: Exception(f'{args.dataset} not supported for feature type {args.feature_type}')
     else: Exception(f'Feature type {args.feature_type} not supported')
 
     self.train_loader = torch.utils.data.DataLoader(
@@ -62,7 +66,7 @@ class Solver(object):
                                     testset, 
                                     batch_size=args.batch_size, 
                                     shuffle=False)
-
+    
     self.class_names = self.train_loader.dataset.class_names
     self.n_class = len(self.class_names)
     self.feature_type = args.feature_type
@@ -111,7 +115,7 @@ class Solver(object):
     self.set_mode('train')
     for epoch in range(self.epoch):
       self.image_model.train()     
-      for batch_idx, (regions, label, region_mask) in enumerate(train_loader): # TODO
+      for batch_idx, (regions, label) in enumerate(train_loader):
         # if batch_idx > 2: # XXX
         #   break
         score, feat = self.image_model(regions, return_score=True)
@@ -143,8 +147,8 @@ class Solver(object):
       self.image_model.eval()
       correct = 0
       total = 0
-      class_acc = torch.zeros(test_loader.dataset.n_class)
-      class_count = torch.zeros(test_loader.dataset.n_class)
+      class_acc = torch.zeros(self.n_class)
+      class_count = torch.zeros(self.n_class)
 
       out_file = os.path.join(
                    self.exp_dir, 

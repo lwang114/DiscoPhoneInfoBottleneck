@@ -571,7 +571,7 @@ def create_gold_file_balanced(data_path, sample_rate,
                    "phoneme_text": [NULL]*nframes,
                    "word_text": [label]*nframes,
                    "word_full_text": [NULL]*nframes
-      }
+                  }
       
       begin_phone = 0
       begin_word = 0

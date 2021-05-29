@@ -5,6 +5,7 @@ from torchvision import transforms
 import numpy as np
 import os
 import json
+from copy import deepcopy
 from PIL import Image
 
 NULL = "###NULL###"
@@ -34,19 +35,20 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
         "test": ["val"]
         },
       sample_rate=16000,
-      augment=True
+      augment=True,
+      image_feature="res34"
       ):
     self.preprocessor = preprocessor
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
     self.max_feat_len = 256
-    self.max_region_num = 20
+    self.max_region_num = 10
     # self.min_word_freq = 500
 
     data = []
     for sp in self.splits[split]:
-      examples = load_data_split(data_path, split) # TODO Filter out rare words
+      examples = load_data_split(data_path, sp) # TODO Filter out rare words
       data.extend(examples)
       print("Number of {} audio files = {}".format(split, len(examples)))
     
@@ -86,16 +88,17 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
     self.dataset = list(zip(audio, image, labels, intervals, boxes, box_idxs))
 
     # Create gold unit file
-    if not os.path.exists(os.path.join(data_path, "speechcoco_gold_units.json")):
+    gold_file = os.path.join(data_path, "speechcoco_gold_units.json")
+    if not os.path.exists(gold_file):
       create_gold_file(data_path, sample_rate)
-    
-    if image_feature == "res34":
-      self.image_feats = None
-      self.image_to_feat = None
-      if image_feature.split("_")[-1] != "label":
-        self.image_feats = np.load(os.path.join(data_path,
-                                                f"mscoco_{split}_{image_feature}.npz")) 
-        self.image_to_feat = {'_'.join(feat_id.split('_')[:-1]):feat_id for feat_id in self.image_feats}
+    self.gold_dicts = json.load(open(gold_file))
+   
+    self.image_feats = None
+    self.image_to_feat = None
+    if image_feature.split("_")[-1] != "label": 
+      self.image_feats = np.load(os.path.join(data_path,
+                                              f"mscoco_{split}_{image_feature}.npz")) 
+      self.image_to_feat = {'_'.join(feat_id.split('_')[:-1]):feat_id for feat_id in self.image_feats}
 
   def load_audio(self, audio_file, intervals):
     raw_audio, _ = torchaudio.load(audio_file)
@@ -103,11 +106,11 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
     
     segments = []
     for interval in intervals:
-      begin = int(interval[0] * self.sample_rate)
-      end = int(interval[1] * self.sample_rate)
-      segment = feats[:, :, int(begin//160):int(end//160)]
+      begin = int(interval[0] // 10)
+      end = int(interval[1] // 10)
+      segment = feats[:, :, begin:end]
       segments.append(segment.squeeze(0))
-    inputs = torch.cat(segments)
+    inputs = torch.cat(segments, dim=-1)
     nframes = inputs.size(-1)
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
@@ -126,8 +129,16 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
       if len(np.asarray(image).shape) == 2:
         print(f"Gray scale image {image_file}, convert to RGB".format(image_file))
         image = np.tile(np.array(image)[:, :, np.newaxis], (1, 1, 3))
+      
+      for box_idx, box in enumerate(boxes):
+        if (box[2] <= box[0]) or (box[3] <= box[1]):
+          print(f"Bad box: {image_file} {box}")
+          box[2] = max(box[0] + 1, box[2])
+          box[3] = max(box[1] + 1, box[3])
+        boxes[box_idx] = deepcopy(box)
+      
       regions = [self.image_transforms(image.crop(box=box)) for box in boxes]
-      regions = torch.cat(regions)
+      regions = torch.stack(regions)
     
     regions = fix_embedding_length(regions, self.max_region_num)
     region_mask = torch.zeros(self.max_region_num)
@@ -138,9 +149,12 @@ class SpeechCOCODataset(torch.utils.data.Dataset):
     audio_file, image_file, labels, intervals, boxes, box_idxs = self.dataset[idx]
     audio_feats, audio_mask = self.load_audio(audio_file, intervals)
     region_feats, region_mask = self.load_image(image_file, boxes, box_idxs)
-    outputs = self.preprocessor.to_index(labels).squeeze(0)
+    outputs = self.preprocessor.to_index(labels)
+    outputs = fix_embedding_length(outputs, self.max_region_num)
     return audio_feats, region_feats, outputs, audio_mask, region_mask
 
+  def __len__(self):
+    return len(self.dataset)
 
 class SpeechCOCOPreprocessor:
 
@@ -158,7 +172,6 @@ class SpeechCOCOPreprocessor:
     image_feature="res34",
     sample_rate=16000
     ):
-    self.wordsep = " "
     self.num_features = num_features
 
     for sp in splits:
@@ -183,7 +196,7 @@ class SpeechCOCOPreprocessor:
 
   def to_index(self, line):
     tok_to_idx = self.tokens_to_index
-    return torch.LongTensor([tok_to_idx.get(t, 0) for t in line.split(self.wordsep)])
+    return torch.LongTensor([tok_to_idx.get(t, 0) for t in line])
     
 def extract_sentence_info(data_path, split):
   """
@@ -236,7 +249,7 @@ def extract_sentence_info(data_path, split):
                          data_path,
                          f'{split}2014/speechcoco_{split}.json'
                        )
-  word_f = open(word_info_file, 'r')
+  word_f = open(word_info_file, 'r') 
   words = dict()
   for line in word_f:
     audio_id, label = line.split()[:2]
@@ -350,7 +363,11 @@ def load_data_split(data_path, split):
   """
   sent_f = open(os.path.join(data_path, f"{split}2014/speechcoco_{split}.json"), "r")
   examples = []
+  idx = 1
   for line in sent_f:
+    #if idx > 600: # XXX
+    #  break
+    idx += 1
     sent = json.loads(line.rstrip("\n"))
     audio_id = sent["audio_id"]
     image_id = sent["image_id"]
@@ -394,7 +411,7 @@ def create_gold_file(data_path, sample_rate):
     sent = json.loads(line.rstrip("\n"))
     audio_id = sent["audio_id"]
     fn = audio_id+".wav"
-    nframes = int((sent["audio"][-1]["end"] - sent["audio"][0]["begin"])*100)+1
+    nframes = int((sent["audio"][-1]["end"] - sent["audio"][0]["begin"]) // 10)+1
 
     gold_dict = {
                  "sentence_id": fn,
@@ -408,7 +425,8 @@ def create_gold_file(data_path, sample_rate):
     example_id = f"{fn}_{sent_idx}"
     sent_idx += 1
     for word in sent["audio"]:
-      dur_word = int((word["end"] - word["begin"])*100)
+      dur_word = int((word["end"] - word["begin"]) // 10)
+      
       end_word = begin_word + dur_word
       for x in range(begin_word, end_word):
         gold_dict["word_full_text"][x] = word["text"]
@@ -422,7 +440,7 @@ def create_gold_file(data_path, sample_rate):
         
         if not phone["text"] in phone_to_index:
           phone_to_index[phone["text"]] = len(phone_to_index)
-        dur_phone = int((phone["end"] - phone["begin"])*100)
+        dur_phone = int((phone["end"] - phone["begin"]) // 10)
         end_phone = begin_phone + dur_phone
         for t in range(begin_phone, end_phone):
             gold_dict["phoneme_text"][t] = phone["text"]
@@ -448,6 +466,7 @@ def create_gold_file(data_path, sample_rate):
 
   with open(os.path.join(data_path, "speechcoco_abx_triplets.item"), "w") as triplet_f:
     triplet_f.write('\n'.join(triplets))
+  triplet_f.close()
 
 if __name__ == "__main__":
   data_path = "/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/"

@@ -43,7 +43,6 @@ class Solver(object):
       self.image_feature = args.image_feature
       self.loss_type = args.loss_type
       self.dataset = args.dataset
-      self.pos_weight = args.pos_weight
 
       # Dataset
       self.data_loader = return_data(args)
@@ -51,6 +50,7 @@ class Solver(object):
                      .dataset.preprocessor.num_tokens
       self.class_names = self.data_loader['train']\
                          .dataset.preprocessor.tokens
+      self.pos_weight = cuda(args.pos_weight * torch.ones(self.n_class), self.cuda)
       print(f'visual label class: {self.n_class}') # XXX
   
       self.image_net = Resnet34(pretrained=True, n_class=self.n_class)
@@ -146,6 +146,8 @@ class Solver(object):
         pred_dicts = []
         for idx, (audios, images, _, audio_masks, image_masks)\
             in enumerate(self.data_loader['train']):
+          if idx > 2: # XXX
+            break
           self.global_iter += 1
           x = cuda(audios, self.cuda)
           audio_masks = cuda(audio_masks, self.cuda)
@@ -157,8 +159,9 @@ class Solver(object):
             image_logit, _ = self.image_net(images, return_score=True) 
           else:
             image_logit_flat, _ = self.image_net(
-                                  images.view(-1, *image_size[2:])
-                                  )
+                                      images.view(-1, *image_size[2:]),
+                                      return_score=True
+                                      )
             image_logit = image_logit_flat.view(*image_size[:2], -1)
 
           if self.image_feature == 'label':                 
@@ -167,7 +170,6 @@ class Solver(object):
             else:
               y = F.one_hot(image_logit.max(-1)[1], self.n_class)
               y = (y * image_masks).max(1)[0]
-              print(y) # XXX
           elif self.image_feature == 'multi_label':
             if image_logit.ndim == 2:
               y = (image_logit > 0).float() 
@@ -179,7 +181,7 @@ class Solver(object):
                                           x, masks=audio_masks, 
                                           temp=temp, 
                                           return_feat=self.cpc_feature)
-          logit = logits.sum(-2)
+          logit = logits.max(-2)[0]
           
           if self.image_feature == 'label' and images.ndim in [2, 4]:
               class_loss = F.cross_entropy(logit, y).div(math.log(2))
@@ -229,7 +231,7 @@ class Solver(object):
           loss.backward()
           self.optim.step()
 
-          if self.global_iter % 100 == 0:
+          if self.global_iter % 1000 == 0:
             temp = np.maximum(temp * np.exp(-anneal_rate * idx), temp_min)
             avg_loss = total_loss / total_step
             print(f'i:{self.global_iter:d} avg loss (total loss):{avg_loss:.2f} ({total_loss:.2f}) '
@@ -277,37 +279,51 @@ class Solver(object):
       with torch.no_grad():
         B = 0
         for b_idx, (audios, images, _, audio_masks, image_masks) in enumerate(self.data_loader['test']):
+          if b_idx > 2: # XXX
+            break
           if b_idx == 0:
             B = audios.size(0)
           audios = cuda(audios, self.cuda)
           images = cuda(images, self.cuda)
           audio_masks = cuda(audio_masks, self.cuda)
           image_masks = cuda(image_masks.unsqueeze(-1), self.cuda)
+          image_size = images.size()
 
-          image_logit, _ = self.image_net(images, return_score=self.image_feature)
+          if images.ndim in [2, 4]:
+            image_logit, _ = self.image_net(images, return_score=self.image_feature)
+          else:
+            image_logit_flat, _ = self.image_net(
+                                      images.view(-1, *image_size[2:]),
+                                      return_score=True
+                                      )
+            image_logit = image_logit_flat.view(*image_size[:2], -1)
+          
           if self.image_feature == 'label':
-            if images.ndim in [2, 4]:
+            if image_logit.ndim == 2:
               y = image_logit.max(-1)[1]
             else:
               y = F.one_hot(image_logit.max(-1)[1], self.n_class)
               y = (y * image_masks).max(1)[0]
           elif self.image_feature == 'multi_label':
-            y = (image_logit > 0).float()          
-
+            if image_logit.ndim == 2:
+              y = (image_logit > 0).float()          
+            else:
+              y = ((image_logit > 0).float() * image_masks).max(1)[0]
+          
           in_logit, logits, encoding = self.audio_net(
-                                         audios, masks=masks, 
+                                         audios, masks=audio_masks, 
                                          return_feat='bottleneck'
                                        )
           _, _, c_feature = self.audio_net(
-                              audios, masks=masks, 
+                              audios, masks=audio_masks, 
                               return_feat=self.cpc_feature
                             )
 
           # Word prediction
-          logit = logits.sum(dim=-2)
+          logit = logits.max(-2)[0]
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
-            image_id = testset.dataset[global_idx][-2]
+            image_id = testset.dataset[global_idx][1]
             if (self.image_feature == 'label') and (images.ndim in [2, 4]):
               golds = [y[idx].cpu().detach().numpy()] 
               preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
@@ -344,7 +360,7 @@ class Solver(object):
           # CPC prediction
           spk_labels = torch.zeros(audios.size(0), 
                                    dtype=torch.int, 
-                                   device=x.device)
+                                   device=audios.device)
           cur_cpc_loss, cpc_acc = self.cpc_criterion(
                                     c_feature, 
                                     audios.permute(0, 2, 1), 
@@ -353,7 +369,7 @@ class Solver(object):
           cpc_correct += cpc_acc.sum(dim=0).mean().item() * audios.size(0)
           total_loss += cur_cpc_loss.sum().item() + cur_ib_loss.item()
           total_num += audios.size(0)
-          _, _, c_feature = self.audio_net(audios, masks=masks, return_feat='rnn')
+          _, _, c_feature = self.audio_net(audios, masks=audio_masks, return_feat='rnn')
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             example_id = testset.dataset[global_idx][0].split('/')[-1]

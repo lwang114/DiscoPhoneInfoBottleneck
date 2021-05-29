@@ -11,6 +11,12 @@ def main(args):
   torch.backends.cudnn.enabled = True
   torch.backends.cudnn.benchmark = True
 
+  if not args.data_path:
+    if args.dataset == 'flickr8k':
+      args.data_path = '/ws/ifp-53_2/hasegawa/lwang114/data/flickr/'
+    else:
+      args.data_path = '/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/'
+
   seed = args.seed
   torch.manual_seed(seed)
   torch.cuda.manual_seed(seed)
@@ -36,9 +42,9 @@ def main(args):
   else: Exception(f'Mode can only be from {train, test}')
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(description='Image classification')
+  parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description='Image classification')
   parser.add_argument('--seed', default=1, type=int)
-  parser.add_argument('--data_path', default='/home/lwang114/data/flickr/')
+  parser.add_argument('--data_path', default=None)
   parser.add_argument('--exp_dir', default='checkpoints/image_classification')
   parser.add_argument('--dataset', choices={'flickr8k', 'speechcoco'})
   parser.add_argument('--feature_type', choices={'res34', 'rcnn'})
