@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import matplotlib.pyplot as plt
 
 EPS = 1e-40
 def parse_args():
@@ -68,7 +69,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
   Compute token F1 for predictions in zerospeech 2021 format
   Args:
       pred_path : str, path to the prediction file in the format
-          {sentence_id} {cluster ids separated by space}
+          {sentence_id} {cluster ids separated by commas}
       gold_path : str, path to the gold phoneme transcripts in the format
           line 0 : whatever (not read)
           line > 0: {sentence_id} {onset} {offset} {phone} {prev-phone} {next-phone} {speaker}
@@ -76,34 +77,61 @@ def compute_token_f1(pred_path, gold_path, out_path):
           offset : end of the triplet (in s)
       out_path : str
   """
+  def _extract_gold_units(gold_file_path):
+    with open(gold_file_path, 'r') as f:
+      line0 = True
+      for line in f:
+        if line0:
+          line0 = False
+          continue
+        sent_id, begin, end, phn, _, _, _ = line.rstrip('\n').split() # TODO Compute within- and between-speaker token F1
+        begin = int(float(begin)*100)
+        end = int(float(end)*100)
+        gold_tokens.add(phn)
+        if not sent_id in gold_units:
+          gold_units[sent_id] = {(begin, end): phn}
+        else:
+          gold_units[sent_id][(begin, end)] = phn
+
   if not os.path.exists(out_path):
     os.makedirs(out_path)
 
   gold_units = dict()
   gold_tokens = set()
-  with open(gold_path, 'r') as f:
-    for line in f:
-      sent_id, begin, end, phn, _, _, _ = # TODO Compute within- and between-speaker token F1
-      begin = int(float(begin)*100)
-      end = int(float(end)*100)
-      gold_tokens.add(phn)
-      if not sent_id in gold_units:
-        gold_units[sent_id] = {(begin, end): phn}
-      else:
-        gold_units[sent_id][(begin, end)] = phn
-      
+  for gold_root, gold_dirs, gold_files in os.walk(gold_path):
+    if len(gold_dirs):
+      continue
+    else:
+      for gold_file in gold_files:
+        if gold_file.endswith('.item'):
+          print(gold_file)
+          gold_file_path = os.path.join(gold_root, gold_file)
+          _extract_gold_units(gold_file_path)
+          break
+
   pred_units = dict()
   pred_tokens = set()
   with open(pred_path, 'r') as f:
     for line in f:
       parts = line.rstrip('\n').split()
       sent_id = parts[0]
-      pred_unit = parts[1:]
+      if not sent_id in gold_units:
+        continue
+      pred_unit = parts[1].split(',')
       pred_tokens.update(pred_unit)
       pred_units[sent_id] = dict()
-      print('pred unit len, gold unit len: ', len(pred_unit), sorted(pred_units[sent_id])[-1][1]) # XXX
-      for interval in gold_units[sent_id]:
-        pred_units[sent_id][interval] = pred_unit[interval[0]:interval[1]+1] 
+      gold_unit = sorted(gold_units[sent_id])
+      for i, interval in enumerate(gold_unit):
+        if i == 0:
+          begin = interval[0]
+        else:
+          begin = max(gold_unit[i-1][1], interval[0])
+        
+        if i == len(gold_unit) - 1:
+          end = interval[1]
+        else:
+          end = min(gold_unit[i+1][0], interval[1])
+        pred_units[sent_id][interval] = pred_unit[begin:end+1] 
 
   n_gold_tokens = len(gold_tokens)
   n_pred_tokens = len(pred_tokens)
@@ -133,8 +161,8 @@ def compute_token_f1(pred_path, gold_path, out_path):
   plt.pcolor(confusion_norm, cmap=plt.cm.Blues)
   ax.set_xticks(np.arange(len(pred_tokens))+0.5)
   ax.set_yticks(np.arange(len(gold_tokens))+0.5)
-  ax.set_xlabels(pred_tokens)
-  ax.set_ylabels(gold_tokens)
+  ax.set_xticklabels(sorted(pred_stoi, key=lambda x:pred_stoi[x]), rotation='vertical')
+  ax.set_yticklabels(sorted(gold_stoi, key=lambda x:gold_stoi[x]))
   plt.savefig(os.path.join(out_path, 'confusion.png'))
   plt.show()
   plt.close()
@@ -142,6 +170,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
 def main():
   args = parse_args()
   
+  config = json.load(open(args.config)) 
   if args.task == 0:
     data_path = config['data_path']
     # checkpoint_path = config['data']['checkpoint_path']
@@ -154,8 +183,8 @@ def main():
     print('Token precision={:.3f}\tToken recall={:.3f}\tToken F1={:.3f}'.format(token_prec, token_rec, token_f1))  
     conf_df.to_csv('confusion_matrix.csv')
   elif args.task == 1:
-    data_path = config['data_path']
-    model_path = config['model_path']
+    gold_path = config['data_path']
+    pred_path = os.path.join(config['model_path'], 'quantized_outputs.txt')
     out_path = os.path.join(config['model_path'], 'results')
     compute_token_f1(pred_path, gold_path, out_path)
 
