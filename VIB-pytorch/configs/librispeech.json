@@ -1,0 +1,4 @@
+{
+  "data_path": "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic",
+  "model_path": "/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/zerospeech2021/zerospeech2021-submission-baseline-lstm/code/script/outputs"  
+}
