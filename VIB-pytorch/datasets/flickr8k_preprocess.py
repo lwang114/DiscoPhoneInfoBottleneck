@@ -87,10 +87,13 @@ def extract_word_dataset(data_path,
             word_path = os.path.join(data_path, dataset_name, split, word_file)
             wavfile.write(word_path, fs, audio_word)
             word_info = {"audio_id": audio_id,
+                         "image_id": "_".join(audio_id.split("_")[:-1]),
                          "word_id": str(word_idx),
                          "label": label,
                          "begin": begin,
                          "end": end,
+                         "box": phrase["bbox"],
+                         "box_id": phrase["feat_idx"]
                          "spk": spk,
                          "split": split,
                          "phonemes": word}

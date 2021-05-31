@@ -35,19 +35,20 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
-class FlickrSegmentImageDataset(torch.utils.data.Dataset):
+class FlickrWordImageDataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path, 
       preprocessor, split,
       splits = {
         "train": ["train"],
-        "validation": ["test"],
+        "validation": ["val"],
         "test": ["test"],           
       },
       augment=True,
-      image_feature=None,
+      audio_feature="mfcc",
+      image_feature="image",
       sample_rate=16000,
-      min_class_size=500
+      min_class_size=50
   ):
     self.preprocessor = preprocessor
     self.splits = splits
@@ -62,12 +63,10 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     data = []
     for sp in self.splits[split]:
       # Load data paths to audio and visual features
-      examples = load_data_split_balanced(data_path, split,
-
-                                          min_class_size=min_class_size,
-                                          max_keep_size=self.max_keep_size)
+      examples = load_data_split(data_path, split,
+                                 min_class_size=min_class_size)
       
-      data.extend(examples)    
+      data.extend(examples)
       print("Number of {} audio files = {}".format(split, len(examples)))
 
     # Set up transforms
@@ -89,7 +88,6 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
             ]
         self.audio_transforms.extend(augmentation)
     self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms)
-
     self.image_transforms = transforms.Compose(
                 [transforms.Scale(256),
                  transforms.CenterCrop(224),
@@ -103,54 +101,37 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     image = [example["image"] for example in data]
     boxes = [example["box"] for example in data]
     text = [example["text"] for example in data]
-    duration = [example["duration"] for example in data]
-    interval = [example["interval"] for example in data]
     image_ids = [example["image_id"] for example in data]
     feat_idxs = [example["feat_idx"] for example in data]
-    self.dataset = list(zip(audio, image, text, duration, interval, boxes, image_ids, feat_idxs))
+    self.dataset = list(zip(audio, image, text, boxes, image_ids, feat_idxs))
 
-    # Create gold unit file
-    if not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")) or not os.path.exists(os.path.join(data_path, "flickr8k_segment_image_abx_triplets.item")):
-      create_gold_file_balanced(data_path, sample_rate,
-                                max_keep_size=self.max_keep_size)
-    self.gold_dicts = json.load(open(os.path.join(data_path, "flickr8k_segment_image_gold_units.json")))
+    self.image_feature_type = image_feature 
+    self.image_feats = np.load(os.path.join(data_path,
+                                            f"flickr8k_{image_feature}.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
+    self.audio_feature_type = audio_feature
 
-    self.image_feats = None
-    if image_feature.split('_')[-1] != 'label':
-      self.image_feats = np.load(os.path.join(data_path,
-                                              f"flickr8k_{image_feature}.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
-    
-  def sample_sizes(self):
-    """
-    Returns a list of tuples containing the input size
-    (time, 1) and the output length for each sample.
-    """
-    return [((duration, 1), len(text)) for _, text, duration in self.dataset]
-
-  def load_audio(self, audio_file, duration, interval):
-    begin = int(interval[0] * self.sample_rate)
-    end = int(interval[1] * self.sample_rate)
-    audio, _ = torchaudio.load(audio_file)
-    try:
-      inputs = self.audio_transforms(audio[:, begin:end]).squeeze(0)
-    except:
-      inputs = self.audio_transforms(audio)
-      inputs = inputs[:, :, int(begin // 160):int(end // 160)]
-      inputs = inputs.squeeze(0)
+  def load_audio(self, audio_file):
+    if self.audio_feature_type == "mfcc":
+      audio, _ = torchaudio.load(audio_file)
+      try:
+        inputs = self.audio_transforms(audio[:, begin:end]).squeeze(0)
+      except:
+        inputs = self.audio_transforms(audio)
+        inputs = inputs[:, :, int(begin // 160):int(end // 160)]
+        inputs = inputs.squeeze(0)
+    elif self.audio_feature_type == "cpc":
+      audio = np.load(audio_file)
+      inputs = torch.FloatTensor(audio)
+    else: Exception(f"Audio feature type {self.audio_feature_type} not supported")
 
     nframes = inputs.size(-1)
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
-
     inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
     return inputs, input_mask
 
-  def load_image(self, image_file, image_id, box, feat_idx):
-    if self.image_feats is not None:
-      image_feat = self.image_feats[image_id]
-      region_feat = image_feat[feat_idx]
-      return region_feat
-    else: 
+  def load_image(self, image_file, box, box_idx):
+    if self.image_feature_type == "image":
       image = Image.open(image_file).convert("RGB")
       if len(np.asarray(image).shape) == 2:
         print(f"Gray scale image {image_file}, convert to RGB".format(image_file))
@@ -158,11 +139,16 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
       region = image.crop(box=box)
       region = self.image_transforms(region)
       return region
+    else: 
+      image_id = os.path.splitext(os.path.split(image_file)[1])[0]
+      image_feat = self.image_feats[image_id]
+      region_feat = image_feat[box_idx]
+      return region_feat
 
   def __getitem__(self, idx):
-    audio_file, image_file, label, duration, interval, box, image_id, feat_idx = self.dataset[idx]
-    audio_inputs, input_mask = self.load_audio(audio_file, duration, interval)
-    image_inputs = self.load_image(image_file, image_id, box, feat_idx)
+    audio_file, image_file, label, box, box_idx = self.dataset[idx]
+    audio_inputs, input_mask = self.load_audio(audio_file)
+    image_inputs = self.load_image(image_file, box, box_idx)
     outputs = self.preprocessor.to_index(label).squeeze(0)
     return audio_inputs, image_inputs, outputs, input_mask, 1. 
 
@@ -170,7 +156,7 @@ class FlickrSegmentImageDataset(torch.utils.data.Dataset):
     return len(self.dataset)
 
 
-class FlickrSegmentImagePreprocessor:
+class FlickrWordImagePreprocessor:
   """
   A preprocessor for the Flickr 8k dataset. Assume the existence of five files/directories:
       flickr_labels.txt : contains phone alignments of the format (in sec)
@@ -202,13 +188,14 @@ class FlickrSegmentImagePreprocessor:
     num_features,
     splits = {
         "train": ["train"],
-        "validation": ["test"],
+        "validation": ["val"],
         "test": ["test"]
     },
     tokens_path=None,
     lexicon_path=None,
     use_words=False,
     prepend_wordsep=False,
+    audio_feature="mfcc",
     image_feature="rcnn",
     sample_rate=16000,
     min_class_size=500
@@ -217,23 +204,17 @@ class FlickrSegmentImagePreprocessor:
     self._prepend_wordsep = prepend_wordsep
     self.num_features = num_features
 
-    metadata_file = os.path.join(data_path, "flickr8k_phrases.json")
+    metadata_file = os.path.join(data_path, "flickr8k_word_{min_class_size}.json")
     if not os.path.exists(metadata_file):
       self.extract_phrase_info(data_path)
     
     data = []
     for _, spl in splits.items(): 
       for sp in spl:
-          if sp == "train":
-              self.max_keep_size = 200
-              self.min_class_size = min_class_size
-          elif sp == "test":
-              self.max_keep_size = 50
-              self.min_class_size = min_class_size
-          data.extend(load_data_split_balanced(data_path, sp,
-                                               image_feature=image_feature,
-                                               max_keep_size=self.max_keep_size,
-                                               min_class_size=self.min_class_size))   
+        data.extend(load_data_split(data_path, sp,
+                                    audio_feature=audio_feature,
+                                    image_feature=image_feature,
+                                    min_class_size=self.min_class_size)) 
     tokens = set()
     lexicon = {}
     for ex in data:
@@ -464,25 +445,22 @@ class Utterance:
       phrase["label"] = lemmatizer.lemmatize(text[head_idx])
     return phrases
 
-def load_data_split_balanced(data_path, split,
-                             image_feature="rcnn",
-                             max_keep_size=200,
-                             min_class_size=500):
+def load_data_split(data_path, split,
+                    audio_feature="mfcc", # TODO
+                    image_feature="rcnn",
+                    min_class_size=50):
   """
   Returns:
       examples : a list of mappings of
           { "audio" : filename of audio,
+            "image" : filename of image,
             "text" : a list of tokenized words for the class name,
-            "full_text" : a list of tokenized words for the whole phrase, 
-            "duration" : float,
-            "interval": [begin of the word in ms, end of the word in ms],
-            "image_id": str,
-            "feat_idx": int, image feature idx
+            "box" : 4-tuple,
+            "image_id" : str,
+            "feat_idx" : int, image feature idx
           }
   """
-  with open(os.path.join(data_path, "splits/flickr40k_{}.txt".format(split)), "r") as f:
-    filenames = [line.rstrip("\n").split("/")[-1] for line in f]
-  
+ 
   if image_feature.split('_')[-1] == 'label':
     image_feature = 'rcnn'
 
@@ -490,134 +468,34 @@ def load_data_split_balanced(data_path, split,
   utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
   
   examples = []
+  word_f = open(os.path.join(data_path, 
+                             f"flickr8k_words_{min_class_size}", 
+                             "flickr8k_words_{min_class_size}.json"), "r")
+  for line in word_f:
+    word = json.loads(line.rstrip("\n"))
+    audio_id = word["audio_id"]
+    if audio_feature == "mfcc":
+      audio_file = audio_id + ".wav"
+      audio_path = os.path.join(data_path, "../flickr_audio/wavs", audio_file)
+    elif audio_feature == "cpc":
+      audio_file = audio_id + ".npy"
+      audio_path = os.path.join(data_path, "../flickr_word_{min_class_size}_cpc", audio_file)
+    else: Exception(f"Audio feature type {audio_feature} not supported")
 
-  class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-  phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  class_counts = {c:0 for c in class_freqs}
-  class_to_example = {c:[] for c in class_freqs}
-  
-  for line in phrase_f:
-    # if len(examples) > 800: # XXX
-    #     break
-    phrase = json.loads(line.rstrip("\n"))
-    utterance_id = phrase["utterance_id"]
-    audio_file = utterance_id + ".wav"
-    audio_path = os.path.join(data_path, "flickr_audio/wavs", audio_file)
-    image_file = "_".join(utterance_id.split("_")[:-1]) + ".jpg"
-    image_path = os.path.join(data_path, "Flicker8k_Dataset", image_file)
-    label = phrase["label"]
-    
-    if audio_file in filenames and "children" in phrase:
-        if len(phrase["children"]) > 0\
-           and class_freqs[label] >= min_class_size\
-           and class_counts[label] < max_keep_size: # Filter out low-frequency words
-            class_counts[label] += 1
-            image_id = utt_to_feat["_".join(phrase["utterance_id"].split("_")[:-1])]
-            feat_idx = phrase["feat_idx"]
-            
-            example = {"audio": audio_path,
-                       "image": image_path,
-                       "text": phrase["label"],
-                       "full_text": phrase["text"],
-                       "duration": phrase["children"][-1]["end"] - phrase["children"][0]["begin"],
-                       "interval": [phrase["children"][0]["begin"], phrase["children"][-1]["end"]],
-                       "box": phrase["bbox"], 
-                       "feat_idx": feat_idx,
-                       "image_id": image_id}
-            class_to_example[label].append(example)
-            examples.append(example)
-  phrase_f.close()
-  return examples
-  
-def create_gold_file_balanced(data_path, sample_rate, 
-                              max_keep_size=100, min_class_size=80):
-  """
-  Create the following files:
-      gold_units.json : contains gold_dicts, a list of mappings 
-          {"sentence_id" : str,
-           "units" : a list of ints representing phoneme id for each feature frame,
-           "text" : a list of strs representing phoneme tokens for each feature frame}
-     abx_triplets.item : contains ABX triplets in the format
-                         line 0 : whatever (not read)
-                         line > 0: #file_ID onset offset #phone prev-phone next-phone speaker
-                         onset : begining of the triplet (in s)
-                         offset : end of the triplet (in s)
-  """
-  class_freqs = json.load(open(os.path.join(data_path, "phrase_classes.json"), "r"))
-  phrase_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  filenames = [line.rstrip("\n").split("/")[-1] for line in open(os.path.join(data_path, "splits/flickr40k_test.txt"), "r")] 
-  phone_to_index = {}
-  class_counts = {c:0 for c in class_freqs}
-  gold_dicts = []
-  triplets = ['#file_ID onset offset #phone prev-phone next-phone speaker']
+    image_id = "_".join(audio_id.split("_")[:-1])
+    image_path = os.path.join(data_path, "Flicker8k_Dataset", image_id+".jpg") 
+    label = word["label"]
+    box = word["box"]
+    box_idx = word["box_idx"]
 
-  phrase_idx = 0
-  for line in phrase_f:
-    phrase = json.loads(line.rstrip("\n"))
-    utterance_id = phrase["utterance_id"]
-    fn = utterance_id + ".wav"
-    filename = os.path.join(data_path, "flickr_audio/wavs", fn)
-    label = phrase["label"]
-
-    if fn in filenames and "children" in phrase:
-      if len(phrase["children"]) == 0 or class_freqs[label] < min_class_size or class_counts[label] >= max_keep_size: # Filter out low-frequency words
-          continue
-
-      class_counts[label] += 1
-      nframes = int((phrase["children"][-1]["end"] - phrase["children"][0]["begin"])*100)+1
-
-      gold_dict = {"sentence_id": fn,
-                   "units": [-1]*nframes,
-                   "phoneme_text": [NULL]*nframes,
-                   "word_text": [label]*nframes,
-                   "word_full_text": [NULL]*nframes
-                  }
-      
-      begin_phone = 0
-      begin_word = 0
-      example_id = f"{fn}_{phrase_idx}"
-      phrase_idx += 1
-      for word in phrase["children"]:
-        dur_word = int((word["end"] - word["begin"])*100) 
-        end_word = begin_word + dur_word
-        for x in range(begin_word, end_word):
-            gold_dict["word_full_text"][x] = word["text"]
-        begin_word += dur_word
-            
-        for phn_idx, phone in enumerate(word["children"]):
-          if "SIL" in phone["text"] or "+" in phone["text"]:
-              continue
-          if not phone["text"] in phone_to_index:
-            phone_to_index[phone["text"]] = len(phone_to_index)
-          dur_phone = int((phone["end"] - phone["begin"])*100)
-          end_phone = begin_phone + dur_phone
-          for t in range(begin_phone, end_phone):
-              gold_dict["phoneme_text"][t] = phone["text"]
-              gold_dict["units"][t] = phone_to_index[phone["text"]]
-          
-          if phn_idx == 0:
-            prev_token = NULL
-          else:
-            prev_token = word["children"][phn_idx-1]["text"]
-
-          if phn_idx == len(word["children"]) - 1:
-            next_token = NULL
-          else:
-            next_token = word["children"][phn_idx+1]["text"]
-
-          if len(gold_dicts) < 5000:
-              triplets.append(f"{example_id} {begin_phone} {begin_phone + dur_phone} {phone['text']} {prev_token} {next_token} 0")
-
-          begin_phone += dur_phone
-
-      gold_dicts.append(gold_dict)
-  
-  with open(os.path.join(data_path, "flickr8k_segment_image_gold_units.json"), "w") as gold_f:
-    json.dump(gold_dicts, gold_f, indent=2)
-
-  with open(os.path.join(data_path, "flickr8k_segment_image_abx_triplets.item"), "w") as triplet_f:
-    triplet_f.write('\n'.join(triplets))
-
-    
+    example = {"audio": audio_path,
+               "image": image_path,
+               "text": label,
+               "box": box,
+               "box_idx": box_idx} 
+    examples.append(example)
+  word_f.close()
+  return examples  
+   
 if __name__ == "__main__":
     preproc = FlickrSegmentImagePreprocessor(num_features=80, data_path="/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/")

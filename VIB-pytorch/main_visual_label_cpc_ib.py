@@ -4,25 +4,32 @@ import argparse
 from utils import str2bool
 from solver_visual_label_cpc_ib import Solver
 import pandas as pd
+import sys
 import os
+from pyhocon import ConfigFactory
 
-def main(args):
+def main(argv):
+  parser = argparse.ArgumentParser(description='Visual label information bottleneck')
+  parser.add_argument('CONFIG', type=str)
+  config = parser.parse_config.argv)
+
   torch.backends.cudnn.enabled = True
   torch.backends.cudnn.benchmark = True
-
-  if not args.dset_dir:
-    if args.dataset == 'FLICKR_SEGMENT_IMAGE':
-      args.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/flickr/'
-    else:
-      args.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/'
   
-  if not args.image_model_dir:
-    if args.dataset == 'FLICKR_SEGMENT_IMAGE':
-      args.image_model_dir = 'checkpoints/image_classification_ce_minfreq500/'
+  config = ConfigFactory.parse_file(config.config)
+  if not config.dset_dir:
+    if config.dataset == 'FLICKR_WORD_IMAGE': 
+      config.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/flickr/flickr8k_word_{min_class_size}'
     else:
-      args.image_model_dir = 'checkpoints/image_classification_mscoco_ce/'
+      config.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/'
+  
+  if not config.image_model_dir:
+    if config.dataset == 'FLICKR_WORD_IMAGE':
+      config.image_model_dir = 'checkpoints/image_classification_ce_minfreq500/'
+    else:
+      config.image_model_dir = 'checkpoints/image_classification_mscoco_ce/'
 
-  seed = args.seed
+  seed = config.seed
   torch.manual_seed(seed)
   torch.cuda.manual_seed(seed)
   np.random.seed(seed)
@@ -32,18 +39,18 @@ def main(args):
 
   print()
   print('[ARGUMENTS]')
-  print(args)
+  print(config.
   print()
 
-  net = Solver(args)
+  net = Solver(config)
 
-  if args.mode == 'train': 
+  if config.mode == 'train': 
     net.train()
-  elif args.mode == 'test':
+  elif config.mode == 'test':
     net.test(save_ckpt=False, compute_abx=True)
-  elif args.mode == 'train_sweep':
-    args.beta = 1.
-    args.epoch = 25
+  elif config.mode == 'train_sweep':
+    config.beta = 1.
+    config.epoch = 25
     df_results = {'Model': [],
                   'Loss': [],
                   r'$\beta$': [],
@@ -51,105 +58,20 @@ def main(args):
                   'ABX': [],
                   'WER': []}
     for _ in range(4):
-      net = Solver(args)
+      net = Solver(config.
       net.train()
-      df_results['Model'].append(args.model_type)
-      df_results['Loss'].append(args.loss_type)
-      df_results[r'$\beta$'].append(args.beta)
+      df_results['Model'].append(config.model_type)
+      df_results['Loss'].append(config.loss_type)
+      df_results[r'$\beta$'].append(config.beta)
       df_results['Token F1'].append(net.history['token_f1'])
       df_results['WER'].append(1.-net.history['acc'])
       df_results['ABX'].append(net.history['abx'])
-      args.beta /= 10
+      config.beta /= 10
 
     df_results = pd.DataFrame(df_results)
-    df_results.to_csv(os.path.join('checkpoints', args.env_name, 'results.csv'))
+    df_results.to_csv(os.path.join('checkpoints', config.env_name, 'results.csv'))
   else : return 0
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CPC Pretraining')
-    parser.add_argument(
-        '--epoch', default = 200, type=int, help='Number of epochs')
-    parser.add_argument('--beta', default=1e-3, type=float, help='beta')
-    parser.add_argument(
-        '--lr', default=1e-3, type=float, help='learning rate'
-    )
-    parser.add_argument(
-        '--K', default=256, type=int, help='dimension of encoding Z'
-    )
-    parser.add_argument(
-        '--seed', default=1, type=int, help='random seed'
-    )
-    parser.add_argument(
-        '--batch_size', default=8, type=int, help='batch size'
-    )
-    parser.add_argument(
-        '--pos_weight', default=1., type=float
-    )
-    parser.add_argument(
-        '--dataset', 
-        choices={'MSCOCO2K', 'FLICKR_SEGMENT_IMAGE', 'SPEECHCOCO'}, 
-        default='FLICKR_SEGMENT_IMAGE', type=str, help='dataset name'
-    )
-    parser.add_argument(
-        '--loss_type', 
-        choices={'IB-only', 'IB+CPC', 'IB+CPC+VQ', 'CPC-only'}
-    )
-    parser.add_argument(
-        '--model_type', 
-        choices={'gumbel_blstm', 
-                 'pyramidal_blstm', 
-                 'gumbel_markov_blstm',}, 
-        default='gumbel_blstm'
-    )
-    parser.add_argument(
-        '--cpc_feature', choices={'rnn', 'bottleneck'}, default='rnn'
-    )
-    parser.add_argument(
-        '--image_feature', 
-        choices={'label', 'multi_label', 'rcnn', 'res34'},
-        default='label'
-    )
-    parser.add_argument(
-        '--min_class_size',
-        type=int, default=500
-    )
-    parser.add_argument(
-        '--image_model_dir', 
-        type=str, default=None
-    )
-    parser.add_argument(
-        '--dset_dir', 
-        default=None, 
-        type=str, help='dataset directory path'
-    )
-    parser.add_argument(
-        '--summary_dir', 
-        default='summary', type=str, help='summary directory path'
-    )
-    parser.add_argument(
-        '--ckpt_dir', 
-        default='checkpoints/phone_discovery_visual_label_cpc_ib', 
-        type=str, help='checkpoint directory path'
-    )
-    parser.add_argument(
-        '--load_ckpt', default='', type=str, help='checkpoint name'
-    )
-    parser.add_argument(
-        '--mode', 
-        choices={'train', 'test', 'train_sweep'}, 
-        default='train', type=str, help='train or test'
-    )
-    parser.add_argument(
-        '--n_predicts', 
-        type=int, default=6, help='number of prediction samples for CPC'
-    )
-    parser.add_argument(
-        '--n_negatives', 
-        type=int, default=17, help='number of prediction samples for CPC'
-    )
-    parser.add_argument(
-        '--tensorboard', action='store_true', help='enable tensorboard'
-    )
-    args = parser.parse_args()
-
-    main(args)
+  argv = sys.argv[1:]
+  main(argv)

@@ -152,8 +152,8 @@ def compute_token_f1(pred_path, gold_path, out_path):
   token_f1 = 2 * token_recall * token_precision /\
                (token_recall + token_precision)\
                if (token_recall + token_precision) > 0 else 0 
-  print(f'Token recall: {token_recall} '
-        f'Token precision: {token_precision} '
+  print(f'Token recall: {token_recall}\t'
+        f'Token precision: {token_precision}\t'
         f'Token F1: {token_f1}')
 
   fig, ax = plt.subplots()
@@ -163,9 +163,10 @@ def compute_token_f1(pred_path, gold_path, out_path):
   ax.set_yticks(np.arange(len(gold_tokens))+0.5)
   ax.set_xticklabels(sorted(pred_stoi, key=lambda x:pred_stoi[x]), rotation='vertical')
   ax.set_yticklabels(sorted(gold_stoi, key=lambda x:gold_stoi[x]))
-  plt.savefig(os.path.join(out_path, 'confusion.png'))
+  plt.savefig(os.path.join(out_path))
   plt.show()
   plt.close()
+  return token_f1, token_precision, token_recall
 
 def main():
   args = parse_args()
@@ -185,7 +186,7 @@ def main():
   elif args.task == 1:
     gold_path = config['data_path']
     pred_path = os.path.join(config['model_path'], 'quantized_outputs.txt')
-    out_path = os.path.join(config['model_path'], 'results')
+    out_path = os.path.join(config['model_path'], 'results/confusion.png')
     compute_token_f1(pred_path, gold_path, out_path)
 
 if __name__ == '__main__':

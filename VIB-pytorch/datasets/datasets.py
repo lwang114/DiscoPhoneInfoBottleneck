@@ -6,7 +6,7 @@ from datasets.mscoco2k_segment import MSCOCO2kSegmentDataset, MSCOCO2kSegmentPre
 from datasets.mscoco2k_segment_image import MSCOCO2kSegmentImageDataset, MSCOCO2kSegmentImagePreprocessor
 from datasets.speechcoco_segment import SpeechCOCOSegmentDataset, SpeechCOCOSegmentPreprocessor
 from datasets.flickr8k import FlickrSegmentDataset, FlickrSegmentPreprocessor
-from datasets.flickr8k_segment_image import FlickrSegmentImageDataset, FlickrSegmentImagePreprocessor
+from datasets.flickr8k_word_image import FlickrWordImageDataset, FlickrWordImagePreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -50,17 +50,19 @@ def return_data(args):
                                           preprocessor, 'train')
         test_data = FlickrSegmentDataset(dset_dir,
                                          preprocessor, 'test') 
-    elif 'FLICKR_SEGMENT_IMAGE' == name :
-        preprocessor = FlickrSegmentImagePreprocessor(dset_dir, 80, 
+    elif 'FLICKR_WORD_IMAGE' == name :
+        preprocessor = FlickrWordImagePreprocessor(dset_dir, 80,
+        audio_feature=args.audio_feature, 
                                                       image_feature=args.image_feature)
-        train_data = FlickrSegmentImageDataset(dset_dir,
-                                               preprocessor, 
-                                               'train',
-                                               image_feature=args.image_feature)
-        test_data = FlickrSegmentImageDataset(dset_dir,
-                                              preprocessor, 
-                                              'test',
-                                              image_feature=args.image_feature) 
+        train_data = FlickrWordImageDataset(dset_dir,
+                                            preprocessor, 
+                                            'train',
+                                            audi_feature=args.audio_feature,  
+                                            image_feature=args.image_feature)
+        test_data = FlickrWordImageDataset(dset_dir,
+                                           preprocessor, 
+                                           'test',
+                                           image_feature=args.image_feature) 
     else : raise UnknownDatasetError()
 
 
