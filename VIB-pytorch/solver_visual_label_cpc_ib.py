@@ -163,7 +163,7 @@ class Solver(object):
                                   x, masks=audio_masks, 
                                   temp=temp 
                                   )
-          logit = logits.mean(-2)
+          logit = logits.sum(dim=-2)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
           gold_label = F.one_hot(y, self.n_class)
           pred_labels.append(pred_label.cpu())
@@ -272,7 +272,7 @@ class Solver(object):
                                                   )
 
           # Word prediction
-          logit = logits.mean(-2)
+          logit = logits.sum(dim=-2)
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
