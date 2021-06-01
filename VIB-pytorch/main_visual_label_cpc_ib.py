@@ -11,15 +11,15 @@ from pyhocon import ConfigFactory
 def main(argv):
   parser = argparse.ArgumentParser(description='Visual label information bottleneck')
   parser.add_argument('CONFIG', type=str)
-  config = parser.parse_config.argv)
+  args = parser.parse_args(argv)
 
   torch.backends.cudnn.enabled = True
   torch.backends.cudnn.benchmark = True
   
-  config = ConfigFactory.parse_file(config.config)
+  config = ConfigFactory.parse_file(args.CONFIG)
   if not config.dset_dir:
     if config.dataset == 'FLICKR_WORD_IMAGE': 
-      config.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/flickr/flickr8k_word_{min_class_size}'
+      config.dset_dir = f'/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/flickr8k_word_{config.min_class_size}'
     else:
       config.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/'
   
@@ -38,8 +38,8 @@ def main(argv):
   torch.set_printoptions(precision=4)
 
   print()
-  print('[ARGUMENTS]')
-  print(config.
+  print('[CONFIGS]')
+  print(config)
   print()
 
   net = Solver(config)
@@ -58,7 +58,7 @@ def main(argv):
                   'ABX': [],
                   'WER': []}
     for _ in range(4):
-      net = Solver(config.
+      net = Solver(config)
       net.train()
       df_results['Model'].append(config.model_type)
       df_results['Loss'].append(config.loss_type)

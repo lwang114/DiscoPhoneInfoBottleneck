@@ -93,9 +93,6 @@ def compute_token_f1(pred_path, gold_path, out_path):
         else:
           gold_units[sent_id][(begin, end)] = phn
 
-  if not os.path.exists(out_path):
-    os.makedirs(out_path)
-
   gold_units = dict()
   gold_tokens = set()
   for gold_root, gold_dirs, gold_files in os.walk(gold_path):
@@ -104,7 +101,6 @@ def compute_token_f1(pred_path, gold_path, out_path):
     else:
       for gold_file in gold_files:
         if gold_file.endswith('.item'):
-          print(gold_file)
           gold_file_path = os.path.join(gold_root, gold_file)
           _extract_gold_units(gold_file_path)
           break
@@ -138,8 +134,8 @@ def compute_token_f1(pred_path, gold_path, out_path):
   pred_stoi = {p:i for i, p in enumerate(sorted(pred_tokens, key=lambda x:int(x)))}
   gold_stoi = {g:i for i, g in enumerate(sorted(gold_tokens))}
   confusion = np.zeros((n_gold_tokens, n_pred_tokens))
-  for sent_id in gold_units:
-    for interval in gold_units[sent_id]:
+  for sent_id in pred_units:
+    for interval in pred_units[sent_id]:
       gold_unit = gold_units[sent_id][interval]
       g_idx = gold_stoi[gold_unit]
       for pred_unit in pred_units[sent_id][interval]:
@@ -163,7 +159,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
   ax.set_yticks(np.arange(len(gold_tokens))+0.5)
   ax.set_xticklabels(sorted(pred_stoi, key=lambda x:pred_stoi[x]), rotation='vertical')
   ax.set_yticklabels(sorted(gold_stoi, key=lambda x:gold_stoi[x]))
-  plt.savefig(os.path.join(out_path))
+  plt.savefig(out_path)
   plt.show()
   plt.close()
   return token_f1, token_precision, token_recall

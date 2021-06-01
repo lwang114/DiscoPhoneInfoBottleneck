@@ -40,7 +40,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       self, data_path, 
       preprocessor, split,
       splits = {
-        "train": ["train"],
+        "train": ["train", "val"],
         "validation": ["val"],
         "test": ["test"],           
       },
@@ -54,17 +54,15 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.splits = splits
     self.data_path = data_path
     self.sample_rate = sample_rate
-    self.max_feat_len = 64
-    if split == "train":
-        self.max_keep_size = 200
-    elif split == "test":
-        self.max_keep_size = 50
+    self.max_feat_len = 100
     
     data = []
     for sp in self.splits[split]:
       # Load data paths to audio and visual features
-      examples = load_data_split(data_path, split,
-                                 min_class_size=min_class_size)
+      examples = load_data_split(data_path, sp,
+                                 min_class_size=min_class_size,
+                                 audio_feature=audio_feature,
+                                 image_feature=image_feature)
       
       data.extend(examples)
       print("Number of {} audio files = {}".format(split, len(examples)))
@@ -101,13 +99,13 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     image = [example["image"] for example in data]
     boxes = [example["box"] for example in data]
     text = [example["text"] for example in data]
-    image_ids = [example["image_id"] for example in data]
-    feat_idxs = [example["feat_idx"] for example in data]
-    self.dataset = list(zip(audio, image, text, boxes, image_ids, feat_idxs))
+    feat_idxs = [example["box_idx"] for example in data]
+    self.dataset = list(zip(audio, image, text, boxes, feat_idxs))
 
     self.image_feature_type = image_feature 
     self.image_feats = np.load(os.path.join(data_path,
-                                            f"flickr8k_{image_feature}.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
+                                            f"../flickr8k_{image_feature}.npz")) # XXX np.load(os.path.join(data_path, "flickr8k_res34.npz"))
+    self.image_to_feat = {'_'.join(feat_id.split('_')[:-1]):feat_id for feat_id in self.image_feats}
     self.audio_feature_type = audio_feature
 
   def load_audio(self, audio_file):
@@ -117,11 +115,10 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
         inputs = self.audio_transforms(audio[:, begin:end]).squeeze(0)
       except:
         inputs = self.audio_transforms(audio)
-        inputs = inputs[:, :, int(begin // 160):int(end // 160)]
         inputs = inputs.squeeze(0)
     elif self.audio_feature_type == "cpc":
-      audio = np.load(audio_file)
-      inputs = torch.FloatTensor(audio)
+      audio = np.loadtxt(audio_file)
+      inputs = torch.FloatTensor(audio).t()
     else: Exception(f"Audio feature type {self.audio_feature_type} not supported")
 
     nframes = inputs.size(-1)
@@ -141,7 +138,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       return region
     else: 
       image_id = os.path.splitext(os.path.split(image_file)[1])[0]
-      image_feat = self.image_feats[image_id]
+      image_feat = self.image_feats[self.image_to_feat[image_id]]
       region_feat = image_feat[box_idx]
       return region_feat
 
@@ -198,15 +195,14 @@ class FlickrWordImagePreprocessor:
     audio_feature="mfcc",
     image_feature="rcnn",
     sample_rate=16000,
-    min_class_size=500
+    min_class_size=50
   ):
+    self.num_features = num_features
+    self.min_class_size= min_class_size
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
-    self.num_features = num_features
 
-    metadata_file = os.path.join(data_path, "flickr8k_word_{min_class_size}.json")
-    if not os.path.exists(metadata_file):
-      self.extract_phrase_info(data_path)
+    metadata_file = os.path.join(data_path, f"flickr8k_word_{min_class_size}.json")
     
     data = []
     for _, spl in splits.items(): 
@@ -231,222 +227,9 @@ class FlickrWordImagePreprocessor:
     tok_to_idx = self.tokens_to_index
     return torch.LongTensor([tok_to_idx.get(t, 0) for t in line.split(self.wordsep)])
 
-  def union_of_boxes(self, b1, b2):
-    return [min(b1[0], b2[0]),\
-            min(b1[1], b2[1]),\
-            max(b1[2], b2[2]),\
-            max(b1[3], b2[3])]
-
-  def extract_phrase_info(self, data_path):
-    word_dir = os.path.join(os.path.join(data_path, "word_segmentation"))
-    phone_f = open(os.path.join(data_path, "flickr_labels.txt"), "r")
-    phrase_f = open(os.path.join(data_path, "flickr8k_phrases.txt"), "r")
-    bbox_f = open(os.path.join(data_path, "flickr8k_bboxes.txt"), "r")
-    sent_f = open(os.path.join(data_path, "flickr8k_sentences.txt"), "r")
-    out_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "w")
-
-    # Build a mapping form file id to caption text
-    id_to_text = {} 
-    for line in sent_f: 
-      parts = line.strip("\n").split()
-      image_id = parts[0].split(".")[0] 
-      capt_id = parts[1]
-      utterance_id = f"{image_id}_{int(capt_id)-1}"
-      text = parts[2:]
-      id_to_text[utterance_id] = text
-
-    # Build a mapping from file id to phrase info
-    id_to_phrase = dict()
-    id_to_bbox = dict()
-    for line_bbox in bbox_f:
-      parts = line_bbox.split()
-      entity_id = parts[1]
-      bbox = line_bbox.strip("\n").split()[-4:]
-      if entity_id in id_to_bbox:
-        id_to_bbox[entity_id] = self.union_of_boxes(id_to_bbox[entity_id],
-                                                    [int(x) for x in bbox])
-      else:
-        id_to_bbox[entity_id] = [int(x) for x in bbox]
-
-    for line_phrase in phrase_f:
-      parts = line_phrase.strip("\n").split()
-      image_id = parts[0].split(".")[0]
-      capt_id = parts[1] 
-      entity_id = parts[2]
-      utterance_id = f"{image_id}_{int(capt_id)-1}"
-      phrase = " ".join(parts[3:-1])
-      if not entity_id in id_to_bbox:
-        continue
-
-      begin = int(parts[-1]) - 1
-      end = begin + len(parts[3:-1]) - 1
-      if not utterance_id in id_to_phrase:
-        id_to_phrase[utterance_id] = []
-
-      bbox = line_bbox.strip("\n").split()[-4:]
-      phrase_info = {"utterance_id": utterance_id,
-                     "text": phrase, 
-                     "begin": begin, 
-                     "end": end,
-                     "bbox": id_to_bbox[entity_id],
-                     "entity_id": entity_id,
-                     "feat_idx": len(id_to_phrase[utterance_id])}
-      id_to_phrase[utterance_id].append(phrase_info)
-    print(f"Number of audio: {len(id_to_phrase)}")
-
-    # Iterate over each speech file to extract utterance info
-    cur_utterance_id = None
-    cur_phones = None
-    cur_words = None
-    idx = 0
-    for line in tqdm(phone_f):
-      if "align" in line:
-        if cur_utterance_id and cur_utterance_id in id_to_phrase:
-          utt = Utterance(cur_phones, cur_words,
-                          id_to_phrase[cur_utterance_id],
-                          id_to_text[cur_utterance_id])
-          for phrase in utt.phrases:
-            out_f.write(json.dumps(phrase)+"\n")
-        cur_utterance_id = "_".join(line.strip("\n").split(".")[0].split("_")[1:])
-        cur_phones = []
-        cur_words = []
-         
-        word_fn = os.path.join(word_dir, cur_utterance_id+".words")
-        if not os.path.exists(word_fn):
-          continue
-        with open(word_fn, "r") as word_f:
-          for line in word_f:
-            w, begin, end = line.split()
-            if "$" in w:
-              continue
-            w = re.sub(r"[^\w]", "", w)
-            w = re.sub(r"[0-9]", "", w)
-            cur_words.append({"text": w, 
-                              "begin": float(begin), 
-                              "end": float(end)})
-      else:
-        phn, begin, end = line.split()
-        cur_phones.append({"text": phn, 
-                           "begin": float(begin), 
-                           "end": float(end)})
-      
-    utt = Utterance(cur_phones, cur_words,
-                    id_to_phrase[cur_utterance_id],
-                    id_to_text[cur_utterance_id])
-    for phrase in utt.phrases:
-      out_f.write(json.dumps(phrase)+"\n")
-    phone_f.close()
-    phrase_f.close()
-    sent_f.close()
-    
-class Utterance:
-  def __init__(self, phones, words, phrases, rawtext):
-    """
-    Args:
-        phones : a list of dicts of {"text": str, "begin": begin time in sec, "end": end time in sec}
-        words : a list of dicts of {"text": str, "begin": begin time in sec, "end": end time in sec}
-        phrases : a list of dicts of {"text": str, "begin": begin time in word tokens, "end": end time in word tokens}
-        rawtext : a list of strs
-    """
-    phones = sorted(phones, key=lambda x:x['begin'])
-    words = sorted(words, key=lambda x:x['begin'])
-    phrases = sorted(phrases, key=lambda x:x['begin'])
-
-    words, phrases = self.extract_char_offsets(words, phrases, rawtext)
-    words = self.align_time(phones, words)
-    phrases = self.extract_phrase_labels(phrases)
-    self.phrases = self.match(words, phrases)
-    
-  def extract_char_offsets(self, words, phrases, rawtext):
-    # Extract char offsets for text words
-    text_offsets = []
-    begin = 0
-    for token in rawtext:
-      text_offsets.append([begin, begin+len(token)-1])
-      begin += len(token)
-    
-    # Convert token offsets to char offsets
-    for idx in range(len(phrases)):
-      begin_char = text_offsets[phrases[idx]["begin"]][0]
-      end_char = text_offsets[phrases[idx]["end"]][1]
-      phrases[idx]["begin"] = begin_char
-      phrases[idx]["end"] = end_char 
-
-    # Extract char offsets for acoustic words
-    begin = 0
-    for word in words:
-      word["begin_char"] = begin
-      word["end_char"] = begin+len(word["text"])-1
-      begin += len(word["text"])
-    
-    return words, phrases
-
-  def match(self, children, parents):
-    for parent in parents:
-        if not "children" in parent:
-            parent["children"] = []
-
-        for child in children:
-            if lemmatizer.lemmatize(child["text"].lower()) == parent["label"]:
-                parent["children"].append(child)
-    return parents
-
-  def align_char(self, children, parents):
-    parent_idx = 0
-    n_parents = len(parents)
-
-    for child in children:
-      parent = parents[parent_idx]
-      if not "children" in parent:
-        parent["children"] = []
-      begin, end = child["begin_char"], child["end_char"]
-
-      if begin > parent["end"]:
-        parent_idx += 1
-        if parent_idx >= n_parents:
-          break
-        parent = parents[parent_idx] 
-        parent["children"] = []
-      
-      if end < parent["begin"]:
-        continue
-      parent["children"].append(child)
-    return parents  
-
-  def align_time(self, children, parents):
-    parent_idx = 0
-    n_parents = len(parents)
-
-    for child in children:
-      parent = parents[parent_idx]
-      if not "children" in parent:
-        parent["children"] = []
-      begin, end = child["begin"], child["end"]
-
-      if begin >= parent["end"]:
-        parent_idx += 1
-        if parent_idx >= n_parents:
-          break
-        parent = parents[parent_idx] 
-        parent["children"] = []
-      
-      if end <= parent["begin"]:
-        continue
-      parent["children"].append(child)
-    return parents
-
-  def extract_phrase_labels(self, phrases):
-    for phrase in phrases:
-      text = phrase["text"].split()
-      pos_tags = [t[1] for t in nltk.pos_tag(text, tagset="universal")]
-      instance = dep_parser._dataset_reader.text_to_instance(text, pos_tags)
-      parsed_text = dep_parser.predict_batch_instance([instance])[0]
-      head_idx = np.where(np.asarray(parsed_text["predicted_heads"]) <= 0)[0][0]
-      phrase["label"] = lemmatizer.lemmatize(text[head_idx])
-    return phrases
 
 def load_data_split(data_path, split,
-                    audio_feature="mfcc", # TODO
+                    audio_feature="mfcc",
                     image_feature="rcnn",
                     min_class_size=50):
   """
@@ -456,7 +239,6 @@ def load_data_split(data_path, split,
             "image" : filename of image,
             "text" : a list of tokenized words for the class name,
             "box" : 4-tuple,
-            "image_id" : str,
             "feat_idx" : int, image feature idx
           }
   """
@@ -464,29 +246,31 @@ def load_data_split(data_path, split,
   if image_feature.split('_')[-1] == 'label':
     image_feature = 'rcnn'
 
-  image_feats = np.load(os.path.join(data_path, f"flickr8k_{image_feature}.npz")) # XXX
+  image_feats = np.load(os.path.join(data_path, f"../flickr8k_{image_feature}.npz"))
   utt_to_feat = {'_'.join(k.split('_')[:-1]):k for k in image_feats}
   
   examples = []
-  word_f = open(os.path.join(data_path, 
-                             f"flickr8k_words_{min_class_size}", 
-                             "flickr8k_words_{min_class_size}.json"), "r")
+  word_f = open(os.path.join(data_path,
+                             f"flickr8k_word_{min_class_size}.json"), "r")
   for line in word_f:
     word = json.loads(line.rstrip("\n"))
+    if word["split"] != split:
+      continue
     audio_id = word["audio_id"]
+    word_id = int(word['word_id'])
     if audio_feature == "mfcc":
-      audio_file = audio_id + ".wav"
-      audio_path = os.path.join(data_path, "../flickr_audio/wavs", audio_file)
+      audio_file = f"{audio_id}_{word_id:04d}.wav"
+      audio_path = os.path.join(data_path, split, audio_file)
     elif audio_feature == "cpc":
-      audio_file = audio_id + ".npy"
-      audio_path = os.path.join(data_path, "../flickr_word_{min_class_size}_cpc", audio_file)
+      audio_file = f"{audio_id}_{word_id:04d}.txt"
+      audio_path = os.path.join(data_path, f"../flickr8k_word_{min_class_size}_cpc", audio_file)
     else: Exception(f"Audio feature type {audio_feature} not supported")
 
     image_id = "_".join(audio_id.split("_")[:-1])
     image_path = os.path.join(data_path, "Flicker8k_Dataset", image_id+".jpg") 
     label = word["label"]
     box = word["box"]
-    box_idx = word["box_idx"]
+    box_idx = word["box_id"]
 
     example = {"audio": audio_path,
                "image": image_path,
@@ -498,4 +282,4 @@ def load_data_split(data_path, split,
   return examples  
    
 if __name__ == "__main__":
-    preproc = FlickrSegmentImagePreprocessor(num_features=80, data_path="/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/")
+    preproc = FlickrWordImagePreprocessor(num_features=80, data_path="/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/")

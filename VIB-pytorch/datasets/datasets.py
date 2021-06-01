@@ -52,31 +52,34 @@ def return_data(args):
                                          preprocessor, 'test') 
     elif 'FLICKR_WORD_IMAGE' == name :
         preprocessor = FlickrWordImagePreprocessor(dset_dir, 80,
-        audio_feature=args.audio_feature, 
-                                                      image_feature=args.image_feature)
+                                                   audio_feature=args.audio_feature, 
+                                                   image_feature=args.image_feature)
         train_data = FlickrWordImageDataset(dset_dir,
                                             preprocessor, 
                                             'train',
-                                            audi_feature=args.audio_feature,  
-                                            image_feature=args.image_feature)
+                                            audio_feature=args.audio_feature,  
+                                            image_feature=args.image_feature,
+                                            min_class_size=args.min_class_size)
         test_data = FlickrWordImageDataset(dset_dir,
                                            preprocessor, 
                                            'test',
-                                           image_feature=args.image_feature) 
+                                           audio_feature=args.audio_feature,
+                                           image_feature=args.image_feature,
+                                           min_class_size=args.min_class_size) 
     else : raise UnknownDatasetError()
 
 
     train_loader = DataLoader(train_data,
-                                batch_size=batch_size,
-                                shuffle=True,
-                                num_workers=1,
-                                drop_last=True)
+                              batch_size=batch_size,
+                              shuffle=True,
+                              num_workers=1,
+                              drop_last=True)
 
     test_loader = DataLoader(test_data,
-                                batch_size=batch_size,
-                                shuffle=False,
-                                num_workers=1,
-                                drop_last=False)
+                             batch_size=batch_size,
+                             shuffle=False,
+                             num_workers=1,
+                             drop_last=False)
 
     data_loader = dict()
     data_loader['train']=train_loader

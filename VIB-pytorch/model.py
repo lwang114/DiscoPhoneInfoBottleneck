@@ -290,7 +290,7 @@ class GaussianBLSTM(nn.Module):
 
 class GumbelBLSTM(nn.Module):
   def __init__(self, 
-               embedding_dim=100, 
+               embedding_dim, 
                n_layers=1, 
                n_class=65, 
                input_size=80, 
@@ -306,7 +306,11 @@ class GumbelBLSTM(nn.Module):
     self.bottleneck = nn.Linear(2*embedding_dim if bidirectional else embedding_dim, 49)
     self.decode = nn.Linear(49, self.n_class)
 
-  def forward(self, x, num_sample=1, masks=None, temp=1., return_feat=None):
+  def forward(self, x, 
+              num_sample=1, 
+              masks=None, 
+              temp=1., 
+              return_feat=False):
     ds_ratio = self.ds_ratio
     device = x.device
     if x.dim() < 3:
@@ -335,7 +339,7 @@ class GumbelBLSTM(nn.Module):
       x = x * masks.unsqueeze(2)
 
     in_logit = x.sum(dim=1)
-    encoding = self.reparametrize_n(x,num_sample,temp)
+    encoding = self.reparametrize_n(x, num_sample, temp)
     L = ds_ratio * (T // ds_ratio)
     if encoding.dim() > 3:
         encoding = encoding[:, :, :L].view(num_sample, B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
@@ -343,16 +347,13 @@ class GumbelBLSTM(nn.Module):
         encoding = encoding[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
     logit = self.decode(encoding)
 
-    if num_sample == 1 : pass
-    elif num_sample > 1 : logit = torch.log(F.softmax(logit, dim=2).mean(0))
+    if num_sample == 1: pass
+    elif num_sample > 1: logit = torch.log(F.softmax(logit, dim=2).mean(0))
 
     if return_feat:
-        if return_feat == 'bottleneck':
-            return in_logit, logit, encoding
-        elif return_feat == 'rnn':
-            return in_logit, logit, embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
-    else:
-        return in_logit, logit
+        embedding = embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
+        return in_logit, logit, encoding, embedding
+    return in_logit, logit
     
   def reparametrize_n(self, x, n=1, temp=1.):
       # reference :

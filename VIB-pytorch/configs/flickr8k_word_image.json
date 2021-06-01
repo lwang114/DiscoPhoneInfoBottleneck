@@ -1,7 +1,7 @@
 {
   "seed": 2,
   "mode": "train",
-  "debug": true,
+  "debug": false,
   "dset_dir": "",
   "dataset": "FLICKR_WORD_IMAGE",
   "min_class_size": 50,
@@ -13,7 +13,7 @@
   "beta": 1e-3,
   "epoch": 200,
   "lr": 1e-3,
-  "batch_size": 8,
+  "batch_size": 32,
   "load_ckpt": false,
   
   "image_model_dir": "",

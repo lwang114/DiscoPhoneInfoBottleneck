@@ -18,7 +18,7 @@ from utils import cuda
 from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM
 from pathlib import Path
 from image_model import Resnet34 
-from evaluate import evaluate, compute_token_F1
+from evaluate import evaluate, compute_token_f1
 import cpc.eval as ev
 
 class Solver(object):
@@ -35,17 +35,15 @@ class Solver(object):
       self.eps = 1e-9
       if config.audio_feature == 'mfcc':
         self.input_size = 80
-      else:
+      elif config.audio_feature == 'cpc':
         self.input_size = 256
+      else: Exception(f'Audio feature type {config.audio_feature_type} not supported')
 
       self.K = config.K
-      self.n_predicts = config.n_predicts # Number of prediction steps
-      self.n_negatives = config.n_negatives # Number of negative samples per step
       self.global_iter = 0
       self.global_epoch = 0
       self.audio_feature = config.audio_feature
       self.image_feature = config.image_feature
-      self.loss_type = config.loss_type
       self.debug = config.debug
       self.dataset = config.dataset
 
@@ -55,9 +53,10 @@ class Solver(object):
                      .dataset.preprocessor.num_tokens
       self.class_names = self.data_loader['train']\
                          .dataset.preprocessor.tokens
-      print(f'visual label class: {self.n_class}') # XXX
+      print(f'visual label class: {self.n_class}')
   
       self.image_net = Resnet34(pretrained=True, n_class=self.n_class)
+      '''
       self.image_net.load_state_dict(
                        torch.load(
                          os.path.join(config.image_model_dir,
@@ -65,16 +64,17 @@ class Solver(object):
                          )
                        )
                      ) 
+      '''
       self.image_net = cuda(self.image_net, self.cuda)
       
-      bidirectional = True
       self.audio_net = cuda(GumbelBLSTM(
-                              self.input_size,
                               self.K, 
+                              input_size=self.input_size,
+                              n_layers=1,
                               n_class=self.n_class, 
-                              ds_ratio=self.ds_ratio,
-                              bidirectional=bidirectional), self.cuda)
-      self.K = 2*self.K if bidirectional else self.K 
+                              ds_ratio=1,
+                              bidirectional=True), self.cuda)
+      self.K = 2 * self.K 
 
       trainables = [p for p in self.audio_net.parameters()]             
       self.optim = optim.Adam(trainables,
@@ -85,8 +85,8 @@ class Solver(object):
       if not self.ckpt_dir.exists(): 
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
       self.load_ckpt = config.load_ckpt
-      if self.load_ckpt != '': 
-        self.load_checkpoint(self.load_ckpt)
+      if self.load_ckpt: 
+        self.load_checkpoint()
       
       # History
       self.history = dict()
@@ -120,7 +120,6 @@ class Solver(object):
         self.global_epoch += 1
         pred_labels = []
         gold_labels = []
-        pred_dicts = []
         for idx, (audios, images, labels, audio_masks, image_masks)\
             in enumerate(self.data_loader['train']):
           if idx > 2 and self.debug:
@@ -128,6 +127,7 @@ class Solver(object):
           self.global_iter += 1
           x = cuda(audios, self.cuda)
           audio_masks = cuda(audio_masks, self.cuda)
+          labels = cuda(labels, self.cuda)
           images = cuda(images, self.cuda)
           image_masks = cuda(image_masks.unsqueeze(-1), self.cuda)
           image_size = images.size()
@@ -157,11 +157,11 @@ class Solver(object):
           y = labels  
 
           # Compute IB loss
-          in_logit, logits, c_feature = self.audio_net(
-                                          x, masks=audio_masks, 
-                                          temp=temp, 
-                                          return_feat='rnn')
-          logit = logits.max(-2)[0]
+          in_logit, logits = self.audio_net(
+                                  x, masks=audio_masks, 
+                                  temp=temp 
+                                  )
+          logit = logits.mean(-2)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
           gold_label = F.one_hot(y, self.n_class)
           pred_labels.append(pred_label.cpu())
@@ -196,12 +196,12 @@ class Solver(object):
 
         if (self.global_epoch % 2) == 0: 
           self.scheduler.step()
-        # compute_abx = False
+        compute_abx = False
         # TODO if self.global_epoch % 5 == 0:
         #   compute_abx = True
         self.test(compute_abx=compute_abx)
           
-  def test(self, compute_abx=False, out_prefix='predictions'): # TODO
+  def test(self, compute_abx=False, out_prefix='predictions'):
       self.set_mode('eval')
       testset = self.data_loader['test'].dataset
 
@@ -215,7 +215,7 @@ class Solver(object):
       if not self.ckpt_dir.joinpath('feats').is_dir():
         self.ckpt_dir.joinpath('feats').mkdir()
 
-      gold_file = os.path.join(os.path.join(testset.data_path, 'test/test.item'))
+      gold_path = os.path.join(os.path.join(testset.data_path, 'test/'))
       out_word_file = os.path.join(
                    self.ckpt_dir,
                    f'word_{out_prefix}.{self.global_epoch}.readable'
@@ -236,11 +236,11 @@ class Solver(object):
           if b_idx == 0:
             B = audios.size(0)
           audios = cuda(audios, self.cuda)
+          labels = cuda(labels, self.cuda)
           images = cuda(images, self.cuda)
           audio_masks = cuda(audio_masks, self.cuda)
           image_masks = cuda(image_masks.unsqueeze(-1), self.cuda)
           image_size = images.size()
-
           '''
           if images.ndim in [2, 4]:
             image_logit, _ = self.image_net(images, return_score=self.image_feature)
@@ -264,32 +264,28 @@ class Solver(object):
               y = ((image_logit > 0).float() * image_masks).max(1)[0]
           '''
           y = labels
-          in_logit, logits, encoding = self.audio_net(
-                                         audios, masks=audio_masks, 
-                                         return_feat='bottleneck'
-                                       )
-          _, _, c_feature = self.audio_net(
-                              audios, masks=audio_masks, 
-                              return_feat="rnn"
-                            )
+          in_logit, logits, encoding, embedding = self.audio_net(
+                                                    audios, masks=audio_masks, 
+                                                    return_feat=True
+                                                  )
 
           # Word prediction
-          logit = logits.max(-2)[0]
+          logit = logits.mean(-2)
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
-            audio_id = os.splitext(os.split(testset.dataset[global_idx][0])[1])[0]
+            audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
             golds = [y[idx].cpu().detach().numpy()] 
             preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
-            pred_phones = in_logit[idx].max(-1)[1].cpu().detach().numpy().tolist()
-            gold_names = ','.join([self.class_names[c] for c in golds])  
+            pred_phones = encoding[idx].max(-1)[1].cpu().detach().numpy().tolist()
+            gold_names = ','.join([self.class_names[c] for c in golds])
             pred_names = ','.join([self.class_names[c] for c in preds])
-            pred_phones_str = ','.join(pred_phones)
-            out_word_f.write(f'{audio_id}\t{gold_names}\t{pred_names}\n')
-            out_phone_f.write('{audio_id} {pred_phones_str}\n')
+            pred_phones_str = ','.join([str(phn) for phn in pred_phones])
+            word_f.write(f'{audio_id}\t{gold_names}\t{pred_names}\n')
+            phone_f.write(f'{audio_id} {pred_phones_str}\n')
 
           pred_labels.append(F.one_hot(y, self.n_class).cpu())
           gold_labels.append(F.one_hot(logit.max(-1)[1], self.n_class).cpu())
-          cur_class_loss = F.cross_entropy(logit, y).div(math.log(2))          
+          cur_class_loss = F.cross_entropy(logit, y).div(math.log(2)) 
           cur_info_loss = (F.softmax(in_logit,dim=-1)\
                             * F.log_softmax(in_logit, dim=-1)
                           ).sum(1).mean().div(math.log(2))
@@ -299,23 +295,19 @@ class Solver(object):
                     
           total_loss += cur_ib_loss.item()
           total_num += audios.size(0)
-          _, _, c_feature = self.audio_net(audios, masks=audio_masks, return_feat='rnn')
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             example_id = testset.dataset[global_idx][0].split('/')[-1]
             text = testset.dataset[global_idx][1]
             feat_id = f'{example_id}_{global_idx}'      
             units = encoding[idx].max(-1)[1]
-            pred_dicts.append({'sent_id': example_id,
-                               'units': units.cpu().detach().numpy().tolist(),  
-                               'text': text})
 
             if global_idx <= 100:
               feat_fn = self.ckpt_dir.joinpath(f'feats/{feat_id}.npy')
-              np.save(feat_fn, c_feature[idx].cpu().detach().numpy())
+              np.save(feat_fn, embedding[idx].cpu().detach().numpy())
               seq_list.append((feat_id, feat_fn))
-      out_word_f.close()
-      out_phone_f.close()
+      word_f.close()
+      phone_f.close()
 
       pred_labels = torch.cat(pred_labels).detach().numpy()
       gold_labels = torch.cat(gold_labels).detach().numpy()
@@ -341,10 +333,13 @@ class Solver(object):
       print('Top 10 F1: {:.2f}\tBest F1: {:.2f}'\
             .format(class_f1s[:10].mean(), self.history['f1']))
       token_f1, token_prec, token_recall = compute_token_f1(
-                                                      out_phone_file, 
-                                                      gold_file,
-       os.path.join(self.ckpt_dir, f'confusion.{self.global_epoch}.png'),
-                                                      )
+                                             out_phone_file, 
+                                             gold_path,
+                                             os.path.join(
+                                               self.ckpt_dir, 
+                                               f'confusion.{self.global_epoch}.png'
+                                             ),
+                                           )
       if self.history['f1'] < f1:
         self.history['f1'] = f1
         self.history['loss'] = avg_loss
