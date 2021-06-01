@@ -12,14 +12,16 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tensorboardX import SummaryWriter
+from sklearn.cluster import KMeans
 from sklearn.metrics import precision_recall_fscore_support 
 from datasets.datasets import return_data
 from utils import cuda
-from model import GumbelBLSTM, GumbelPyramidalBLSTM, GumbelMarkovBLSTM
+from model import GumbelBLSTM
 from pathlib import Path
 from image_model import Resnet34 
 from evaluate import evaluate, compute_token_f1
 import cpc.eval as ev
+
 
 class Solver(object):
 
@@ -218,11 +220,11 @@ class Solver(object):
       gold_path = os.path.join(os.path.join(testset.data_path, 'test/'))
       out_word_file = os.path.join(
                    self.ckpt_dir,
-                   f'word_{out_prefix}.{self.global_epoch}.readable'
+                   f'{out_prefix}_word.{self.global_epoch}.readable'
                  )
       out_phone_file = os.path.join(
                          self.ckpt_dir,
-                         f'phoneme_{out_prefix}_{self.global_epoch}.txt'
+                         f'{out_prefix}_phoneme.{self.global_epoch}.txt'
                        )
 
       word_f = open(out_word_file, 'w')
@@ -363,6 +365,74 @@ class Solver(object):
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))   
       self.set_mode('train')
 
+  def cluster(self, out_prefix='predictions'):
+    X = []
+    audio_files = []
+
+    B = self.data_loader['test'].batch_size
+    testset = self.data_loader['test'].dataset
+    for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']):
+      _, _, _, embedding = self.audio_net(
+                               audios,
+                               mask=audio_masks,
+                               return_feat=True
+                               )
+      # Concatenate the hidden vector with the input feature
+      concat_embedding = torch.cat([audios, embedding], axis=-1).detach().numpy()
+      X.append(concat_embedding)
+      audio_files.extend([testset[b_idx*B+i] for i in range(audios.size(0))]) 
+    X = np.concatenate(X, axis=0)
+  
+    # K-means clustering
+    3d_shape = X.shape
+    kmeans = KMeans(n_clusters=50).fit(X.view(3d_shape[0]*3d_shape[1], -1))
+    encodings = kmeans.labels_.reshape(3d_shape[0], 3d_shape[1])
+
+    out_f = open(os.path.join(self.ckpt_dir, f'{out_prefix}_clustering.txt'), 'w')
+    for idx, (audio_file, encoding) in enumerate(zip(audio_files, encodings)):
+      audio_id = os.path.splitext(os.path.split(audio_file)[1])[0]
+      pred_phonemes = ','.join([str(phn) for phn in encodings[idx]])
+      out_f.write(f'{audio_id} {pred_phonemes}\n')
+    out_f.close()
+
+  def phone_level_cluster(self, out_prefix='predictions'):
+    X_a = np.zeros((self.n_class, self.K))
+    norm = np.zeros((self.n_class, 1))
+    audio_files = []
+    encodings = []
+    # Find the centroid of each phone-level cluster
+    B = self.data_loader['test'].batch_size
+    testset = self.data_loader['test'].dataset
+    for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']): 
+      _, _, encoding, embedding = self.audio_net(
+                                      audios, 
+                                      mask=audio_masks,
+                                      return_feat=True
+                                  )
+      encoding = encoding.permute(0, 2, 1).cpu().detach().numpy()
+      embedding = embedding.cpu().detach().numpy()
+      X_a += encoding @ embedding
+      norm += encoding.sum(axis=-1, keepdims=True)
+      audio_files.extend([testset[0][b_idx*B+i] for i in range(audios.size(0))]) 
+      encodings.append(encoding.T)
+    encodings = np.concatenate(encodings)
+
+    X_a /= norm
+    X_s = self.audio_net.bottleneck.weight +\
+                 self.audio_net.bottleneck.bias
+    X = np.concatenate([X_a, X_s], axis=1)
+
+    kmeans = KMeans(n_clusters=50).fit(X)
+    phoneme_labels = kmeans.labels_
+    
+    out_f = open(os.path.join(self.ckpt_dir, f'{out_prefix}_phone_level_clustering.txt'), 'w')
+    pred_phones = encodings.max(-1)[0]
+    for idx, (audio_file, encoding) in enumerate(zip(audio_files, encodings)):
+      audio_id = os.path.splitext(os.path.split(audio_file)[1])[0]
+      pred_phonemes = ','.join([str(phoneme_labels[phn]) for phn in pred_phones[idx]])
+      out_f.write('{audio_id} {pred_phonemes}\n')
+    out_f.close()
+   
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
       'net':self.audio_net.state_dict()
