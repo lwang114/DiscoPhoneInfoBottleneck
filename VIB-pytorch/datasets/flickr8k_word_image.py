@@ -44,7 +44,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
         "validation": ["val"],
         "test": ["test"],           
       },
-      augment=True,
+      augment=False,
       audio_feature="mfcc",
       image_feature="image",
       sample_rate=16000,
@@ -231,7 +231,8 @@ class FlickrWordImagePreprocessor:
 def load_data_split(data_path, split,
                     audio_feature="mfcc",
                     image_feature="rcnn",
-                    min_class_size=50):
+                    min_class_size=50,
+                    max_keep_size=400):
   """
   Returns:
       examples : a list of mappings of
@@ -252,8 +253,17 @@ def load_data_split(data_path, split,
   examples = []
   word_f = open(os.path.join(data_path,
                              f"flickr8k_word_{min_class_size}.json"), "r")
+  label_counts = dict()
   for line in word_f:
     word = json.loads(line.rstrip("\n"))
+    label = word["label"]
+    if not label in label_counts:
+      label_counts[label] = 1
+    else:
+      label_counts[label] += 1
+    if label_counts[label] > max_keep_size:
+      continue
+
     if word["split"] != split:
       continue
     audio_id = word["audio_id"]
@@ -268,7 +278,6 @@ def load_data_split(data_path, split,
 
     image_id = "_".join(audio_id.split("_")[:-1])
     image_path = os.path.join(data_path, "Flicker8k_Dataset", image_id+".jpg") 
-    label = word["label"]
     box = word["box"]
     box_idx = word["box_id"]
 

@@ -375,15 +375,17 @@ class Solver(object):
     for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']):
       if b_idx > 2 and self.debug:
         break
+      audios = cuda(audios, self.cuda)
+      audio_masks = cuda(audio_masks, self.cuda)
       _, _, _, embedding = self.audio_net(
                                audios,
-                               mask=audio_masks,
+                               masks=audio_masks,
                                return_feat=True
                                )
       # Concatenate the hidden vector with the input feature
-      concat_embedding = torch.cat([audios, embedding], axis=-1).detach().numpy()
-      X.append(concat_embedding)
-      audio_files.extend([testset[b_idx*B+i] for i in range(audios.size(0))]) 
+      concat_embedding = torch.cat([audios.permute(0, 2, 1), embedding], axis=-1)
+      X.append(concat_embedding.cpu().detach().numpy())
+      audio_files.extend([testset.dataset[b_idx*B+i][0] for i in range(audios.size(0))]) 
     X = np.concatenate(X, axis=0)
 
     shape = X.shape
@@ -420,6 +422,8 @@ class Solver(object):
     for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']): 
       if b_idx > 2 and self.debug:
         break
+      audios = cuda(audios, self.cuda)
+      audio_masks = cuda(audio_masks, self.cuda)
       _, _, encoding, embedding = self.audio_net(
                                       audios, 
                                       mask=audio_masks,
@@ -429,7 +433,7 @@ class Solver(object):
       embedding = embedding.cpu().detach().numpy()
       X_a += encoding @ embedding
       norm += encoding.sum(axis=-1, keepdims=True)
-      audio_files.extend([testset[0][b_idx*B+i] for i in range(audios.size(0))]) 
+      audio_files.extend([testset.dataset[b_idx*B+i][0] for i in range(audios.size(0))]) 
       encodings.append(encoding.T)
     encodings = np.concatenate(encodings)
 
