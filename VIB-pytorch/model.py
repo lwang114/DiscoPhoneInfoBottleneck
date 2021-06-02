@@ -288,6 +288,74 @@ class GaussianBLSTM(nn.Module):
   def weight_init(self):
       pass
 
+class GumbelMLP(nn.Module):
+  def __init__(self,
+               embedding_dim,
+               n_layers=1,
+               n_class=65,
+               input_size=80): # TODO
+    super(GumbelMLP, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.mlp = nn.Sequential(
+                 nn.Linear(input_size, embedding_dim),
+                 nn.ReLU(),
+                 nn.Dropout(0.3),
+                 nn.Linear(embedding_dim, embedding_dim),
+                 nn.ReLU(),
+                 nn.Dropout(0.3),
+                 nn.Linear(embedding_dim, embedding_dim),
+                 nn.ReLU(),
+                 nn.Dropout(0.3)
+               )
+    self.bottleneck = nn.Linear(embedding_dim, 49)
+    self.decode = nn.Linear(49, self.n_class)
+
+  def forward(self, x, 
+              num_sample=1,
+              masks=None,
+              temp=1.,
+              return_feat=False):
+    x = x.permute(0, 2, 1)
+    B = x.size(0)
+    D = x.size(2)
+    embed = self.mlp(x)
+    logits = self.bottleneck(embed) 
+
+    if masks is not None:
+      logits = logits * masks.unsqueeze(2)
+    logit = logits.sum(1)
+    encoding = self.reparameterize(logits, 
+                                   n=num_sample, 
+                                   temp=temp)
+    out = self.decode(encoding)
+    if num_sample > 1:
+      out = out.mean(0)
+        
+    if return_feat:
+      return logit, out, encoding, embed
+    else:
+      return logit, out
+
+  def reparametrize_n(self, x, n=1, temp=1.):
+    # reference :
+    # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
+    # param x: FloatTensor of size (batch size, num. frames, num. classes) 
+    # param n: number of samples
+    # return encoding: FloatTensor of size (n, batch size, num. frames, num. classes)
+    def expand(v):
+        if v.ndim < 1:
+            return torch.Tensor([v]).expand(n, 1)
+        else:
+            return v.expand(n, *v.size())
+
+    if n != 1 :
+        x = expand(x)
+    encoding = F.gumbel_softmax(x, tau=temp)
+    return encoding         
+
+
 class GumbelBLSTM(nn.Module):
   def __init__(self, 
                embedding_dim, 
@@ -335,7 +403,7 @@ class GumbelBLSTM(nn.Module):
     embed, _ = self.rnn(x, (h0, c0))
     x = self.bottleneck(embed)
     
-    if not masks is None:
+    if masks is not None:
       x = x * masks.unsqueeze(2)
 
     in_logit = x.sum(dim=1)
@@ -347,8 +415,8 @@ class GumbelBLSTM(nn.Module):
         encoding = encoding[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
     logit = self.decode(encoding)
 
-    if num_sample == 1: pass
-    elif num_sample > 1: logit = torch.log(F.softmax(logit, dim=2).mean(0))
+    if num_sample > 1:
+      logit = torch.log(F.softmax(logit, dim=2).mean(0))
 
     if return_feat:
         embedding = embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)
@@ -472,8 +540,8 @@ class GumbelPyramidalBLSTM(nn.Module):
     encoding = self.reparametrize_n(x,num_sample,temp)
     logit = self.decode(encoding)
 
-    if num_sample == 1 : pass
-    elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+    if num_sample > 1: 
+      logit = F.softmax(logit, dim=2).mean(0)
 
     if return_feat:
       if return_feat == 'bottleneck':
@@ -684,7 +752,6 @@ class BigToyNet(nn.Module):
     def weight_init(self):
         for m in self._modules:
             xavier_init(self._modules[m])
-
   
     
 class ToyNet(nn.Module):
