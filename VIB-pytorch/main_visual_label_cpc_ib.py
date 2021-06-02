@@ -7,6 +7,7 @@ import pandas as pd
 import sys
 import os
 from pyhocon import ConfigFactory
+from datasets.zerospeech2021 import ZeroSpeech2021_Dataset
 
 def main(argv):
   parser = argparse.ArgumentParser(description='Visual label information bottleneck')
@@ -50,18 +51,24 @@ def main(argv):
     net.test(save_ckpt=False, compute_abx=True)
   elif config.mode == 'cluster':
     if config['cluster_dataset'] == "zerospeech2021": 
-      devset = ZeroSpeech2021_Dataset('dev')
-      testset = ZeroSpeech2021_Dataset('test')
-      dev_loader = torch.utils.DataLoader(devset, 
-                                          batch_size=config['batch_size'],
-                                          shuffle=False,
-                                          num_workers=1) 
-      test_loader = torch.utils.DataLoader(testset,
-                                           batch_size=config['batch_size'],
-                                           shuffle=False,
-                                           num_workers=1)
-      net.cluster(dev_loader, out_prefix='zs2021_dev_predictions')
-      net.cluster(test_loader, out_prefix='zs2021_test_predictions') 
+      devset = ZeroSpeech2021_Dataset(
+                 config['cluster_dset_dir'], 'dev')
+      testset = ZeroSpeech2021_Dataset(
+                  config['cluster_dset_dir'], 'test')
+      dev_loader = torch.utils.data.DataLoader(
+                      devset, 
+                      batch_size=config['batch_size'],
+                      shuffle=False,
+                      num_workers=1) 
+      test_loader = torch.utils.data.DataLoader(
+                      testset,
+                      batch_size=config['batch_size'],
+                      shuffle=False,
+                      num_workers=1)
+      net.cluster(dev_loader,
+                  out_prefix='zs2021_dev_predictions',
+                  save_embedding=True)
+
     else:
       net.cluster()
   elif config.mode == 'phone_level_cluster':

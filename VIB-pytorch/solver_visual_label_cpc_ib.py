@@ -404,7 +404,7 @@ class Solver(object):
         for idx in range(audios.size(0)):
           audio_id = os.path.splitext(os.path.split(testset.dataset[b_idx*B+idx][0])[1])[0]
           np.savetxt(os.path.join(embed_path, f'{audio_id}.txt'),
-                     concat_embedding.cpu().detach().numpy())
+                     concat_embedding[idx].cpu().detach().numpy())
 
       X.append(concat_embedding.cpu().detach().numpy())
       audio_files.extend([testset.dataset[b_idx*B+i][0] for i in range(audios.size(0))]) 

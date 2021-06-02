@@ -1,7 +1,7 @@
 import torch
 import os
 import json
-
+import numpy as np
 
 def fix_embedding_length(emb, L):
   size = emb.size()[1:]
@@ -13,7 +13,7 @@ def fix_embedding_length(emb, L):
   return emb
 
 
-class ZeroSpeech2021_Dataset:
+class ZeroSpeech2021_Dataset(torch.utils.data.Dataset):
 
 
   def __init__(
@@ -21,8 +21,8 @@ class ZeroSpeech2021_Dataset:
     split,
     preprocessor=None,
     splits={
-      "dev": ["dev_clean"],
-      "test": ["test_clean"]  
+      "dev": ["dev-clean"],
+      "test": ["test-clean"]  
     }
   ):
     self.preprocessor = preprocessor
@@ -49,7 +49,8 @@ class ZeroSpeech2021_Dataset:
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
     
-    return audio_input.t(), 0, 0, audio_mask, 1.  
+    return audio_input.t(), 0, 0, input_mask, 1.
+     
   def __len__(self):
     return len(self.dataset)
 
@@ -58,7 +59,8 @@ def load_data_split(data_path, sp):
   examples = []
   for fn in os.listdir(os.path.join(data_path, sp)):
     if fn.endswith(".wav"):
-      path = os.path.join(data_path, sp, fn)
+      audio_id = os.path.splitext(fn)[0]
+      path = os.path.join(data_path, f"cpc/{audio_id}.txt")
       examples.append({"audio": path,
                        "text": ''})
   return examples
