@@ -48,6 +48,10 @@ def main(argv):
     net.train()
   elif config.mode == 'test':
     net.test(save_ckpt=False, compute_abx=True)
+  elif config.mode == 'cluster':
+    net.cluster()
+  elif config.mode == 'phone_level_cluster':
+    net.phone_level_cluster()
   elif config.mode == 'train_sweep':
     config.beta = 1.
     config.epoch = 25

@@ -366,12 +366,15 @@ class Solver(object):
       self.set_mode('train')
 
   def cluster(self, out_prefix='predictions'):
+    self.load_checkpoint()
     X = []
     audio_files = []
 
     B = self.data_loader['test'].batch_size
     testset = self.data_loader['test'].dataset
     for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']):
+      if b_idx > 2 and self.debug:
+        break
       _, _, _, embedding = self.audio_net(
                                audios,
                                mask=audio_masks,
@@ -387,14 +390,26 @@ class Solver(object):
     kmeans = KMeans(n_clusters=50).fit(X.reshape(shape[0]*shape[1], -1))
     encodings = kmeans.labels_.reshape(shape[0], shape[1])
 
-    out_f = open(os.path.join(self.ckpt_dir, f'{out_prefix}_clustering.txt'), 'w')
+    out_file = os.path.join(self.ckpt_dir, f'{out_prefix}_clustering.txt')
+    out_f = open(out_file, 'w')
     for idx, (audio_file, encoding) in enumerate(zip(audio_files, encodings)):
       audio_id = os.path.splitext(os.path.split(audio_file)[1])[0]
       pred_phonemes = ','.join([str(phn) for phn in encodings[idx]])
       out_f.write(f'{audio_id} {pred_phonemes}\n')
     out_f.close()
+    
+    gold_path = os.path.join(os.path.join(testset.data_path, 'test/'))
+    compute_token_f1(
+      out_file,
+      gold_path,
+      os.path.join(
+        self.ckpt_dir,
+        'confusion_cluster.png'
+      )
+    )
 
   def phone_level_cluster(self, out_prefix='predictions'):
+    self.load_checkpoint()
     X_a = np.zeros((self.n_class, self.K))
     norm = np.zeros((self.n_class, 1))
     audio_files = []
@@ -403,6 +418,8 @@ class Solver(object):
     B = self.data_loader['test'].batch_size
     testset = self.data_loader['test'].dataset
     for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']): 
+      if b_idx > 2 and self.debug:
+        break
       _, _, encoding, embedding = self.audio_net(
                                       audios, 
                                       mask=audio_masks,
@@ -423,15 +440,26 @@ class Solver(object):
 
     kmeans = KMeans(n_clusters=50).fit(X)
     phoneme_labels = kmeans.labels_
-    
-    out_f = open(os.path.join(self.ckpt_dir, f'{out_prefix}_phone_level_clustering.txt'), 'w')
+   
+    out_file = os.path.join(self.ckpt_dir, f'{out_prefix}_phone_level_clustering.txt')
+    out_f = open(out_file, 'w')
     pred_phones = encodings.max(-1)[0]
     for idx, (audio_file, encoding) in enumerate(zip(audio_files, encodings)):
       audio_id = os.path.splitext(os.path.split(audio_file)[1])[0]
       pred_phonemes = ','.join([str(phoneme_labels[phn]) for phn in pred_phones[idx]])
       out_f.write('{audio_id} {pred_phonemes}\n')
     out_f.close()
-   
+    
+    gold_path = os.path.join(os.path.join(testset.data_path, 'test/'))
+    compute_token_f1(
+      out_file,
+      gold_path,
+      os.path.join(
+        self.ckpt_dir,
+        'confusion_phone_level_cluster.png'
+      )
+    ) 
+
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
       'net':self.audio_net.state_dict()
