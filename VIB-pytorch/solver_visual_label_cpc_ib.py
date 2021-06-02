@@ -163,7 +163,7 @@ class Solver(object):
                                   x, masks=audio_masks, 
                                   temp=temp 
                                   )
-          logit = logits.sum(dim=-2)
+          logit = (logits * audio_masks.unsqueeze(-1)).sum(dim=1)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
           gold_label = F.one_hot(y, self.n_class)
           pred_labels.append(pred_label.cpu())
@@ -272,7 +272,7 @@ class Solver(object):
                                                   )
 
           # Word prediction
-          logit = logits.sum(dim=-2)
+          logit = (logits * audio_masks.unsqueeze(-1)).sum(dim=1)
           for idx in range(audios.size(0)):
             global_idx = b_idx * B + idx
             audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
@@ -288,7 +288,7 @@ class Solver(object):
           pred_labels.append(F.one_hot(y, self.n_class).cpu())
           gold_labels.append(F.one_hot(logit.max(-1)[1], self.n_class).cpu())
           cur_class_loss = F.cross_entropy(logit, y).div(math.log(2)) 
-          cur_info_loss = (F.softmax(in_logit,dim=-1)\
+          cur_info_loss = (F.softmax(in_logit, dim=-1)\
                             * F.log_softmax(in_logit, dim=-1)
                           ).sum(1).mean().div(math.log(2))
           cur_ib_loss = cur_class_loss + self.beta * cur_info_loss
@@ -382,11 +382,10 @@ class Solver(object):
       X.append(concat_embedding)
       audio_files.extend([testset[b_idx*B+i] for i in range(audios.size(0))]) 
     X = np.concatenate(X, axis=0)
-  
-    # K-means clustering
-    3d_shape = X.shape
-    kmeans = KMeans(n_clusters=50).fit(X.view(3d_shape[0]*3d_shape[1], -1))
-    encodings = kmeans.labels_.reshape(3d_shape[0], 3d_shape[1])
+
+    shape = X.shape
+    kmeans = KMeans(n_clusters=50).fit(X.reshape(shape[0]*shape[1], -1))
+    encodings = kmeans.labels_.reshape(shape[0], shape[1])
 
     out_f = open(os.path.join(self.ckpt_dir, f'{out_prefix}_clustering.txt'), 'w')
     for idx, (audio_file, encoding) in enumerate(zip(audio_files, encodings)):
