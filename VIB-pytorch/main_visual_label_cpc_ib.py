@@ -49,8 +49,26 @@ def main(argv):
   elif config.mode == 'test':
     net.test(save_ckpt=False, compute_abx=True)
   elif config.mode == 'cluster':
-    net.cluster()
+    if config['cluster_dataset'] == "zerospeech2021": 
+      devset = ZeroSpeech2021_Dataset('dev')
+      testset = ZeroSpeech2021_Dataset('test')
+      dev_loader = torch.utils.DataLoader(devset, 
+                                          batch_size=config['batch_size'],
+                                          shuffle=False,
+                                          num_workers=1) 
+      test_loader = torch.utils.DataLoader(testset,
+                                           batch_size=config['batch_size'],
+                                           shuffle=False,
+                                           num_workers=1)
+      net.cluster(dev_loader, out_prefix='zs2021_dev_predictions')
+      net.cluster(test_loader, out_prefix='zs2021_test_predictions') 
+    else:
+      net.cluster()
   elif config.mode == 'phone_level_cluster':
+    if config['cluster_dataset'] == "zerospeech2021": 
+      net.cluster(dataloader)
+    else:
+      net.cluster()
     net.phone_level_cluster()
   elif config.mode == 'train_sweep':
     config.beta = 1.

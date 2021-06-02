@@ -365,14 +365,30 @@ class Solver(object):
         # print('abx error:{:.4f} abx acc:{:.4f} best abx acc:{:.4f}'.format(abx_score.item(), 1-abx_score.item(), self.history['abx_acc']))   
       self.set_mode('train')
 
-  def cluster(self, out_prefix='predictions'):
+  def cluster(self, test_loader=None, 
+              out_prefix='predictions', 
+              save_embedding=False):
     self.load_checkpoint()
     X = []
     audio_files = []
 
-    B = self.data_loader['test'].batch_size
-    testset = self.data_loader['test'].dataset
-    for b_idx, (audios, _, _, audio_masks, _) in enumerate(self.data_loader['test']):
+    if test_loader is not None:
+      B = test_loader.batch_size
+      testset = test_loader.dataset
+      split = testset.splits[0]
+      gold_path = os.path.join(testset.data_path, split)
+    else:
+      test_loader = self.data_loader['test']
+      B = test_loader.batch_size
+      testset = test_loader.dataset
+      split = testset.splits[0]
+      gold_path = os.path.join(testset.data_path, split)
+    
+    embed_path = os.path.join(testset.data_path, f'{split}_embeddings')
+    if save_embedding and not os.path.exists(embed_path):
+      os.makedirs(embed_path)
+
+    for b_idx, (audios, _, _, audio_masks, _) in enumerate(test_loader):
       if b_idx > 2 and self.debug:
         break
       audios = cuda(audios, self.cuda)
@@ -384,6 +400,12 @@ class Solver(object):
                                )
       # Concatenate the hidden vector with the input feature
       concat_embedding = torch.cat([audios.permute(0, 2, 1), embedding], axis=-1)
+      if save_embedding:
+        for idx in range(audios.size(0)):
+          audio_id = os.path.splitext(os.path.split(testset.dataset[b_idx*B+idx][0])[1])[0]
+          np.savetxt(os.path.join(embed_path, f'{audio_id}.txt'),
+                     concat_embedding.cpu().detach().numpy())
+
       X.append(concat_embedding.cpu().detach().numpy())
       audio_files.extend([testset.dataset[b_idx*B+i][0] for i in range(audios.size(0))]) 
     X = np.concatenate(X, axis=0)
@@ -400,7 +422,6 @@ class Solver(object):
       out_f.write(f'{audio_id} {pred_phonemes}\n')
     out_f.close()
     
-    gold_path = os.path.join(os.path.join(testset.data_path, 'test/'))
     compute_token_f1(
       out_file,
       gold_path,

@@ -51,13 +51,13 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       min_class_size=50
   ):
     self.preprocessor = preprocessor
-    self.splits = splits
+    self.splits = splits[split]
     self.data_path = data_path
     self.sample_rate = sample_rate
     self.max_feat_len = 100
     
     data = []
-    for sp in self.splits[split]:
+    for sp in self.splits:
       # Load data paths to audio and visual features
       examples = load_data_split(data_path, sp,
                                  min_class_size=min_class_size,
