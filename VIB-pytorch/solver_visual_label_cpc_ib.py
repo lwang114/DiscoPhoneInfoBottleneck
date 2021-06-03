@@ -36,6 +36,7 @@ class Solver(object):
       self.lr = config.lr
       self.anneal_rate = config.get('anneal_rate', 3e-6)
       self.num_sample = config.get('num_sample', 1)
+      self.use_segment = config.get('use_segment', False)
       self.eps = 1e-9
       if config.audio_feature == 'mfcc':
         self.input_size = 80
@@ -52,7 +53,7 @@ class Solver(object):
       self.dataset = config.dataset
 
       # Dataset
-      self.data_loader = return_data(config)
+      self.data_loader = return_data(config) # TODO
       self.n_class = self.data_loader['train']\
                      .dataset.preprocessor.num_tokens
       self.class_names = self.data_loader['train']\
@@ -170,10 +171,10 @@ class Solver(object):
 
           # Compute IB loss
           in_logit, logits = self.audio_net(
-                                  x, masks=audio_masks, 
-                                  temp=temp,
-                                  num_sample=self.num_sample 
-                                  )
+                                 x, masks=audio_masks, 
+                                 temp=temp,
+                                 num_sample=self.num_sample 
+                                 )
           logit = (logits * audio_masks.unsqueeze(-1)).sum(dim=1)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
           gold_label = F.one_hot(y, self.n_class)
@@ -289,7 +290,10 @@ class Solver(object):
             audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
             golds = [y[idx].cpu().detach().numpy()] 
             preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
-            pred_phones = encoding[idx].max(-1)[1].cpu().detach().numpy().tolist()
+            pred_phones = encoding[idx].max(-1)[1]
+            if self.use_segment:
+              pred_phones = testset.unsegment(pred_phones, testset.dataset[global_idx][3])
+            pred_phones = pred_phones.cpu().detach().numpy().tolist()
             gold_names = ','.join([self.class_names[c] for c in golds])
             pred_names = ','.join([self.class_names[c] for c in preds])
             pred_phones_str = ','.join([str(phn) for phn in pred_phones])

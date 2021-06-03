@@ -14,6 +14,7 @@ from tqdm import tqdm
 from itertools import combinations
 from copy import deepcopy
 from PIL import Image
+import scipy 
 # dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
 # dep_parser._model = dep_parser._model.cuda()
 # lemmatizer = WordNetLemmatizer()
@@ -45,6 +46,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
         "test": ["test"],           
       },
       augment=False,
+      use_segment=False,
       audio_feature="mfcc",
       image_feature="image",
       sample_rate=16000,
@@ -55,6 +57,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.data_path = data_path
     self.sample_rate = sample_rate
     self.max_feat_len = 100
+    self.max_segment_len = 10
     
     data = []
     for sp in self.splits:
@@ -99,8 +102,9 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     image = [example["image"] for example in data]
     boxes = [example["box"] for example in data]
     text = [example["text"] for example in data]
+    phonemes = [example["phonemes"] for example in data]
     feat_idxs = [example["box_idx"] for example in data]
-    self.dataset = list(zip(audio, image, text, boxes, feat_idxs))
+    self.dataset = list(zip(audio, image, text, phonemes, boxes, feat_idxs))
 
     self.image_feature_type = image_feature 
     self.image_feats = np.load(os.path.join(data_path,
@@ -142,9 +146,63 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       region_feat = image_feat[box_idx]
       return region_feat
 
+  def embed(feat, method='average'):
+    if method == 'average':
+      return feat.mean(1)
+    elif method == 'resample':
+      return scipy.signal.resample(feat, 4)
+
+  def segment(feat, segments, 
+              method='average'):
+    """ 
+      Args:
+        feat : (num. of frames, feature dim.)
+        segments : a list of dicts of phoneme boundaries
+      
+      Returns:
+        sfeat : (max num. of segments, feature dim.)
+        mask : (max num. of segments,)
+    """
+    feat = feat
+    sfeats = []
+    for segment in segments:
+      begin = int(segment['begin']*100)
+      end = int(segment['end']*100)
+      segment_feat = self.embed(feat[begin:end+1], method=method)
+      sfeats.append(segment_feat)
+    sfeat = torch.stack(sfeats)
+    sfeat = fix_embedding_length(sfeat, self.max_segment_num)
+    mask = torch.zeros(self.max_segment_num)
+    mask[:len(segments)] = 1.
+
+    return sfeat, mask
+    
+  def unsegment(sfeat, segments): # TODO
+    """ 
+      Args:
+        sfeat : (num. of segments, feature dim.)
+        segments : a list of dicts of phoneme boundaries
+      
+      Returns:
+        feat : (num. of frames, feature dim.) 
+    """
+    if sfeat.ndim == 1:
+      sfeat = sfeat.unsqueeze(-1)
+    dur = segments[-1]['end'] - segments[0]['begin']
+    nframes = int(dur * 100)
+    feat = torch.zeros((nframes, *sfeat.size()[1:]))
+    for i, segment in enumerate(segments):
+      begin = int(segment['begin']*100)
+      end = int(segment['end']*100)
+      feat[begin:end+1] = sfeat[i]
+    return feat.unsqueeze(-1)
+
   def __getitem__(self, idx):
-    audio_file, image_file, label, box, box_idx = self.dataset[idx]
+    audio_file, image_file, label, phoneme, box, box_idx = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
+    if self.use_segment:
+      audio_inputs, input_mask = self.segment(audio_inputs.t(), phoneme)
+      audio_inputs = audio_inputs.t()
     image_inputs = self.load_image(image_file, box, box_idx)
     outputs = self.preprocessor.to_index(label).squeeze(0)
     return audio_inputs, image_inputs, outputs, input_mask, 1. 
@@ -284,6 +342,7 @@ def load_data_split(data_path, split,
     example = {"audio": audio_path,
                "image": image_path,
                "text": label,
+               "phonemes": word["phonemes"],
                "box": box,
                "box_idx": box_idx} 
     examples.append(example)
