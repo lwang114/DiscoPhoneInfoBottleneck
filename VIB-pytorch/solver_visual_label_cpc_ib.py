@@ -34,6 +34,8 @@ class Solver(object):
       self.batch_size = config.batch_size
       self.beta = config.beta
       self.lr = config.lr
+      self.anneal_rate = config.get('anneal_rate', 3e-6)
+      self.num_sample = config.get('num_sample', 1)
       self.eps = 1e-9
       if config.audio_feature == 'mfcc':
         self.input_size = 80
@@ -121,7 +123,7 @@ class Solver(object):
   def train(self):
       self.set_mode('train')
       temp_min = 0.1
-      anneal_rate = 3e-6
+      anneal_rate = self.anneal_rate # 3e-6
       temp = 1.
 
       total_loss = 0.
@@ -169,7 +171,8 @@ class Solver(object):
           # Compute IB loss
           in_logit, logits = self.audio_net(
                                   x, masks=audio_masks, 
-                                  temp=temp 
+                                  temp=temp,
+                                  num_sample=self.num_sample 
                                   )
           logit = (logits * audio_masks.unsqueeze(-1)).sum(dim=1)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
