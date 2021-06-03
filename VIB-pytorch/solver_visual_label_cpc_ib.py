@@ -110,7 +110,7 @@ class Solver(object):
       self.history['epoch']=0
       self.history['iter']=0
       
-  def set_mode(self,mode='train'):
+  def set_mode(self, mode='train'):
       if mode == 'train':
         self.audio_net.train()
         self.image_net.train()
@@ -197,7 +197,7 @@ class Solver(object):
           if self.global_iter % 1000 == 0:
             temp = np.maximum(temp * np.exp(-anneal_rate * idx), temp_min)
             avg_loss = total_loss / total_step
-            print(f'i:{self.global_iter:d} avg loss (total loss):{avg_loss:.2f} ({total_loss:.2f}) '
+            print(f'i:{self.global_iter:d} temp:{temp} avg loss (total loss):{avg_loss:.2f} ({total_loss:.2f}) '
                   f'IZY:{izy_bound:.2f} IZX:{izx_bound:.2f}')
         pred_labels = torch.cat(pred_labels).detach().numpy()
         gold_labels = torch.cat(gold_labels).detach().numpy()

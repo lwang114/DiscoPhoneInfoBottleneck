@@ -53,7 +53,8 @@ def return_data(args):
     elif 'FLICKR_WORD_IMAGE' == name :
         preprocessor = FlickrWordImagePreprocessor(dset_dir, 80,
                                                    audio_feature=args.audio_feature, 
-                                                   image_feature=args.image_feature)
+                                                   image_feature=args.image_feature,
+                                                   min_class_size=args.min_class_size)
         train_data = FlickrWordImageDataset(dset_dir,
                                             preprocessor, 
                                             'train',

@@ -519,8 +519,8 @@ def load_data_split_balanced(data_path, split, balance_strategy="truncate", max_
   gold_dicts = []
   
   for line in phrase_f:
-    # if len(examples) > 1000: # XXX
-    #    break
+    if len(examples) > 1000: # XXX
+      break
     phrase = json.loads(line.rstrip("\n"))
     utterance_id = phrase["utterance_id"]
     fn = utterance_id + ".wav"

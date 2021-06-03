@@ -48,7 +48,8 @@ def main(argv):
   if config.mode == 'train': 
     net.train()
   elif config.mode == 'test':
-    net.test(save_ckpt=False, compute_abx=True)
+    net.load_checkpoint()
+    net.test(compute_abx=False)
   elif config.mode == 'cluster':
     if config['cluster_dataset'] == "zerospeech2021": 
       devset = ZeroSpeech2021_Dataset(
