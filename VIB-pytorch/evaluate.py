@@ -154,10 +154,27 @@ def compute_token_f1(pred_path, gold_path, out_path):
 
   fig, ax = plt.subplots()
   confusion_norm = confusion / np.maximum(confusion.sum(1, keepdims=True), 1.)
-  plt.pcolor(confusion_norm, cmap=plt.cm.Blues)
+  new_order = []
+  pred_idxs = list(range(n_pred_tokens))
+  for i in range(n_gold_tokens):
+    if i >= n_pred_tokens: # Cannot assign anymore when the number of gold tokens exceed the pred tokens
+      break
+    max_s = 0
+    max_j = -1
+    for j, s in enumerate(confusion_norm[i]):
+      if (s >= max_s) and not j in new_order: # If cluster j is not used and has higher prob, update the assigned cluster
+        max_j = j
+        max_s = s
+    new_order.append(max_j)
+  
+  for i in range(n_pred_tokens): # Append the rest of the unassigned clusters if any
+    if not i in new_order:
+      new_order.append(i)
+
+  plt.pcolor(confusion_norm[:, new_order], cmap=plt.cm.Blues)
   ax.set_xticks(np.arange(len(pred_tokens))+0.5)
   ax.set_yticks(np.arange(len(gold_tokens))+0.5)
-  ax.set_xticklabels(sorted(pred_stoi, key=lambda x:pred_stoi[x]), rotation='vertical')
+  ax.set_xticklabels(sorted(pred_stoi, key=lambda x:pred_stoi[x])[new_order], rotation='vertical')
   ax.set_yticklabels(sorted(gold_stoi, key=lambda x:gold_stoi[x]))
   plt.savefig(out_path)
   plt.show()
