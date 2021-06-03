@@ -16,7 +16,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import precision_recall_fscore_support 
 from datasets.datasets import return_data
 from utils import cuda
-from model import GumbelBLSTM
+from model import GumbelBLSTM, GumbelMLP
 from pathlib import Path
 from image_model import Resnet34 
 from evaluate import evaluate, compute_token_f1
@@ -68,15 +68,23 @@ class Solver(object):
                      ) 
       '''
       self.image_net = cuda(self.image_net, self.cuda)
-      
-      self.audio_net = cuda(GumbelBLSTM(
-                              self.K, 
-                              input_size=self.input_size,
-                              n_layers=1,
-                              n_class=self.n_class, 
-                              ds_ratio=1,
-                              bidirectional=True), self.cuda)
-      self.K = 2 * self.K 
+
+      if config.model_type == 'blstm': 
+        self.audio_net = cuda(GumbelBLSTM(
+                                self.K, 
+                                input_size=self.input_size,
+                                n_layers=1,
+                                n_class=self.n_class, 
+                                ds_ratio=1,
+                                bidirectional=True), self.cuda)
+        self.K = 2 * self.K 
+      elif config.model_type == 'mlp':
+        self.audio_net = cuda(GumbelMLP(
+                                self.K,
+                                input_size=self.input_size,
+                                n_class=self.n_class
+                              ), self.cuda)
+      else: Exception(f'Model type {config.model_type} not defined')
 
       trainables = [p for p in self.audio_net.parameters()]             
       self.optim = optim.Adam(trainables,
@@ -412,6 +420,7 @@ class Solver(object):
 
     shape = X.shape
     kmeans = KMeans(n_clusters=50).fit(X.reshape(shape[0]*shape[1], -1))
+    np.save(os.path.join(self.ckpt_dir, f'kmeans_centroids.npy'), kmeans.cluster_centers_)
     encodings = kmeans.labels_.reshape(shape[0], shape[1])
 
     out_file = os.path.join(self.ckpt_dir, f'{out_prefix}_clustering.txt')

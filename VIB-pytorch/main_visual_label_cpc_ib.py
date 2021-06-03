@@ -68,7 +68,6 @@ def main(argv):
       net.cluster(dev_loader,
                   out_prefix='zs2021_dev_predictions',
                   save_embedding=True)
-
     else:
       net.cluster()
   elif config.mode == 'phone_level_cluster':

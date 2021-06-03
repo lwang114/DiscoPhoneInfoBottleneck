@@ -293,7 +293,7 @@ class GumbelMLP(nn.Module):
                embedding_dim,
                n_layers=1,
                n_class=65,
-               input_size=80): # TODO
+               input_size=80):
     super(GumbelMLP, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
@@ -326,9 +326,9 @@ class GumbelMLP(nn.Module):
     if masks is not None:
       logits = logits * masks.unsqueeze(2)
     logit = logits.sum(1)
-    encoding = self.reparameterize(logits, 
-                                   n=num_sample, 
-                                   temp=temp)
+    encoding = self.reparametrize_n(logits, 
+                                     n=num_sample, 
+                                     temp=temp)
     out = self.decode(encoding)
     if num_sample > 1:
       out = out.mean(0)

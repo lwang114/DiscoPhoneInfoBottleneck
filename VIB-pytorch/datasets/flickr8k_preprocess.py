@@ -85,7 +85,7 @@ def extract_word_dataset(data_path,
             audio_word = audio[begin_frame:end_frame+1]
             word_file = f"{audio_id}_{word_idx:04d}.wav"
             word_path = os.path.join(data_path, dataset_name, split, word_file)
-            # XXX wavfile.write(word_path, fs, audio_word)
+            wavfile.write(word_path, fs, audio_word)
             word_info = {"audio_id": audio_id,
                          "image_id": "_".join(audio_id.split("_")[:-1]),
                          "word_id": str(word_idx),
