@@ -1,0 +1,22 @@
+{
+  "seed": 2,
+  "mode": "train",
+  "debug": false,
+  "dset_dir": "",
+  "dataset": "FLICKR_WORD_IMAGE",
+  "min_class_size": 50,
+
+  "model_type": "mlp",
+  "audio_feature": "cpc",
+  "image_feature": "rcnn",
+  "K": 256,
+  "beta": 1e-3,
+  "epoch": 200,
+  "lr": 1e-3,
+  "batch_size": 32,
+  "load_ckpt": false,
+  
+  "image_model_dir": "",
+  "ckpt_dir": "checkpoints/phone_discovery_visual_label_gumbel_mlp",
+  "tensorboard": false 
+}
