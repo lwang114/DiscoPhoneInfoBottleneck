@@ -55,6 +55,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       use_segment=False,
       audio_feature="mfcc",
       image_feature="image",
+      ds_method="average",
       sample_rate=16000,
       min_class_size=50
   ):
@@ -62,6 +63,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.splits = splits[split]
     self.data_path = data_path
     self.use_segment = use_segment
+    self.ds_method = ds_method
     self.sample_rate = sample_rate
     self.max_feat_len = 100
     self.max_segment_num = 10
@@ -207,7 +209,9 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     audio_file, image_file, label, phoneme, box, box_idx = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
     if self.use_segment:
-      audio_inputs, input_mask = self.segment(audio_inputs.t(), phoneme)
+      audio_inputs, input_mask = self.segment(audio_inputs.t(), 
+                                              phoneme,
+                                              method=self.ds_method)
       audio_inputs = audio_inputs.t()
     image_inputs = self.load_image(image_file, box, box_idx)
     outputs = self.preprocessor.to_index(label).squeeze(0)

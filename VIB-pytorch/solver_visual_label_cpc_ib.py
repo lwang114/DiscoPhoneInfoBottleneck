@@ -37,6 +37,7 @@ class Solver(object):
       self.anneal_rate = config.get('anneal_rate', 3e-6)
       self.num_sample = config.get('num_sample', 1)
       self.use_segment = config.get('use_segment', False)
+      self.ds_method = config.get('downsample_method', 'average')
       self.eps = 1e-9
       if config.audio_feature == 'mfcc':
         self.input_size = 80
@@ -73,6 +74,8 @@ class Solver(object):
       self.image_net = cuda(self.image_net, self.cuda)
 
       if config.model_type == 'blstm': 
+        if self.use_segment and (self.ds_method == 'average'):
+          self.input_size = 4 * self.input_size
         self.audio_net = cuda(GumbelBLSTM(
                                 self.K, 
                                 input_size=self.input_size,

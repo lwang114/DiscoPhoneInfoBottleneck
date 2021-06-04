@@ -61,14 +61,16 @@ def return_data(args):
                                             audio_feature=args.audio_feature,  
                                             image_feature=args.image_feature,
                                             min_class_size=args.min_class_size,
-                                            use_segment=args.use_segment)
+                                            use_segment=args.use_segment,
+                                            ds_method=args.downsample_method)
         test_data = FlickrWordImageDataset(dset_dir,
                                            preprocessor, 
                                            'test',
                                            audio_feature=args.audio_feature,
                                            image_feature=args.image_feature,
                                            min_class_size=args.min_class_size,
-                                           use_segment=args.use_segment) 
+                                           use_segment=args.use_segment,
+                                           ds_method=args.downsample_method) 
     else : raise UnknownDatasetError()
 
 
