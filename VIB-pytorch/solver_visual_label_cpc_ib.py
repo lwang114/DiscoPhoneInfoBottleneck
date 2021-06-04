@@ -45,8 +45,8 @@ class Solver(object):
         self.input_size = 256
       else: Exception(f'Audio feature type {config.audio_feature_type} not supported')
       
-      if self.use_segment and (self.ds_method == 'resample'): # input size is the concatenation of 4 frames for resample 
-        self.input_size = 4 * self.input_size
+      if self.use_segment and (self.ds_method == 'resample'): # input size is the concatenation of 10 frames for resample 
+        self.input_size = 10 * self.input_size
 
       self.K = config.K
       self.global_iter = 0
