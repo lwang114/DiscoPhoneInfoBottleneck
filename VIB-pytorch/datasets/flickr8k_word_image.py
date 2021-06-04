@@ -14,7 +14,7 @@ from tqdm import tqdm
 from itertools import combinations
 from copy import deepcopy
 from PIL import Image
-import scipy 
+from scipy import signal 
 # dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
 # dep_parser._model = dep_parser._model.cuda()
 # lemmatizer = WordNetLemmatizer()
@@ -40,7 +40,8 @@ def embed(feat, method='average'):
   if method == 'average':
     return feat.mean(0)
   elif method == 'resample':
-    return scipy.signal.resample(feat, 4)
+    new_feat = signal.resample(feat.detach().numpy(), 4)
+    return torch.FloatTensor(new_feat.flatten())
 
 class FlickrWordImageDataset(torch.utils.data.Dataset):
   def __init__(
