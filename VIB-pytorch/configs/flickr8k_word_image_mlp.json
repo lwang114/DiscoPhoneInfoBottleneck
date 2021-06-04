@@ -1,6 +1,6 @@
 {
   "seed": 2,
-  "mode": "train",
+  "mode": "test",
   "debug": false,
   "dset_dir": "",
   "dataset": "FLICKR_WORD_IMAGE",

@@ -292,7 +292,7 @@ class Solver(object):
             preds = [logit[idx].max(-1)[1].cpu().detach().numpy()]
             pred_phones = encoding[idx].max(-1)[1]
             if self.use_segment:
-              pred_phones = testset.unsegment(pred_phones, testset.dataset[global_idx][3])
+              pred_phones = testset.unsegment(pred_phones, testset.dataset[global_idx][3]).long()
             pred_phones = pred_phones.cpu().detach().numpy().tolist()
             gold_names = ','.join([self.class_names[c] for c in golds])
             pred_names = ','.join([self.class_names[c] for c in preds])

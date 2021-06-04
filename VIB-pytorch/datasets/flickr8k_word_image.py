@@ -36,6 +36,12 @@ def fix_embedding_length(emb, L):
     emb = emb[:L]
   return emb
 
+def embed(feat, method='average'):
+  if method == 'average':
+    return feat.mean(0)
+  elif method == 'resample':
+    return scipy.signal.resample(feat, 4)
+
 class FlickrWordImageDataset(torch.utils.data.Dataset):
   def __init__(
       self, data_path, 
@@ -55,9 +61,10 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.preprocessor = preprocessor
     self.splits = splits[split]
     self.data_path = data_path
+    self.use_segment = use_segment
     self.sample_rate = sample_rate
     self.max_feat_len = 100
-    self.max_segment_len = 10
+    self.max_segment_num = 10
     
     data = []
     for sp in self.splits:
@@ -146,13 +153,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       region_feat = image_feat[box_idx]
       return region_feat
 
-  def embed(feat, method='average'):
-    if method == 'average':
-      return feat.mean(1)
-    elif method == 'resample':
-      return scipy.signal.resample(feat, 4)
-
-  def segment(feat, segments, 
+  def segment(self, feat, segments, 
               method='average'):
     """ 
       Args:
@@ -165,20 +166,22 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     """
     feat = feat
     sfeats = []
-    for segment in segments:
-      begin = int(segment['begin']*100)
-      end = int(segment['end']*100)
-      segment_feat = self.embed(feat[begin:end+1], method=method)
+    word_begin = segments['begin']
+    for segment in segments["children"]:
+      begin = int((segment["begin"]-word_begin)*100)
+      end = int((segment["end"]-word_begin)*100)
+      if end >= self.max_feat_len:
+        break
+      segment_feat = embed(feat[begin:end+1], method=method)
       sfeats.append(segment_feat)
     sfeat = torch.stack(sfeats)
     sfeat = fix_embedding_length(sfeat, self.max_segment_num)
     mask = torch.zeros(self.max_segment_num)
-    mask[:len(segments)] = 1.
-
+    mask[:len(segments["children"])] = 1.
     return sfeat, mask
     
-  def unsegment(sfeat, segments): # TODO
-    """ 
+  def unsegment(self, sfeat, segments):
+    """
       Args:
         sfeat : (num. of segments, feature dim.)
         segments : a list of dicts of phoneme boundaries
@@ -188,14 +191,17 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     """
     if sfeat.ndim == 1:
       sfeat = sfeat.unsqueeze(-1)
-    dur = segments[-1]['end'] - segments[0]['begin']
+    word_begin = segments['begin']
+    dur = segments["end"] - segments["begin"]
     nframes = int(dur * 100)
     feat = torch.zeros((nframes, *sfeat.size()[1:]))
-    for i, segment in enumerate(segments):
-      begin = int(segment['begin']*100)
-      end = int(segment['end']*100)
+    for i, segment in enumerate(segments["children"]):
+      begin = int((segment["begin"]-word_begin)*100)
+      end = int((segment["end"]-word_begin)*100)
+      if i >= sfeat.size(0):
+        break
       feat[begin:end+1] = sfeat[i]
-    return feat.unsqueeze(-1)
+    return feat.squeeze(-1)
 
   def __getitem__(self, idx):
     audio_file, image_file, label, phoneme, box, box_idx = self.dataset[idx]
@@ -284,7 +290,6 @@ class FlickrWordImagePreprocessor:
   def to_index(self, line):
     tok_to_idx = self.tokens_to_index
     return torch.LongTensor([tok_to_idx.get(t, 0) for t in line.split(self.wordsep)])
-
 
 def load_data_split(data_path, split,
                     audio_feature="mfcc",
