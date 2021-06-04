@@ -44,6 +44,9 @@ class Solver(object):
       elif config.audio_feature == 'cpc':
         self.input_size = 256
       else: Exception(f'Audio feature type {config.audio_feature_type} not supported')
+      
+      if self.use_segment and (self.ds_method == 'resample'): # input size is the concatenation of 4 frames for resample 
+        self.input_size = 4 * self.input_size
 
       self.K = config.K
       self.global_iter = 0
@@ -74,8 +77,6 @@ class Solver(object):
       self.image_net = cuda(self.image_net, self.cuda)
 
       if config.model_type == 'blstm': 
-        if self.use_segment and (self.ds_method == 'average'):
-          self.input_size = 4 * self.input_size
         self.audio_net = cuda(GumbelBLSTM(
                                 self.K, 
                                 input_size=self.input_size,
