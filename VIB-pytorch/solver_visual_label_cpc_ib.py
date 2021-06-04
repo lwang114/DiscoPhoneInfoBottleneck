@@ -17,6 +17,7 @@ from sklearn.metrics import precision_recall_fscore_support
 from datasets.datasets import return_data
 from utils import cuda
 from model import GumbelBLSTM, GumbelMLP
+from position_model import PositionPredictor
 from pathlib import Path
 from image_model import Resnet34 
 from evaluate import evaluate, compute_token_f1
@@ -57,7 +58,7 @@ class Solver(object):
       self.dataset = config.dataset
 
       # Dataset
-      self.data_loader = return_data(config) # TODO
+      self.data_loader = return_data(config)
       self.n_class = self.data_loader['train']\
                      .dataset.preprocessor.num_tokens
       self.class_names = self.data_loader['train']\
@@ -92,6 +93,12 @@ class Solver(object):
                                 n_class=self.n_class
                               ), self.cuda)
       else: Exception(f'Model type {config.model_type} not defined')
+
+      self.position_net = cuda(PositionPredictor(
+                                 input_size=self.K,
+                                 vocab_size=self.n_class,
+                                 embedding_size=50
+                               ), self.cuda) # TODO
 
       trainables = [p for p in self.audio_net.parameters()]             
       self.optim = optim.Adam(trainables,
@@ -174,11 +181,11 @@ class Solver(object):
           y = labels  
 
           # Compute IB loss
-          in_logit, logits = self.audio_net(
+          in_logit, logits, _, embedding = self.audio_net(
                                  x, masks=audio_masks, 
                                  temp=temp,
-                                 num_sample=self.num_sample 
-                                 )
+                                 num_sample=self.num_sample, 
+                                 return_feat=True)
           logit = (logits * audio_masks.unsqueeze(-1)).sum(dim=1)
           pred_label = F.one_hot(logit.max(-1)[1], self.n_class)
           gold_label = F.one_hot(y, self.n_class)
@@ -186,10 +193,15 @@ class Solver(object):
           gold_labels.append(gold_label.cpu())
 
           class_loss = F.cross_entropy(logit, y).div(math.log(2))
+          pred_position = self.position_model(x).squeeze(-1)
+          true_position = torch.range(embedding.size(1)).unsqueeze(0).expand(embedding.size(0), -1) 
+          position_loss = F.mse_loss(pred_position * audio_masks, 
+                                     true_position * audio_masks)
           info_loss = (F.softmax(in_logit, dim=-1)\
                         * F.log_softmax(in_logit, dim=-1)
                       ).sum(1).mean().div(math.log(2))
-          loss = class_loss + self.beta * info_loss
+          loss = class_loss + self.beta * info_loss + position_loss
+
           izy_bound = math.log(self.n_class, 2) - class_loss
           izx_bound = info_loss
           total_loss += loss.cpu().detach().numpy()
