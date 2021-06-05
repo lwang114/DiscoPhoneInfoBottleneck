@@ -84,7 +84,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
         if line0:
           line0 = False
           continue
-        sent_id, begin, end, phn, _, _, _ = line.rstrip('\n').split() # TODO Compute within- and between-speaker token F1
+        sent_id, begin, end, phn, _, _, _ = line.rstrip('\n').split()
         begin = int(float(begin)*100)
         end = int(float(end)*100)
         gold_tokens.add(phn)
@@ -152,9 +152,13 @@ def compute_token_f1(pred_path, gold_path, out_path):
         f'Token precision: {token_precision}\t'
         f'Token F1: {token_f1}')
 
-  fig, ax = plt.subplots()
+  fig, ax = plt.subplots(figsize=(8, 8))
+  
   confusion_norm = confusion / np.maximum(confusion.sum(1, keepdims=True), 1.)
-  new_order = []
+  new_row_order = sorted(list(range(n_gold_tokens)), key=lambda x:confusion_norm[x].max(), reverse=True)
+  confusion_norm = confusion_norm[new_row_order]
+
+  new_col_order = []
   pred_idxs = list(range(n_pred_tokens))
   for i in range(n_gold_tokens):
     if i >= n_pred_tokens: # Cannot assign anymore when the number of gold tokens exceed the pred tokens
@@ -162,21 +166,22 @@ def compute_token_f1(pred_path, gold_path, out_path):
     max_s = 0
     max_j = -1
     for j, s in enumerate(confusion_norm[i]):
-      if (s >= max_s) and not j in new_order: # If cluster j is not used and has higher prob, update the assigned cluster
+      if (s >= max_s) and not j in new_col_order: # If cluster j is not used and has higher prob, update the assigned cluster
         max_j = j
         max_s = s
-    new_order.append(max_j)
+    new_col_order.append(max_j)
   
   for i in range(n_pred_tokens): # Append the rest of the unassigned clusters if any
-    if not i in new_order:
-      new_order.append(i)
+    if not i in new_col_order:
+      new_col_order.append(i)
 
-  plt.pcolor(confusion_norm[:, new_order], cmap=plt.cm.Blues)
+  plt.pcolor(confusion_norm[:, new_col_order], cmap=plt.cm.Blues)
   ax.set_xticks(np.arange(len(pred_tokens))+0.5)
   ax.set_yticks(np.arange(len(gold_tokens))+0.5)
   pred_names = sorted(pred_stoi, key=lambda x:pred_stoi[x])
-  ax.set_xticklabels([pred_names[i] for i in new_order], rotation='vertical')
-  ax.set_yticklabels(sorted(gold_stoi, key=lambda x:gold_stoi[x]))
+  ax.set_xticklabels([pred_names[i] for i in new_col_order], rotation='vertical')
+  gold_names = sorted(gold_stoi, key=lambda x:gold_stoi[x])
+  ax.set_yticklabels([gold_names[i] for i in new_row_order])
   ax.invert_yaxis()
   plt.colorbar()
   plt.savefig(out_path)
