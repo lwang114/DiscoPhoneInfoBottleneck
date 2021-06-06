@@ -114,7 +114,50 @@ def extract_word_dataset(data_path,
     phrase_f.close()
   print(f"Number of words: {n_words}, vocab size: {len(vocab)}")
   word_f.close() 
-     
+
+def extract_zs_item_file(data_path, 
+                         min_class_size, 
+                         max_keep_size):
+  word_f = open(os.path.join(data_path,
+                             f"flickr8k_word_{min_class_size}.json"), "r")
+  for split in ["train", "val", "test"]:
+    abx_f = open(os.path.join(data_path, split, f"{split}_{max_keep_size}.item"), "w")
+    abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+
+    label_counts = dict()    
+    for line in word_f:
+      word = json.loads(line.rstrip("\n"))
+      label = word["label"]
+      if not label in label_counts:
+        label_counts[label] = 1
+      else:
+        label_counts[label] += 1
+      if label_counts[label] > max_keep_size:
+        continue
+
+      if word["split"] != split:
+        continue
+      audio_id = word["audio_id"]
+      word_id = int(word["word_id"])
+      audio_file_id = f"{audio_id}_{word_id:04d}"
+      spk = word["spk"]
+      phonemes = word["phonemes"]
+
+      for phn_idx, phone in enumerate(phonemes):
+        if (phn_idx == 0) or (phn_idx == len(phonemes) - 1):
+          continue
+        phn = phone["text"]
+        if phn[0] == "+":
+          continue
+        begin_phn = round(phone["begin"] - begin, 3)
+        end_phn = round(phone["end"] - begin, 3) 
+        prev_phn = phonemes[phn_idx-1]["text"]
+        next_phn = phonemes[phn_idx+1]["text"]
+        abx_f.write(f"{audio_file_id} {begin_phn} {end_phn} {phn} {prev_phn} {next_phn} {spk}\n")
+    abx_f.close()
+  word_f.close()
+
+
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)
@@ -125,6 +168,10 @@ def main(argv):
     extract_word_dataset(config["data_path"],
                          config["min_class_size"],
                          config["debug"])
+  elif args.TASK == 1:
+    extract_zs_item_file(config["data_path"],
+                         config["min_class_size"],
+                         config["max_keep_size"])
 
 if __name__ == "__main__":
   argv = sys.argv[1:]
