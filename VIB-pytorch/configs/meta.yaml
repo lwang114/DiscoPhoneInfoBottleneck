@@ -1,0 +1,14 @@
+author: Liming Wang
+affliation: UIUC
+description: multilingual multimodal information bottleneck
+open_source: true
+train_set: Flickr Audio, LibriSpeech train-clean-100
+visually_grounded: true
+gpu_budget: 48
+parameters:
+  phonetic:
+    metric: cosine
+    frame_shift: 0.01
+  semantic:
+    metric: cosine
+    pooling: mean

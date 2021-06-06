@@ -21,7 +21,6 @@ from position_model import PositionPredictor
 from pathlib import Path
 from image_model import Resnet34 
 from evaluate import evaluate, compute_token_f1
-import cpc.eval as ev
 
 
 class Solver(object):
