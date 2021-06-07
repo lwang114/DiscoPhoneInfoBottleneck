@@ -4,6 +4,7 @@ from scipy.io import wavfile
 from nltk.corpus import stopwords
 import argparse
 import sys
+import shutil
 stop_words = stopwords.words("english")
 
 def extract_word_dataset(data_path,
@@ -163,7 +164,59 @@ def extract_zs_item_file(data_path,
     abx_f.close()
   word_f.close()
 
+def extract_audio_for_concepts(data_path, 
+                               min_class_size,
+                               concepts,
+                               out_dir="flickr_audio_by_concepts"):
+  """
+  Extract audio files for a list of concepts organized as
+    concept 1/
+      word_boundary.json
+      *.wav
+    ...
+    concept n/
+      word_boundary.json
+      *.wav 
+  """
+  dataset_name = f"flickr8k_word_{min_class_size}"
+  word_f = open(os.path.join(data_path,
+                             dataset_name,
+                             dataset_name+".json"))
+  for c in concepts:
+    if not os.path.exists(os.path.join(data_path,
+                                       out_dir)):
+      os.makedirs(os.path.join(data_path,
+                               out_dir))
+    if not os.path.exists(os.path.join(
+                            data_path,
+                            out_dir, c)):
+      os.makedirs(os.path.join(data_path,
+                               out_dir, c))
+  
+  concept_info = dict()
+  for line in word_f:
+    word = json.loads(line.rstrip("\n"))
+    c = word["label"]
+    if c in concepts:
+      if not c in concept_info:
+        concept_info[c] = [word]
+      else:
+        concept_info[c].append(word)
 
+      audio_id = word["audio_id"]
+      audio_file = audio_id+".wav"
+      cur_dir = os.path.join(data_path,
+                             out_dir, c)
+      if not audio_file in cur_dir:
+        shutil.copyfile(os.path.join(data_path, "flickr_audio/wav", audio_file),
+                        os.path.join(cur_dir, audio_file))
+
+  for c in concepts:
+    segment_file = os.path.join(data_path, out_dir, c, "word_boundary.json")
+    concept_info_str = "\n".join([json.dumps(c_info) for c_info in concept_info[c]])
+    with open(segment_file, "w") as f:
+      f.write(concept_info_str)
+              
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)
@@ -178,6 +231,13 @@ def main(argv):
     extract_zs_item_file(config["data_path"],
                          config["min_class_size"],
                          config["max_keep_size"])
+  elif args.TASK == 2:
+    classes = json.load(open(os.path.join(config["data_path"],
+                                          "flickr8k_phrases.json")))
+    concepts = sorted(classes, key=lambda x:classes[x], reverse=True)[2] 
+    extract_audio_for_concepts(config["data_path"],
+                               config["min_class_size"],
+                               concepts)
 
 if __name__ == "__main__":
   argv = sys.argv[1:]
