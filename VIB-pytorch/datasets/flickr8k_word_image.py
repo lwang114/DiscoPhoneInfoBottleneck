@@ -40,7 +40,7 @@ def embed(feat, method='average'):
   if method == 'average':
     return feat.mean(0)
   elif method == 'resample':
-    new_feat = signal.resample(feat.detach().numpy(), 10)
+    new_feat = signal.resample(feat.detach().numpy(), 4)
     return torch.FloatTensor(new_feat.flatten())
 
 class FlickrWordImageDataset(torch.utils.data.Dataset):

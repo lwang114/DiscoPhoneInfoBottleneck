@@ -102,7 +102,7 @@ def extract_word_dataset(data_path,
             for phn_idx, phone in enumerate(word["children"]):
               if (phn_idx == 0) or (phn_idx == len(word["children"]) - 1):
                 continue
-              phn = phone["text"]
+              phn = phone["text"] # TODO Remove silence
               if phn[0] == "+": # If the unit is a disfluency such as breath, laughter, etc.
                 continue
               begin_phn = round(phone["begin"] - begin, 3)
@@ -118,10 +118,15 @@ def extract_word_dataset(data_path,
 def extract_zs_item_file(data_path, 
                          min_class_size, 
                          max_keep_size):
-  word_f = open(os.path.join(data_path,
-                             f"flickr8k_word_{min_class_size}.json"), "r")
+  dataset_name = f"flickr8k_word_{min_class_size}"
   for split in ["train", "val", "test"]:
-    abx_f = open(os.path.join(data_path, split, f"{split}_{max_keep_size}.item"), "w")
+    word_f = open(os.path.join(data_path,
+                               dataset_name,
+                               f"{dataset_name}.json"), "r")
+    abx_f = open(os.path.join(data_path, 
+                              dataset_name, 
+                              split, 
+                              f"{split}_{max_keep_size}.item"), "w")
     abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
 
     label_counts = dict()    
@@ -140,9 +145,10 @@ def extract_zs_item_file(data_path,
       audio_id = word["audio_id"]
       word_id = int(word["word_id"])
       audio_file_id = f"{audio_id}_{word_id:04d}"
+      print(audio_file_id, split) # XXX
       spk = word["spk"]
-      phonemes = word["phonemes"]
-
+      phonemes = word["phonemes"]["children"]
+      begin = word["begin"]
       for phn_idx, phone in enumerate(phonemes):
         if (phn_idx == 0) or (phn_idx == len(phonemes) - 1):
           continue
