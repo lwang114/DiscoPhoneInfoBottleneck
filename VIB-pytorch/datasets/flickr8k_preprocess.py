@@ -6,6 +6,7 @@ import argparse
 import sys
 import shutil
 stop_words = stopwords.words("english")
+SIL = "SIL"
 
 def extract_word_dataset(data_path,
                          min_class_size=50,
@@ -151,15 +152,15 @@ def extract_zs_item_file(data_path,
       phonemes = word["phonemes"]["children"]
       begin = word["begin"]
       for phn_idx, phone in enumerate(phonemes):
-        if (phn_idx == 0) or (phn_idx == len(phonemes) - 1):
-          continue
+        # XXX if (phn_idx == 0) or (phn_idx == len(phonemes) - 1):
+        #   continue
         phn = phone["text"]
-        if phn[0] == "+":
+        if (phn[0] == "+") or (phn in SIL):
           continue
         begin_phn = round(phone["begin"] - begin, 3)
         end_phn = round(phone["end"] - begin, 3) 
-        prev_phn = phonemes[phn_idx-1]["text"]
-        next_phn = phonemes[phn_idx+1]["text"]
+        prev_phn = SIL # XXX phonemes[phn_idx-1]["text"]
+        next_phn = SIL # XXX phonemes[phn_idx+1]["text"]
         abx_f.write(f"{audio_file_id} {begin_phn} {end_phn} {phn} {prev_phn} {next_phn} {spk}\n")
     abx_f.close()
   word_f.close()
@@ -208,7 +209,8 @@ def extract_audio_for_concepts(data_path,
       cur_dir = os.path.join(data_path,
                              out_dir, c)
       if not audio_file in cur_dir:
-        shutil.copyfile(os.path.join(data_path, "flickr_audio/wav", audio_file),
+        print(audio_file)
+        shutil.copyfile(os.path.join(data_path, "flickr_audio/wavs", audio_file),
                         os.path.join(cur_dir, audio_file))
 
   for c in concepts:
@@ -233,8 +235,8 @@ def main(argv):
                          config["max_keep_size"])
   elif args.TASK == 2:
     classes = json.load(open(os.path.join(config["data_path"],
-                                          "flickr8k_phrases.json")))
-    concepts = sorted(classes, key=lambda x:classes[x], reverse=True)[2] 
+                                          "phrase_classes.json")))
+    concepts = sorted(classes, key=lambda x:classes[x], reverse=True)[:2] 
     extract_audio_for_concepts(config["data_path"],
                                config["min_class_size"],
                                concepts)
