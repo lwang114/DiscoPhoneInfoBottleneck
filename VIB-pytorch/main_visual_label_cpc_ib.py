@@ -45,11 +45,12 @@ def main(argv):
 
   net = Solver(config)
 
+  save_embedding = config.get('save_embedding', False)
   if config.mode == 'train': 
-    net.train()
+    net.train(save_embedding=save_embedding)
   elif config.mode == 'test':
     net.load_checkpoint()
-    net.test(compute_abx=False)
+    net.test(save_embedding=save_embedding)
   elif config.mode == 'cluster':
     if config['cluster_dataset'] == "zerospeech2021": 
       devset = ZeroSpeech2021_Dataset(
@@ -68,15 +69,9 @@ def main(argv):
                       num_workers=1)
       net.cluster(dev_loader,
                   out_prefix='zs2021_dev_predictions',
-                  save_embedding=True)
+                  save_embedding=save_embedding)
     else:
-      net.cluster()
-  elif config.mode == 'phone_level_cluster':
-    if config['cluster_dataset'] == "zerospeech2021": 
-      net.cluster(dataloader)
-    else:
-      net.cluster()
-    net.phone_level_cluster()
+      net.cluster(save_embedding=save_embedding)
   elif config.mode == 'train_sweep':
     config.beta = 1.
     config.epoch = 25
