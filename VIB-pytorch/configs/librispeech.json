@@ -1,4 +1,19 @@
 {
-  "data_path": "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic",
-  "model_path": "/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/zerospeech2021/zerospeech2021-submission-baseline-lstm/code/script/outputs"  
+  "seed": 2,
+  "mode": "train",
+  "dataset": "librispeech",
+  "dset_dir": "",
+
+  "model_type": "blstm",
+  "audio_feature": "mfcc",
+  "image_feature": "rcnn",
+  "K": 256,
+  "beta": 1e-3,
+  "epoch": 200,
+  "lr": 1e-3,
+  "batch_size": 32,
+  "load_ckpt": false,
+  "save_embedding": false,
+
+  "ckpt_dir": "checkpoints/phone_discovery_visual_multilingual_ib" 
 }

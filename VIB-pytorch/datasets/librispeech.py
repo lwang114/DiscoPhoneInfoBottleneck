@@ -28,7 +28,7 @@ def fix_embedding_length(emb, L, padding=0):
   return emb
 
 
-class LibrispeechDataset(torch.utils.data.Dataset):
+class LibriSpeechDataset(torch.utils.data.Dataset):
   
   
   def __init__(
@@ -136,7 +136,7 @@ class LibrispeechDataset(torch.utils.data.Dataset):
     return len(self.dataset)
  
 
-class LibrispeechPreprocessor:
+class LibriSpeechPreprocessor:
   
   
   def __init__(
@@ -147,10 +147,6 @@ class LibrispeechPreprocessor:
         "train": ["train-clean"],
         "test": ["dev-clean"]
     },
-    tokens_path=None,
-    lexicon_path=None,
-    use_words=False,
-    prepend_wordsep=False,
     audio_feature="mfcc",
     image_feature="rcnn",
     sample_rate=16000,

@@ -7,6 +7,7 @@ from datasets.mscoco2k_segment_image import MSCOCO2kSegmentImageDataset, MSCOCO2
 from datasets.speechcoco_segment import SpeechCOCOSegmentDataset, SpeechCOCOSegmentPreprocessor
 from datasets.flickr8k import FlickrSegmentDataset, FlickrSegmentPreprocessor
 from datasets.flickr8k_word_image import FlickrWordImageDataset, FlickrWordImagePreprocessor
+from datasets.librispeech import LibriSpeechDataset, LibriSpeechPreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -71,6 +72,29 @@ def return_data(args):
                                            min_class_size=args.min_class_size,
                                            use_segment=args.use_segment,
                                            ds_method=args.downsample_method) 
+    elif args.dataset == 'librispeech':
+      preprocessor = LibriSpeechPreprocessor(dset_dir, 80,
+     audio_feature=args.audio_feature)
+      train_data = LibriSpeechDataset(
+                       dset_dir, 
+                       preprocessor,
+                       'train', 
+                       splits={
+                         'train': ['train-clean-100'],
+                         'test': ['dev-clean'] 
+                       },
+                       augment=True,
+                       audio_feature="mfcc") 
+      test_data = LibriSpeechDataset(
+                       dset_dir, 
+                       preprocessor,
+                       'test', 
+                       splits={
+                         'train': ['train-clean-100'],
+                         'test': ['dev-clean'] 
+                       },
+                       augment=True,
+                       audio_feature="mfcc") 
     else : raise UnknownDatasetError()
 
 
