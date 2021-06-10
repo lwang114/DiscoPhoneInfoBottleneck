@@ -62,6 +62,8 @@ def extract_visual_words(data_path, split, visual_word_file):
   print(f"Number of visual words: {n_words}")
   print(f"Number of sentences with visual words: {n_sents}")
 
+# def extract_forced_alignment(): # TODO
+
 
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

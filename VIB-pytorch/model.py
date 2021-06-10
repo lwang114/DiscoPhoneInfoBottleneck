@@ -325,18 +325,17 @@ class GumbelMLP(nn.Module):
 
     if masks is not None:
       logits = logits * masks.unsqueeze(2)
-    logit = logits.sum(1)
     encoding = self.reparametrize_n(logits, 
-                                     n=num_sample, 
-                                     temp=temp)
+                                    n=num_sample, 
+                                    temp=temp)
     out = self.decode(encoding)
     if num_sample > 1:
       out = out.mean(0)
         
     if return_feat:
-      return logit, out, encoding, embed
+      return logits, out, encoding, embed
     else:
-      return logit, out
+      return logits, out
 
   def reparametrize_n(self, x, n=1, temp=1.):
     # reference :
@@ -401,13 +400,12 @@ class GumbelBLSTM(nn.Module):
       c0 = c0.cuda()
        
     embed, _ = self.rnn(x, (h0, c0))
-    x = self.bottleneck(embed)
+    in_logit = self.bottleneck(embed)
     
     if masks is not None:
-      x = x * masks.unsqueeze(2)
+      in_logit = in_logit * masks.unsqueeze(2)
 
-    in_logit = x.sum(dim=1)
-    encoding = self.reparametrize_n(x, num_sample, temp)
+    encoding = self.reparametrize_n(in_logit, num_sample, temp)
     L = ds_ratio * (T // ds_ratio)
     if encoding.dim() > 3:
         encoding = encoding[:, :, :L].view(num_sample, B, int(L // ds_ratio), ds_ratio, -1).mean(dim=-2)

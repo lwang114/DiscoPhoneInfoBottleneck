@@ -64,6 +64,15 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1): # TODO Merge t
   confusion_df = pd.DataFrame(confusion_dict)
   return token_f1, confusion_df, token_precision, token_recall
 
+def compute_edit_distance(predictions, targets, preprocessor):
+  tokens_dist = 0
+  for p, t in zip(predictions, targets):
+    p, t = preprocessor.tokens_to_text(p), preprocessor.to_text(t)
+    p, t = list(filter(None, p)), list(filter(None, t))
+    tokens_dist += editdistance.eval(p, t)
+    n_tokens += len(t)
+  return tokens_dist, n_tokens 
+
 def compute_token_f1(pred_path, gold_path, out_path):
   """
   Compute token F1 for predictions in zerospeech 2021 format
