@@ -84,7 +84,7 @@ class Solver(object):
     else:
       raise('mode error. It should be either train or eval')
 
-  def train(self):
+  def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
     temp_min = 0.1
@@ -171,10 +171,10 @@ class Solver(object):
 
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
-      self.test()
-)
+      self.test(save_embedding=save_embedding)
 
-  def test(self, out_prefix='predictions'):
+  def test(self, save_embedding=False, 
+           out_prefix='predictions'):
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset 
     preprocessor = testset.preprocessor
