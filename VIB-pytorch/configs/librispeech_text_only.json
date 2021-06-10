@@ -10,11 +10,12 @@
   "image_feature": "rcnn",
   "K": 256,
   "beta": 1e-3,
+  "weight_word_loss": 0,
   "epoch": 200,
   "lr": 1e-4,
   "batch_size": 32,
   "load_ckpt": false,
   "save_embedding": false,
 
-  "ckpt_dir": "checkpoints/phone_discovery_librispeech_visual_multilingual_ib" 
+  "ckpt_dir": "checkpoints/phone_discovery_librispeech_text_only_ib" 
 }

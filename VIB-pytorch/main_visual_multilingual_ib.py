@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import argparse
-from utils import str2bool
+from utils.utils import str2bool
 from solver_visual_multilingual_ib import Solver
 from pyhocon import ConfigFactory
 import sys
@@ -41,3 +41,7 @@ def main(argv):
     net.test(save_embedding=save_embedding) 
   else:
     return 0
+
+if __name__ == '__main__':
+  argv = sys.argv[1:]
+  main(argv)

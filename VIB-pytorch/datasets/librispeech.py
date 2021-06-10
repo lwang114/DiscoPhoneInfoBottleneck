@@ -4,6 +4,9 @@ import torchvision
 from torchvision import transforms
 import numpy as np
 import re
+import os
+import json
+
 
 UNK = "###UNK###"
 NULL = "###NULL###"
@@ -35,7 +38,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self, data_path,
       preprocessor, split,
       splits = {
-        "train": ["train-clean"],
+        "train": ["train-clean-100"],
         "test": ["dev-clean"]    
       },
       augment=False,
@@ -46,11 +49,11 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     self.preprocessor = preprocessor
     self.splits = splits[split]
     self.data_path = data_path
-    
+   
+    data = [] 
     for sp in self.splits:
       # Load data paths to audio and visual features
       examples = load_data_split(data_path, sp,
-                                 min_class_size=min_class_size,
                                  audio_feature=audio_feature,
                                  image_feature=image_feature)
       data.extend(examples)
@@ -95,8 +98,11 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     self.max_word_num = 10
 
   def load_audio(self, audio_file):
-    inputs = self.audio_transforms(audio_file)
+    audio, _ = torchaudio.load(audio_file)
+    inputs = self.audio_transforms(audio).squeeze(0)
     inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t() 
+    
+    nframes = inputs.size(-1)
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
     return inputs, input_mask
@@ -125,11 +131,11 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       end_frame = int(w['end']*100)
       word_mask[i, begin_frame:end_frame] = 1.
 
-    return audio_inputs, 
-           phoneme_labels, 
-           word_labels, 
-           input_mask,
-           phone_mask,
+    return audio_inputs,\
+           phoneme_labels,\
+           word_labels,\
+           input_mask,\
+           phone_mask,\
            word_mask 
   
   def __len__(self):
@@ -144,7 +150,7 @@ class LibriSpeechPreprocessor:
     data_path,
     num_features,
     splits = {
-        "train": ["train-clean"],
+        "train": ["train-clean-100"],
         "test": ["dev-clean"]
     },
     audio_feature="mfcc",
@@ -166,8 +172,8 @@ class LibriSpeechPreprocessor:
     for ex in data:
       sent = [phn["text"] for phn in ex["phonemes"]]
       visual_sent = [w["text"] for w in ex["visual_words"]]
-      tokens.add(sent)
-      visual_words.add(visual_sent)
+      tokens.update(sent)
+      visual_words.update(visual_sent)
     self.tokens = [BLANK]+sorted(tokens)
     self.visual_words = sorted(visual_words)
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
@@ -186,7 +192,7 @@ class LibriSpeechPreprocessor:
     return torch.LongTensor([tok_to_idx.get(t, 0) for t in sent])
 
   def to_word_index(self, sent):
-    return torch.LongTensor([self.word_to_idx[label] for t in sent])
+    return torch.LongTensor([self.word_to_index[t] for t in sent])
   
   def to_text(self, indices):
     return [self.tokens[i] for i in indices] 
@@ -198,7 +204,7 @@ class LibriSpeechPreprocessor:
     T = len(indices)
     path = self.to_text(indices)
     sent = []
-    for i in enumerate(T):
+    for i in range(T):
       if path[i] == BLANK:
         continue
       elif (i != 0) and (path[i] == path[i-1]):
@@ -224,17 +230,26 @@ def load_data_split(data_path, sp,
                   "end" : float}
           }
   """ 
-  label_f = open(os.path.join(data_path, split, f"{split}.json"), "r") 
-  for line in label_f:
+  label_f = open(os.path.join(data_path, sp, f"{sp}.json"), "r") 
+  examples = []
+  absent_utt_ids = []
+  for idx, line in enumerate(label_f):
+    # if idx > 200: # XXX
+    #   break
     label_dict = json.loads(line.rstrip("\n"))
-    utt_id = label_dict["utterance_id"]
-    visual_words = label_dict["visual_words"]
+    utt_id = label_dict["utterance_id"] 
+    visual_words = [label_dict["words"][i] for i in label_dict["visual_words"]]
     phonemes = [phn for w in label_dict["words"] for phn in w["phonemes"]]
-    audio_path = os.path.join(data_path, f"{utt_id}.wav")
-    
-    example = {"audio": audio_path,
-               "visual_words": visual_words,
-               "phonemes": phonemes}
+    audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
+    if os.path.exists(audio_path):
+      example = {"audio": audio_path,
+                 "visual_words": visual_words,
+                 "phonemes": phonemes}
+    else:
+      absent_utt_ids.append(utt_id)
     examples.append(example)
+  
+  if len(absent_utt_ids) > 0:
+    print(f'Ignore the following utterance that does not exist: {absent_utt_ids}')
   label_f.close()
   return examples

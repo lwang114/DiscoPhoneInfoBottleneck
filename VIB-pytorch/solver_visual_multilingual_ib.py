@@ -1,13 +1,18 @@
 import numpy as np
 import torch
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.optim import lr_scheduler
 import argparse
 import os
 import json
+import math
 from utils.utils import cuda
-from model import GumbelBLSTM, GumbelMLP
 from pathlib import Path
-from utils.evaluate import compute_token_f1, compute_edit_distance
-
+from sklearn.metrics import accuracy_score
+from model import GumbelBLSTM, GumbelMLP
+from datasets.datasets import return_data 
+from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
 class Solver(object):
 
@@ -16,6 +21,11 @@ class Solver(object):
     self.config = config
 
     self.cuda = torch.cuda.is_available()
+    self.epoch = config.epoch
+    self.batch_size = config.batch_size
+    self.beta = config.beta
+    self.lr = config.lr
+    self.weight_word_loss = config.get('weight_word_loss', 1.)
     self.anneal_rate = config.get('anneal_rate', 3e-6)
     self.num_sample = config.get('num_sample', 1)
     self.eps = 1e-9
@@ -39,14 +49,16 @@ class Solver(object):
                          .dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train']\
                         .dataset.preprocessor.visual_words 
-    print(f'visual label class: {self.n_class}')
-    
+    print(f'Number of visual label classes = {self.n_visual_class}')
+    print(f'Number of phone classes = {self.n_phone_class}')
+   
     if config.model_type == 'blstm':
       self.audio_net = cuda(GumbelBLSTM(
                               self.K,
                               input_size=self.input_size,
                               n_layers=1,
-                              n_class=self.n_class,
+                              n_class=self.n_visual_class,
+                              n_gumbel_units=self.n_phone_class,
                               ds_ratio=1,
                               bidirectional=True), self.cuda)
       self.K = 2 * self.K
@@ -54,12 +66,13 @@ class Solver(object):
       self.audio_net = cuda(GumbelMLP(
                                 self.K,
                                 input_size=self.input_size,
-                                n_class=self.n_class
+                                n_class=self.n_visual_class,
+                                n_gumbel_units=self.n_phone_class,
                             ), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
     self.optim = optim.Adam(trainables,
-                            lr=self.lr,betas=(0.5,0.999))
+                            lr=self.lr, betas=(0.5,0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
     self.ckpt_dir = Path(config.ckpt_dir)
     if not self.ckpt_dir.exists(): 
@@ -122,20 +135,20 @@ class Solver(object):
                                num_sample=self.num_sample,
                                return_feat=True)
         word_logits = torch.matmul(word_masks, word_logits)
-        word_loss = F.cross_entropy(word_logits, word_labels,\
-                                     ignore_index=-100,
+        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
+                                    ignore_index=-100,
                                     ).div(math.log(2))
-        phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1),
+        phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1)\
+                                  .permute(1, 0, 2),
                                 phoneme_labels,
                                 audio_lens,
-                                sent_lens)
-        phone_logit = phone_logits.sum(1) 
-        info_loss = (F.softmax(phone_logit, dim=-1)\
-                      * F.log_softmax(phone_logit, dim=-1)
+                                sent_lens) 
+        info_loss = (F.softmax(phone_logits, dim=-1)\
+                      * F.log_softmax(phone_logits, dim=-1)
                     ).sum().div(sent_lens.sum()*math.log(2)) 
-        loss = word_loss + phone_loss + self.beta * info_loass
+        loss = phone_loss + self.weight_word_loss * word_loss + self.beta * info_loss
         
-        izy_bound = math.log(self.n_class, 2) - word_loss
+        izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -146,16 +159,17 @@ class Solver(object):
   
         for i in range(audios.size(0)):
           audio_len = audio_lens[i]
+          sent_len = sent_lens[i]
           word_len = word_lens[i]
-          gold_phone_labels.append(phoneme_labels[i, :audio_len].cpu().detach().numpy().tolist())
-          pred_phone_label = phone_logits[i, :audio_len].max(-1)[1]\
-                             .cpu().detach().numpy().tolist()
-          pred_phone_labels.append(pred_phone_label)
+
+          gold_phone_label = phoneme_labels[i, :sent_len]
+          pred_phone_label = phone_logits[i, :audio_len].max(-1)[1]
+          gold_phone_labels.append(gold_phone_label.cpu().detach().numpy().tolist())
+          pred_phone_labels.append(pred_phone_label.cpu().detach().numpy().tolist())
           if word_len > 0:
             gold_word_labels.append(word_labels[i, :word_len].cpu().detach().numpy().tolist())
-            pred_word_label = word_logits[i, :word_len].max(-1)[1]\
-                              .cpu().detach().numpy().tolist()
-            pred_word_labels.append(pred_word_label)
+            pred_word_label = word_logits[i, :word_len].max(-1)[1]
+            pred_word_labels.append(pred_word_label.cpu().detach().numpy().tolist())
           
         if self.global_iter % 1000 == 0:
           temp = np.maximum(temp * np.exp(-anneal_rate * idx), temp_min)
@@ -164,8 +178,8 @@ class Solver(object):
                 f'IZY:{izy_bound:.2f} IZX:{izx_bound:.2f}')
       
       # Evaluate training visual word classification accuracy and phone token error rate
-      acc = accuracy_score(gold_word_labels, pred_word_labels)
-      dist, n_tokens = compute_edit_distance(pred_phone_labels, gold_phone_labels, preprocessor) # TODO token_to_text and to_text function for preprocessor 
+      acc = compute_accuracy(gold_word_labels, pred_word_labels)
+      dist, n_tokens = compute_edit_distance(pred_phone_labels, gold_phone_labels, preprocessor)
       pter = float(dist) / float(n_tokens)
       print(f'Epoch {self.global_epoch}\ttraining visual word accuracy: {acc:.3f}\ttraining phone token error rate: {pter:.3f}')
 
@@ -173,8 +187,7 @@ class Solver(object):
         self.scheduler.step()
       self.test(save_embedding=save_embedding)
 
-  def test(self, save_embedding=False, 
-           out_prefix='predictions'):
+  def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset 
     preprocessor = testset.preprocessor
@@ -191,6 +204,10 @@ class Solver(object):
                       self.ckpt_dir,
                       f'{out_prefix}_word.{self.global_epoch}.readable'
                     )
+    out_phone_readable_file = os.path.join(
+                      self.ckpt_dir,
+                      f'{out_prefix}_phoneme.{self.global_epoch}.readable'
+                    )
     out_phone_file = os.path.join(
                        self.ckpt_dir,
                        f'{out_prefix}_phoneme.{self.global_epoch}.txt'
@@ -198,6 +215,7 @@ class Solver(object):
 
     word_f = open(out_word_file, 'w')
     word_f.write('Image ID\tGold label\tPredicted label\n')
+    phone_readable_f = open(out_phone_readable_file, 'w')
     phone_f = open(out_phone_file, 'w')
     
     gold_word_labels = []
@@ -208,7 +226,7 @@ class Solver(object):
     with torch.no_grad():
       B = 0
       for b_idx, (audios, phoneme_labels, word_labels,\
-                  input_masks, phone_masks, word_masks)\
+                  audio_masks, phone_masks, word_masks)\
                   in enumerate(self.data_loader['test']):
         if b_idx > 2 and self.debug:
           break
@@ -217,7 +235,7 @@ class Solver(object):
         audios = cuda(audios, self.cuda)
         phoneme_labels = cuda(phoneme_labels, self.cuda)
         word_labels = cuda(word_labels, self.cuda)
-        input_masks = cuda(input_masks, self.cuda)
+        audio_masks = cuda(audio_masks, self.cuda)
         phone_masks = cuda(phone_masks, self.cuda)
         word_masks = cuda(word_masks, self.cuda)
         
@@ -230,55 +248,65 @@ class Solver(object):
                                                            return_feat=True)
 
         word_logits = torch.matmul(word_masks, word_logits)
-        word_loss = F.cross_entropy(word_logits, 
+        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), 
                                     word_labels,
                                     ignore_index=-100)\
                                     .div(math.log(2)) 
-        phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1),
+        phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1)\
+                                  .permute(1, 0, 2),
                                 phoneme_labels,
                                 audio_lens,
                                 sent_lens)
-        info_loss = (F.softmax(phone_logit, dim=-1)\
-                      * F.log_softmax(phone_logit, dim=-1)
+        info_loss = (F.softmax(phone_logits, dim=-1)\
+                      * F.log_softmax(phone_logits, dim=-1)
                     ).sum().div(sent_lens.sum() * math.log(2))
         total_loss += word_loss + phone_loss + self.beta * info_loss
         total_num += 1. 
 
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
           if word_lens[idx] > 0:
-            audio_id = os.path.splitext(os.path.split(textset.dataset[global_idx][0])[1])[0]
-            gold_words = word_labels[idx].cpu().detach().numpy().tolist()
+            gold_words = word_labels[idx, :word_lens[idx]]
             pred_words = word_logits[idx, :word_lens[idx]].max(-1)[1]
-            pred_words = preds_words.cpu().detach().numpy().tolist()
-          
-            word_f.write(f'{audio_id}\t{gold_word_names}\t{pred_word_names}\n')
+            gold_words = gold_words.cpu().detach().numpy().tolist()
+            pred_words = pred_words.cpu().detach().numpy().tolist()
             gold_word_labels.append(gold_words)
             pred_word_labels.append(pred_words)
+
+            gold_word_names = ','.join(preprocessor.to_word_text(
+                                    gold_words)
+                                  )
+            pred_word_names = ','.join(preprocessor.to_word_text(
+                                    pred_words)
+                                  )
+            word_f.write(f'{audio_id}\t{gold_word_names}\t{pred_word_names}\n')
+
             feat_fn = self.ckpt_dir.joinpath(f'feats/{audio_id}.txt')
-            np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]].cpu().detach().numpy())
+            if save_embedding:
+              np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]].cpu().detach().numpy())
            
-          gold_word_names = ','.join(preprocessor.to_word_text(gold_words))
-          pred_word_names = ','.join(preprocessor.to_word_text(pred_words))
+          gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
+          pred_phone_label = encoding[idx, :audio_lens[idx]].max(-1)[1]
+          gold_phone_names = ','.join(preprocessor.to_text(gold_phone_label))
+          pred_phone_names = ','.join(preprocessor.tokens_to_text(pred_phone_label))
+          phone_readable_f.write(f'Utterance id: {audio_id}\n'
+                                 f'Gold transcript: {gold_phone_names}\n'
+                                 f'Pred transcript: {pred_phone_names}\n\n')
 
-          gold_phones = phoneme_labels[idx].cpu().detach().numpy().tolist()
-          pred_phones = encoding[idx, :sent_lens[idx]].max(-1)[1].tolist()
-          gold_phone_names = ','.join(preprocessor.to_text(gold_phones))
-          pred_phone_names = ','.join(preprocessor.to_text(pred_phones))
-          pred_phone_names_no_blank =\
-              ','.join(
-                preprocessor.tokens_to_text(pred_phones)
-              )
-
-          phone_f.write(f'{audio_id} {pred_phone_names}')
-          gold_phone_labels.append(gold_phone_names)
-          pred_phone_labels.append(pred_phone_names_no_blank)
-    
+          gold_phone_label = gold_phone_label.cpu().detach().numpy().tolist()
+          pred_phone_label = pred_phone_label.cpu().detach().numpy().tolist()
+          gold_phone_labels.append(gold_phone_label)
+          pred_phone_labels.append(pred_phone_label) 
+          
+          pred_phone_names = ','.join([str(p) for p in pred_phone_label])
+          phone_f.write(f'{audio_id} {pred_phone_names}\n')  
+   
     word_f.close()
     phone_f.close()              
    
     avg_loss = total_loss / total_num 
-    acc = accuracy_score(gold_word_labels, pred_word_labels)
+    acc = compute_accuracy(gold_word_labels, pred_word_labels)
     dist, n_tokens = compute_edit_distance(pred_phone_labels, gold_phone_labels, preprocessor)
     pter = float(dist) / float(n_tokens)
     print('[TEST RESULT]')
@@ -302,6 +330,25 @@ class Solver(object):
       self.save_checkpoint('best_acc.tar')
     self.set_mode('train')
 
+  def save_checkpoint(self, filename='best_acc.tar'):
+    model_states = {
+      'net': self.audio_net.state_dict()  
+    }
+    optim_states = {
+      'optim': self.optim.state_dict()  
+    }
+    states = {
+      'iter': self.global_iter,
+      'epoch': self.global_epoch,
+      'history': self.history,
+      'config': self.config,
+      'model_states': model_states,
+      'optim_states': optim_states  
+    }
+    file_path = self.ckpt_dir.joinpath(filename)
+    torch.save(states, file_path.open('wb+'))
+    print('=> saved checkpoint "{}" (iter {})'.format(file_path, self.global_iter)) 
+
   def load_checkpoint(self, filename='best_acc.tar'):
     file_path = self.ckpt_dir.joinpath(filename)
     if file_path.is_file():
@@ -313,4 +360,4 @@ class Solver(object):
       print('=> loaded checkpoint "{} (iter {})"'.format(
                 file_path, self.global_iter))
     else:
-      print('=> no checkpoint found at "{}"'.format(file_path)) 
+      print('=> no checkpoint found at "{}"'.format(file_path))
