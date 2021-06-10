@@ -4,6 +4,7 @@ import numpy as np
 import json
 import os
 import matplotlib.pyplot as plt
+import editdistance
 
 EPS = 1e-40
 def parse_args():
@@ -64,8 +65,14 @@ def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1): # TODO Merge t
   confusion_df = pd.DataFrame(confusion_dict)
   return token_f1, confusion_df, token_precision, token_recall
 
+def compute_accuracy(reference, test):
+  if len(reference) != len(test):
+    raise ValueError("Lists must have the same length.")
+  return sum(x == y for x, y in zip(reference, test)) / len(test)
+
 def compute_edit_distance(predictions, targets, preprocessor):
   tokens_dist = 0
+  n_tokens = 0
   for p, t in zip(predictions, targets):
     p, t = preprocessor.tokens_to_text(p), preprocessor.to_text(t)
     p, t = list(filter(None, p)), list(filter(None, t))
