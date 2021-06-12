@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import argparse
-from utils import str2bool
+from utils.utils import str2bool
 from solver_visual_label_cpc_ib import Solver
 import pandas as pd
 import sys

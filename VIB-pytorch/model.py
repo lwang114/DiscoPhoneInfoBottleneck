@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.autograd import Variable
-from utils import cuda
+from utils.utils import cuda
 
 class VQCPCEncoder(nn.Module):
     def __init__(self, in_channels, channels, n_embeddings, z_dim, c_dim):
@@ -293,6 +293,7 @@ class GumbelMLP(nn.Module):
                embedding_dim,
                n_layers=1,
                n_class=65,
+               n_gumbel_units=49,
                input_size=80):
     super(GumbelMLP, self).__init__()
     self.K = embedding_dim
@@ -309,8 +310,8 @@ class GumbelMLP(nn.Module):
                  nn.ReLU(),
                  nn.Dropout(0.3)
                )
-    self.bottleneck = nn.Linear(embedding_dim, 49)
-    self.decode = nn.Linear(49, self.n_class)
+    self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
+    self.decode = nn.Linear(n_gumbel_units, self.n_class)
 
   def forward(self, x, 
               num_sample=1,
@@ -360,6 +361,7 @@ class GumbelBLSTM(nn.Module):
                embedding_dim, 
                n_layers=1, 
                n_class=65, 
+               n_gumbel_units=49,
                input_size=80, 
                ds_ratio=1,
                bidirectional=True):
@@ -369,9 +371,14 @@ class GumbelBLSTM(nn.Module):
     self.n_class = n_class
     self.ds_ratio = ds_ratio
     self.bidirectional = bidirectional
-    self.rnn = nn.LSTM(input_size=input_size, hidden_size=embedding_dim, num_layers=n_layers, batch_first=True, bidirectional=bidirectional)
-    self.bottleneck = nn.Linear(2*embedding_dim if bidirectional else embedding_dim, 49)
-    self.decode = nn.Linear(49, self.n_class)
+    self.rnn = nn.LSTM(input_size=input_size,
+                       hidden_size=embedding_dim,
+                       num_layers=n_layers,
+                       batch_first=True,
+                       bidirectional=bidirectional)
+    self.bottleneck = nn.Linear(2*embedding_dim if bidirectional 
+                                                else embedding_dim, n_gumbel_units)
+    self.decode = nn.Linear(n_gumbel_units, self.n_class)
 
   def forward(self, x, 
               num_sample=1, 

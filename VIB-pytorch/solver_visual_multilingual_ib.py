@@ -25,6 +25,8 @@ class Solver(object):
     self.batch_size = config.batch_size
     self.beta = config.beta
     self.lr = config.lr
+    self.n_layers = config.get('num_layers', 1)
+    self.weight_phone_loss = config.get('weight_phone_loss', 1.)
     self.weight_word_loss = config.get('weight_word_loss', 1.)
     self.anneal_rate = config.get('anneal_rate', 3e-6)
     self.num_sample = config.get('num_sample', 1)
@@ -56,7 +58,7 @@ class Solver(object):
       self.audio_net = cuda(GumbelBLSTM(
                               self.K,
                               input_size=self.input_size,
-                              n_layers=1,
+                              n_layers=self.n_layers,
                               n_class=self.n_visual_class,
                               n_gumbel_units=self.n_phone_class,
                               ds_ratio=1,
@@ -146,7 +148,9 @@ class Solver(object):
         info_loss = (F.softmax(phone_logits, dim=-1)\
                       * F.log_softmax(phone_logits, dim=-1)
                     ).sum().div(sent_lens.sum()*math.log(2)) 
-        loss = phone_loss + self.weight_word_loss * word_loss + self.beta * info_loss
+        loss = self.weight_phone_loss * phone_loss +\
+               self.weight_word_loss * word_loss +\
+               self.beta * info_loss
         
         izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
@@ -320,7 +324,6 @@ class Solver(object):
                                              f'confusion.{self.global_epoch}.png'
                                            )
                                          )
-
     if self.history['acc'] < acc:
       self.history['acc'] = acc
       self.history['loss'] = avg_loss
