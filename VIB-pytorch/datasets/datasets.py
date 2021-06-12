@@ -79,20 +79,12 @@ def return_data(args):
                        dset_dir, 
                        preprocessor,
                        'train', 
-                       splits={
-                         'train': ['train-clean-100'],
-                         'test': ['dev-clean'] 
-                       },
                        augment=True,
                        audio_feature="mfcc") 
       test_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
                        'test', 
-                       splits={
-                         'train': ['train-clean-100'],
-                         'test': ['dev-clean'] 
-                       },
                        augment=True,
                        audio_feature="mfcc") 
     else : raise UnknownDatasetError()

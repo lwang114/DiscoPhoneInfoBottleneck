@@ -21,7 +21,7 @@ def extract_visual_words(data_path, split, visual_word_file):
     {split}/{split}_with_visual_words.json : str, storing in each line dict in the form
         {"audio_id": str, 
          "text": str, transcript of the audio, 
-         "labels": str, visual words of the audio}
+         "visual_words": str, visual words of the audio}
   """
   lemmatizer = WordNetLemmatizer()
   visual_words = json.load(open(visual_word_file))

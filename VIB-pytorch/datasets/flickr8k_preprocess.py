@@ -218,7 +218,24 @@ def extract_audio_for_concepts(data_path,
     concept_info_str = "\n".join([json.dumps(c_info) for c_info in concept_info[c]])
     with open(segment_file, "w") as f:
       f.write(concept_info_str)
-              
+
+def extract_visual_words(data_path,
+                         split,
+                         min_class_size): # TODO
+  """
+  Returns:
+      flickr_audio_{split}.json : file storing the dict with items
+          {"audio_id" : str,
+           "text" : str, transcript of the audio,
+           "visual_words" : str, visual words of the audio}  
+  """
+  lemmatizer = WordNetLemmatizer()
+  visual_words = json.load(open(visual_word_file))
+  in_file = os.path.join(data_path, "flickr8k_phrases.json")
+  dataset_name = f"flickr8k_word_{min_class_size}"
+  word_f = open(os.path.join(data_path, ""))
+
+
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)

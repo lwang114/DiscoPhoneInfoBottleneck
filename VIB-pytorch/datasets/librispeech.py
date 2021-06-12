@@ -38,7 +38,9 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self, data_path,
       preprocessor, split,
       splits = {
-        "train": ["train-clean-100"],
+        "train": ["train-clean-100",
+                  "train-clean-360",
+                  "flickr_audio"],
         "test": ["dev-clean"]    
       },
       augment=False,
@@ -57,7 +59,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
                                  audio_feature=audio_feature,
                                  image_feature=image_feature)
       data.extend(examples)
-      print(f"Number of {split} audio files = {len(examples)}")
+    print(f"Number of {split} audio files = {len(data)}")
 
     # Set up transforms
     self.audio_transforms = [
@@ -150,7 +152,9 @@ class LibriSpeechPreprocessor:
     data_path,
     num_features,
     splits = {
-        "train": ["train-clean-100"],
+        "train": ["train-clean-100", 
+                  "train-clean-360",
+                  "flickr_audio"],
         "test": ["dev-clean"]
     },
     audio_feature="mfcc",
