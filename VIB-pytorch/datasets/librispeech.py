@@ -199,7 +199,14 @@ class LibriSpeechPreprocessor:
     return torch.LongTensor([self.word_to_index[t] for t in sent])
   
   def to_text(self, indices):
-    return [self.tokens[i] for i in indices] 
+    text = []
+    for t, i in enumerate(indices):
+      if (i == 0) and (t != 0):
+        prev_token = text[t-1]
+        text.append(prev_token)
+      else:
+        text.append(self.tokens[i])
+    return text
 
   def to_word_text(self, indices):
     return [self.visual_words[i] for i in indices]

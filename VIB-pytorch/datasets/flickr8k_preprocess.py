@@ -1,10 +1,12 @@
 import json
 import os
 from scipy.io import wavfile
+from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 import argparse
 import sys
 import shutil
+import tqdm
 stop_words = stopwords.words("english")
 SIL = "SIL"
 
@@ -219,21 +221,128 @@ def extract_audio_for_concepts(data_path,
     with open(segment_file, "w") as f:
       f.write(concept_info_str)
 
-def extract_visual_words(data_path,
-                         split,
-                         min_class_size): # TODO
+def match_words_with_phones(words, phones): 
+  """   
+  Returns :
+      example : a dict of
+        {"text" : str, transcript,
+         "words" : a list of dicts}
   """
-  Returns:
+  w_idx = 0
+  for phone in phones:
+    begin, end = phone["begin"], phone["end"]
+    word = word[w_idx]
+
+    if word["end"] <= begin:
+      w_idx += 1
+      if w_idx >= len(words):
+        break
+    words[w_idx]["phonemes"].append(phone)
+  return words
+
+def extract_sentence_info(data_path, split):
+  """
+  Returns :
       flickr_audio_{split}.json : file storing the dict with items
           {"audio_id" : str,
            "text" : str, transcript of the audio,
-           "visual_words" : str, visual words of the audio}  
+           "box" : a list of tuples, 
+           "words" : a list of dicts of
+               "phonemes" : a list of dicts of 
+                   "begin" : float,
+                   "end" : float,
+                   "text" : str}
   """
   lemmatizer = WordNetLemmatizer()
-  visual_words = json.load(open(visual_word_file))
-  in_file = os.path.join(data_path, "flickr8k_phrases.json")
-  dataset_name = f"flickr8k_word_{min_class_size}"
-  word_f = open(os.path.join(data_path, ""))
+  word_dir = os.path.join(data_path, "word_segmentation") 
+  phone_f = open(os.path.join(data_path, "flickr_labels.txt"), "r") 
+  split_file = os.path.join(data_path, f"splits/flickr40k_{split}.txt")
+  with open(split_file, "r") as split_f:
+    audio_ids = [line.rstrip("\n").split("/")[-1].split(".")[0] for line in f]
+  
+  sent_f = open(os.path.join(data_path, "flickr8k_sentences.json"), "w")
+  phones = None
+  words = None
+  for line in tqdm(phone_f):
+    if "align" in line:
+      audio_id = "_".join(line.rstrip("\n").split(".")[0].split("_")[1:])
+      if not audio_id in audio_ids:
+        continue
+        if words is not None:
+          example = match_words_with_phones(words, phones)
+          example["audio_id"] = os.path.join(data_path, f"flickr_audio/wavs/{audio_id}")
+          print(example["audio_id"]) # XXX
+          sent_f.write(json.dumps(example)+"\n")
+
+      phones = []
+      words = []
+      word_fn = os.path.join(word_dir, audio_id+".words")
+      if not os.path.exists(word_fn):
+        continue
+      with open(word_fn, "r") as word_f:
+        for line in word_f:
+          w, begin, end = line.split()
+          if "$" in w:
+            continue
+          w = re.sub(r"[^\w]", "", w)
+          w = re.sub(r"[0-9]", "", w)
+          words.append({"text": w, 
+                        "begin": float(begin), 
+                        "end": float(end),
+                        "phonemes": []})
+    else:
+      phn, begin, end = line.split()
+      phones.append({"text": phn,
+                     "begin": float(begin),
+                     "end": float(end)})
+  example = match_words_with_phones(words, phones)
+  sent_f.write(json.dumps(example)+"\n") 
+  phone_f.close()
+  sent_f.close()
+
+
+def extract_visual_words(data_path,
+                         split,
+                         min_class_size):
+  """
+  Add the following keys :
+    "visual_words" : a list of visual words idxs
+    "bboxes" : a list of tuple of (left, upper, right, lower)
+  """
+  lemmatizer = WordNetLemmatizer()
+  visual_classes = json.load(open(os.path.join(data_path, "phrase_classes.json")))  
+  word_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
+  in_f = open(os.path.join(data_path, f"flickr8k_sentence_{split}.json"), "r")
+  out_f = open(os.path.join(data_path, f"flickr8k_sentence_{split}_with_visual_words.json"), "w")
+
+  visual_words = dict()
+  for line in word_f:
+    phrase = json.loads(line.rstrip("\n"))
+    label = phrase["label"]
+    if visual_classes[label] < min_class_size:
+      continue 
+    
+    audio_id = phrase["audio_id"]
+    if not audio_id in visual_words:
+      visual_words[audio_id] = dict()
+      for word in phrase["children"]:
+        visual_words[audio_id][(word["begin"], word["end"])] = {"text": word["text"],
+                                                                "bbox": phrase["bbox"]}
+
+  for line in in_f:
+    sent = json.loads(line.rstrip("\n"))
+    sent["visual_words"] = []
+    sent["bboxes"] = []
+    audio_id = sent["audio_id"].split("/")[-1]
+    for w_idx, word in enumerate(sent["words"]):
+      interval = (word["begin"], word["end"])
+      if interval in visual_words[audio_id]:
+        sent["visual_words"].append(w_idx)
+        sent["bboxes"].append(visual_words[audio_id][interval]["bbox"])
+    out_f.write(json.dumps(sent)+"\n")
+  word_f.close()
+  in_f.close()
+  out_f.close()
 
 
 def main(argv):
