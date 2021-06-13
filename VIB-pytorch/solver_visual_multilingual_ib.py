@@ -10,7 +10,7 @@ import math
 from utils.utils import cuda
 from pathlib import Path
 from sklearn.metrics import accuracy_score
-from model import GumbelBLSTM, GumbelMLP
+from model import GumbelBLSTM, GumbelMLP, GumbelTDS
 from datasets.datasets import return_data 
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -70,6 +70,13 @@ class Solver(object):
                                 input_size=self.input_size,
                                 n_class=self.n_visual_class,
                                 n_gumbel_units=self.n_phone_class,
+                            ), self.cuda)
+    elif config.model_type == 'tds':
+      self.audio_net = cuda(GumbelTDS(
+                              self.K,
+                              input_size=self.input_size,
+                              n_class=self.n_visual_class,
+                              n_gumbel_units=self.n_phone_class
                             ), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
@@ -299,6 +306,10 @@ class Solver(object):
                                  f'Pred transcript: {pred_phone_names}\n\n')
 
           gold_phone_label = gold_phone_label.cpu().detach().numpy().tolist()
+          if self.audio_net.ds_ratio > 1:
+            pred_phone_label = pred_phone_label.unsqueeze(-1).expand(
+                                 -1, -1, self.audio_net.ds_ratio)\
+                                 .view(audios.size(0), -1)
           pred_phone_label = pred_phone_label.cpu().detach().numpy().tolist()
           gold_phone_labels.append(gold_phone_label)
           pred_phone_labels.append(pred_phone_label) 
