@@ -38,10 +38,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self, data_path,
       preprocessor, split,
       splits = {
-        "train": ["train-clean-100",
-                  "train-clean-360",
-                  "flickr_audio"],
-        "test": ["dev-clean"]    
+        "train": ["train-clean-100"],
+        "test": ["dev-clean"]
       },
       augment=False,
       audio_feature="mfcc",
@@ -95,7 +93,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     phonemes = [example["phonemes"] for example in data]
     self.dataset = list(zip(audio, visual_words, phonemes))
     self.audio_feature_type = audio_feature
-    self.max_feat_len = 1024
+    self.max_feat_len = 2048
     self.max_phone_num = 200
     self.max_word_num = 10
 
@@ -152,9 +150,7 @@ class LibriSpeechPreprocessor:
     data_path,
     num_features,
     splits = {
-        "train": ["train-clean-100", 
-                  "train-clean-360",
-                  "flickr_audio"],
+        "train": ["train-clean-100"],
         "test": ["dev-clean"]
     },
     audio_feature="mfcc",
