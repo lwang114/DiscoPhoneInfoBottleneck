@@ -2,6 +2,7 @@ import torch
 import torchaudio
 import torchvision
 from torchvision import transforms
+# import fairseq
 import numpy as np
 import re
 import os
@@ -22,10 +23,10 @@ def fix_embedding_length(emb, L, padding=0):
   size = emb.size()[1:]
   if emb.size(0) < L:
     if padding == 0:
-      pad = [torch.zeros(size, dtype=emb.dtype).unsqueeze(0) for _ in range(L-emb.size(0))]
+      pad = torch.zeros((L-emb.size(0),)+size, dtype=emb.dtype)
     else:
-      pad = [padding*torch.ones(size, dtype=emb.dtype).unsqueeze(0) for _ in range(L-emb.size(0))]  
-    emb = torch.cat([emb]+pad, dim=0)
+      pad = padding*torch.ones((L-emb.size(0),)+size, dtype=emb.dtype) 
+    emb = torch.cat([emb, pad], dim=0)
   else:
     emb = emb[:L]
   return emb
@@ -38,13 +39,16 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self, data_path,
       preprocessor, split,
       splits = {
-        "train": ["train-clean-100"],
+        "train": ["train-clean-100", 
+                  "train_flickr_audio",
+                  "val_flickr_audio"],
         "test": ["dev-clean"]
       },
       augment=False,
       audio_feature="mfcc",
       image_feature="image",
       sample_rate=16000,
+      wav2vec_path=None
   ):
     self.preprocessor = preprocessor
     self.splits = splits[split]
@@ -60,24 +64,32 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     print(f"Number of {split} audio files = {len(data)}")
 
     # Set up transforms
-    self.audio_transforms = [
-        torchaudio.transforms.MelSpectrogram(
-          sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
-          n_mels=preprocessor.num_features,
-          hop_length=sample_rate * 10 // 1000,
-        ),
-        torchvision.transforms.Lambda(log_normalize),
-    ]
+    self.audio_feature = audio_feature
+    if audio_feature == "mfcc":
+      self.audio_transforms = [
+          torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate, win_length=sample_rate * 25 // 1000,
+            n_mels=preprocessor.num_features,
+            hop_length=sample_rate * 10 // 1000,
+          ),
+          torchvision.transforms.Lambda(log_normalize),
+      ]
 
-    if augment:
-        augmentation = [
-                torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
-                torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
-                torchaudio.transforms.TimeMasking(100, iid_masks=True),
-                torchaudio.transforms.TimeMasking(100, iid_masks=True),
-            ]
-        self.audio_transforms.extend(augmentation)
-    self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms)
+      if augment:
+          augmentation = [
+                  torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
+                  torchaudio.transforms.FrequencyMasking(27, iid_masks=True),
+                  torchaudio.transforms.TimeMasking(100, iid_masks=True),
+                  torchaudio.transforms.TimeMasking(100, iid_masks=True),
+              ]
+          self.audio_transforms.extend(augmentation)
+      self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms) 
+    elif audio_feature == "wav2vec2":
+      self.audio_transforms = None
+    else:
+      raise ValueError(f"Feature type {audio_feature} not supported")
+
+
     ''' TODO
     self.image_transforms = transforms.Compose(
                 [transforms.Scale(256),
@@ -93,20 +105,27 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     phonemes = [example["phonemes"] for example in data]
     self.dataset = list(zip(audio, visual_words, phonemes))
     self.audio_feature_type = audio_feature
-    self.max_feat_len = 2048
+    if audio_feature == "mfcc":
+      self.max_feat_len = 2048
+    else:
+      self.max_feat_len = 1024
     self.max_phone_num = 200
     self.max_word_num = 10
 
   def load_audio(self, audio_file):
     audio, _ = torchaudio.load(audio_file)
-    inputs = self.audio_transforms(audio).squeeze(0)
-    inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t() 
-    
-    nframes = inputs.size(-1)
+    if self.audio_feature == "mfcc":
+      inputs = self.audio_transforms(audio).squeeze(0) 
+      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()      
+      nframes = inputs.size(-1)
+    elif self.audio_feature == "wav2vec2":
+      inputs = fix_embedding_length(audio.t(), (self.max_feat_len+1)*320).t()
+      inputs = inputs.squeeze(0)
+      nframes = int(inputs.size(0) // 320)
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
     return inputs, input_mask
-  
+
   def __getitem__(self, idx): 
     audio_file, visual_words, phonemes = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
@@ -124,7 +143,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     phone_mask = torch.zeros(self.max_phone_num)
     n_phones = len(sent)
     phone_mask[:n_phones] = 1.
-
+    
     word_mask = torch.zeros(self.max_word_num, self.max_feat_len)
     for i, w in enumerate(visual_words):
       begin_frame = int(w['begin']*100)
@@ -150,7 +169,9 @@ class LibriSpeechPreprocessor:
     data_path,
     num_features,
     splits = {
-        "train": ["train-clean-100"],
+        "train": ["train-clean-100", 
+                  "train_flickr_audio",
+                  "val_flickr_audio"],
         "test": ["dev-clean"]
     },
     audio_feature="mfcc",
@@ -244,10 +265,21 @@ def load_data_split(data_path, sp,
     # if idx > 200: # XXX
     #   break
     label_dict = json.loads(line.rstrip("\n"))
-    utt_id = label_dict["utterance_id"] 
+    if "utterance_id" in label_dict:
+      utt_id = label_dict["utterance_id"] 
+    else:
+      utt_id = label_dict["audio_id"]
     visual_words = [label_dict["words"][i] for i in label_dict["visual_words"]]
-    phonemes = [phn for w in label_dict["words"] for phn in w["phonemes"]]
-    audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
+    phonemes_with_stress = [phn for w in label_dict["words"] for phn in w["phonemes"]]
+    phonemes = []
+    for phn in phonemes_with_stress: # Remove stress label
+      phn["text"] = re.sub(r"[0-9]", "", phn["text"])
+      phonemes.append(phn)
+      
+    if len(utt_id.split("/")) > 1:
+      audio_path = f"{utt_id}.wav"
+    else:
+      audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
     if os.path.exists(audio_path):
       example = {"audio": audio_path,
                  "visual_words": visual_words,

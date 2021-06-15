@@ -3,6 +3,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
+import fairseq
 import argparse
 import os
 import json
@@ -31,10 +32,24 @@ class Solver(object):
     self.anneal_rate = config.get('anneal_rate', 3e-6)
     self.num_sample = config.get('num_sample', 1)
     self.eps = 1e-9
+    self.max_grad_norm = config.get('max_grad_norm', None)
     if config.audio_feature == 'mfcc':
+      self.audio_feature_net = None
       self.input_size = 80
+      self.hop_len_ms = 10
+    elif config.audio_feature == 'wav2vec2':
+      # XXX 
+      self.audio_feature_net = cuda(fairseq.checkpoint_utils.load_model_ensemble_and_task([config.wav2vec_path])[0][0],
+                                    self.cuda)
+      self.input_size = 512
+      self.hop_len_ms = 20 
+    else:
+      raise ValueError(f"Feature type {config.audio_feature} not supported")
     # TODO CPC feature
-    
+
+    for p in self.audio_feature_net.parameters():
+      p.requires_grad = False
+   
     self.K = config.K
     self.global_iter = 0
     self.global_epoch = 0
@@ -73,15 +88,18 @@ class Solver(object):
                             ), self.cuda)
     elif config.model_type == 'tds':
       self.audio_net = cuda(GumbelTDS(
-                              self.K,
                               input_size=self.input_size,
                               n_class=self.n_visual_class,
                               n_gumbel_units=self.n_phone_class
                             ), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
-    self.optim = optim.Adam(trainables,
-                            lr=self.lr, betas=(0.5,0.999))
+    optim_type = config.get('optim', 'adam')
+    if optim_type == 'sgd':
+      self.optim = optim.SGD(trainables, lr=self.lr)
+    else:
+      self.optim = optim.Adam(trainables,
+                              lr=self.lr, betas=(0.5,0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
     self.ckpt_dir = Path(config.ckpt_dir)
     if not self.ckpt_dir.exists(): 
@@ -101,8 +119,12 @@ class Solver(object):
   def set_mode(self, mode='train'):
     if mode == 'train':
       self.audio_net.train()
+      if self.audio_feature_net is not None: 
+        self.audio_feature_net.train()
     elif mode == 'eval':
       self.audio_net.eval()
+      if self.audio_feature_net is not None:
+        self.audio_feature_net.eval() 
     else:
       raise('mode error. It should be either train or eval')
 
@@ -127,12 +149,18 @@ class Solver(object):
         if idx > 2 and self.debug:
           break
         self.global_iter += 1
+         
         x = cuda(audios, self.cuda)
+        if self.audio_feature == "wav2vec2":
+          x = self.audio_feature_net.feature_extractor(x)
         phoneme_labels = cuda(phoneme_labels, self.cuda)
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         phone_masks = cuda(phone_masks, self.cuda)
         word_masks = cuda(word_masks, self.cuda)
+        if self.audio_net.ds_ratio > 1:
+          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
+          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]
 
         audio_lens = audio_masks.sum(-1).long()
         sent_lens = phone_masks.sum(-1).long()
@@ -166,6 +194,11 @@ class Solver(object):
 
         self.optim.zero_grad()
         loss.backward()
+        if self.max_grad_norm is not None:
+          torch.nn.utils.clip_grad_norm_(
+            self.audio_net.parameters(),
+            self.max_grad_norm
+          )
         self.optim.step()
   
         for i in range(audios.size(0)):
@@ -243,12 +276,18 @@ class Solver(object):
           break
         if b_idx == 0:
           B = audios.size(0)
+          
         audios = cuda(audios, self.cuda)
+        if self.audio_feature == 'wav2vec2':
+          audios = self.audio_feature_net.feature_extractor(audios)
         phoneme_labels = cuda(phoneme_labels, self.cuda)
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         phone_masks = cuda(phone_masks, self.cuda)
         word_masks = cuda(word_masks, self.cuda)
+        if self.audio_net.ds_ratio > 1:
+          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
+          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]
         
         audio_lens = audio_masks.sum(-1).long()
         sent_lens = phone_masks.sum(-1).long()
@@ -306,10 +345,10 @@ class Solver(object):
                                  f'Pred transcript: {pred_phone_names}\n\n')
 
           gold_phone_label = gold_phone_label.cpu().detach().numpy().tolist()
-          if self.audio_net.ds_ratio > 1:
-            pred_phone_label = pred_phone_label.unsqueeze(-1).expand(
-                                 -1, -1, self.audio_net.ds_ratio)\
-                                 .view(audios.size(0), -1)
+          if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
+            us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
+            pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                                 .expand(-1, us_ratio).flatten()
           pred_phone_label = pred_phone_label.cpu().detach().numpy().tolist()
           gold_phone_labels.append(gold_phone_label)
           pred_phone_labels.append(pred_phone_label) 

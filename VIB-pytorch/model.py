@@ -158,10 +158,10 @@ class GumbelTDS(torch.nn.Module):
                    { "channels" : 16, "num_blocks" : 5 }],
                  kernel_size=5, 
                  dropout=0.2,
-                 n_classes=258,
-                 num_gumbel_units=49,
+                 n_class=258,
+                 n_gumbel_units=49,
                  input_size=80):
-        super(TDS, self).__init__()
+        super(GumbelTDS, self).__init__()
         modules = []
         in_channels = input_size
         for tds_group in tds_groups:
@@ -187,8 +187,8 @@ class GumbelTDS(torch.nn.Module):
                 )
             in_channels = out_channels
         self.tds = torch.nn.Sequential(*modules)
-        self.bottleneck = torch.nn.Linear(in_channels, num_gumbel_units)
-        self.linear = torch.nn.Linear(num_gumbel_units, output_size)
+        self.bottleneck = torch.nn.Linear(in_channels, n_gumbel_units)
+        self.linear = torch.nn.Linear(n_gumbel_units, n_class)
         self.ds_ratio = 2 ** len(tds_groups)
 
     def forward(self, inputs,
@@ -202,9 +202,7 @@ class GumbelTDS(torch.nn.Module):
         in_logits = self.bottleneck(embeddings)
 
         if masks is not None:
-          n_logits = int(inputs.size(-1) // self.ds_ratio)
-          masks = masks[:, ::self.ds_ratio]
-          in_logits = in_logits[:, :n_logits] * masks.unsqueeze(2)
+          in_logits = in_logits * masks.unsqueeze(2)
         encodings = self.reparametrize_n(in_logits,
                                          n=num_sample,
                                          temp=temp)
@@ -220,10 +218,10 @@ class GumbelTDS(torch.nn.Module):
             embeddings = embeddings / masks.sum(-1, keepdim=True)
           else:
             embeddings = embeddings.sum(-2)
-          return logits, out_logits, encodings, embeddings 
-        return logits, out_logits 
+          return in_logits, out_logits, encodings, embeddings 
+        return in_logits, out_logits 
     
-    def reparametrize_n(self, logits, n=1, temp=1.):
+    def reparametrize_n(self, x, n=1, temp=1.):
       def expand(v):
         if v.ndim < 1:
           return torch.Tensor([v]).expand(n, 1)
@@ -342,7 +340,7 @@ class GumbelBLSTM(nn.Module):
     elif x.dim() > 3:
         x = x.squeeze(1)
     x = x.permute(0, 2, 1)
-        
+    
     B = x.size(0)
     T = x.size(1)
     if self.bidirectional:
@@ -376,7 +374,7 @@ class GumbelBLSTM(nn.Module):
     if return_feat:
         embedding = embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1)
         if masks is not None:
-          embedding = (embedding * masks.unsqueeze(-1)).sum(dim=-2) / masks.sum(-1).unsqueeze(-1) 
+          embedding = embedding.sum(-2) # TODO * masks.unsqueeze(-1)).sum(dim=-2) / masks.sum(-1).unsqueeze(-1) 
         else:
           embedding = embedding.sum(-2)
         return in_logit, logit, encoding, embedding
