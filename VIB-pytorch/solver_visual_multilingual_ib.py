@@ -38,17 +38,14 @@ class Solver(object):
       self.input_size = 80
       self.hop_len_ms = 10
     elif config.audio_feature == 'wav2vec2':
-      # XXX 
       self.audio_feature_net = cuda(fairseq.checkpoint_utils.load_model_ensemble_and_task([config.wav2vec_path])[0][0],
                                     self.cuda)
+      for p in self.audio_feature_net.parameters():
+        p.requires_grad = False
       self.input_size = 512
       self.hop_len_ms = 20 
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
-    # TODO CPC feature
-
-    for p in self.audio_feature_net.parameters():
-      p.requires_grad = False
    
     self.K = config.K
     self.global_iter = 0
@@ -240,8 +237,8 @@ class Solver(object):
     total_num = 0.
     gold_labels = []
     pred_labels = []
-    if not self.ckpt_dir.joinpath('feats').is_dir():
-      self.ckpt_dir.joinpath('feats').mkdir()
+    if not self.ckpt_dir.joinpath('outputs/phonetic/dev-clean').is_dir():
+      os.makedirs(self.ckpt_dir.joinpath('outputs/phonetic/dev-clean'))
 
     gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
     out_word_file = os.path.join(
@@ -332,9 +329,9 @@ class Solver(object):
                                   )
             word_f.write(f'{audio_id}\t{gold_word_names}\t{pred_word_names}\n')
 
-            feat_fn = self.ckpt_dir.joinpath(f'feats/{audio_id}.txt')
-            if save_embedding:
-              np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]].cpu().detach().numpy())
+          feat_fn = self.ckpt_dir.joinpath(f'outputs/phonetic/dev-clean/{audio_id}.txt')
+          if save_embedding:
+            np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]].cpu().detach().numpy())
            
           gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
           pred_phone_label = encoding[idx, :audio_lens[idx]].max(-1)[1]
@@ -353,6 +350,8 @@ class Solver(object):
           gold_phone_labels.append(gold_phone_label)
           pred_phone_labels.append(pred_phone_label) 
           
+          pred_phone_label = preprocessor.to_index(preprocessor.to_text(pred_phone_label))
+          pred_phone_label = pred_phone_label.cpu().detach().numpy().tolist()
           pred_phone_names = ','.join([str(p) for p in pred_phone_label])
           phone_f.write(f'{audio_id} {pred_phone_names}\n')  
    

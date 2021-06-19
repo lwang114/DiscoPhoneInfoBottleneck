@@ -246,16 +246,20 @@ class GumbelMLP(nn.Module):
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
+    self.conv = nn.Conv2d(1, embedding_dim,
+                          kernel_size=(input_size, 5),
+                          stride=(1, 1),
+                          padding=(0, 2)) # nn.Linear(input_size, embedding_dim),
+
     self.mlp = nn.Sequential(
-                 nn.Linear(input_size, embedding_dim),
                  nn.ReLU(),
-                 nn.Dropout(0.3),
+                 nn.Dropout(0.2),
                  nn.Linear(embedding_dim, embedding_dim),
                  nn.ReLU(),
-                 nn.Dropout(0.3),
+                 nn.Dropout(0.2),
                  nn.Linear(embedding_dim, embedding_dim),
                  nn.ReLU(),
-                 nn.Dropout(0.3)
+                 nn.Dropout(0.2)
                )
     self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
     self.decode = nn.Linear(n_gumbel_units, self.n_class)
@@ -266,10 +270,11 @@ class GumbelMLP(nn.Module):
               masks=None,
               temp=1.,
               return_feat=False):
-    x = x.permute(0, 2, 1)
     B = x.size(0)
-    D = x.size(2)
-    embed = self.mlp(x)
+    D = x.size(1)
+    embed = self.conv(x.unsqueeze(1)).squeeze(2)
+    embed = embed.permute(0, 2, 1)
+    embed = self.mlp(embed)
     logits = self.bottleneck(embed) 
 
     if masks is not None:

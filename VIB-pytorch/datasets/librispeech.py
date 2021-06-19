@@ -39,9 +39,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self, data_path,
       preprocessor, split,
       splits = {
-        "train": ["train-clean-100", 
-                  "train_flickr_audio",
-                  "val_flickr_audio"],
+        "train": ["train-clean-100"],
         "test": ["dev-clean"]
       },
       augment=False,
@@ -84,8 +82,10 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
               ]
           self.audio_transforms.extend(augmentation)
       self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms) 
+      self.hop_length = 10
     elif audio_feature == "wav2vec2":
       self.audio_transforms = None
+      self.hop_length = 20
     else:
       raise ValueError(f"Feature type {audio_feature} not supported")
 
@@ -146,8 +146,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     
     word_mask = torch.zeros(self.max_word_num, self.max_feat_len)
     for i, w in enumerate(visual_words):
-      begin_frame = int(w['begin']*100)
-      end_frame = int(w['end']*100)
+      begin_frame = int(w['begin']*1000/self.hop_length)
+      end_frame = int(w['end']*1000/self.hop_length)
       word_mask[i, begin_frame:end_frame] = 1.
 
     return audio_inputs,\
@@ -169,9 +169,7 @@ class LibriSpeechPreprocessor:
     data_path,
     num_features,
     splits = {
-        "train": ["train-clean-100", 
-                  "train_flickr_audio",
-                  "val_flickr_audio"],
+        "train": ["train-clean-100"],
         "test": ["dev-clean"]
     },
     audio_feature="mfcc",
