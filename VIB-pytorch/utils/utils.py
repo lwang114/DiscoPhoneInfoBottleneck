@@ -35,3 +35,64 @@ class Weight_EMA_Update(object):
             #state_dict[key] = (1-self.decay)*state_dict[key] + (self.decay)*new_state_dict[key]
 
         self.model.load_state_dict(state_dict)
+
+def convert_item_to_output_format(item_file, 
+                                  output_file, 
+                                  frame_rate=0.01,
+                                  max_len=2048): # TODO
+  """
+  Args:
+      item_file : str, path to file of format
+          line 0 : whatever
+          line > 0 : {audio id} {onset} {offset} {phn} {prev phn} {next phn} {spk}
+          onset : beginning of the triplet (in s)
+          offset : end of the triplet (in s)
+          frame_rate : float, frame rate per feature frame (in s)
+      output_file : str, path to output file of format
+          {audio id} {phone idxs separated by commas}
+  """
+  tokens = set() 
+  triplets = dict()
+  audio_ids = []
+  with open(item_file, 'r') as in_f,\
+       open(output_file, 'r') as out_f:
+    for idx, line in enumerate(in_f):
+      if idx == 0:
+        continue
+      audio_id, begin, end, phn, _, _, _ = line.rstrip().split()
+      if not phn in tokens:
+        tokens.add(phn)
+      
+      if not audio_id in triplets:
+        triplets[audio_id] = []
+      begin = int(float(begin) / frame_rate)
+      end = int(float(end) / frame_rate)
+      triplets[audio_id].append((begin, end, phn))
+      audio_ids.append(audio_id)
+
+    tokens = ['BLANK']+sorted(tokens)
+    stoi = {t:i for i, t in enumerate(tokens)}
+
+    for audio_id in audio_ids:
+      sequence = ['0']*max_len
+      for i, tri in enumerate(sorted(triplets[audio_id])):
+        if i == 0:
+          begin = tri[0]
+        else:
+          begin = max(triplets[audio_id][i-1], tri[0])
+
+        if i == len(triplets[audio_id]) - 1:
+          end = tri[1]
+        else:
+          end = min(triplets[audio_id][i+1], tri[1])
+        if max(begin, end) > max_len:
+          continue 
+        sequence[begin:end] = str(stoi[tri[2]])
+      sequence_str = ','.join(sequence)
+      out_f.write(f'{audio_id} {sequence_str}\n')
+
+if __name__ == '__main__':
+  convert_item_to_output_format('../../../../data/zerospeech2021-dataset/phonetic/dev-clean/dev-clean.item',
+                                'gold_quantized_outputs.txt',
+                                frame_rate=0.02,
+                                max_len=1024)        
