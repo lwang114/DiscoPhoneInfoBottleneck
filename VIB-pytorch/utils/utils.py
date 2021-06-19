@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 
-
+SIL = "SIL"
 def str2bool(v):
     """
     codes from : https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
@@ -41,7 +41,7 @@ def convert_item_to_output_format(item_file,
                                   frame_rate=0.01,
                                   max_len=2048): # TODO
   """
-  Args:
+  Args :
       item_file : str, path to file of format
           line 0 : whatever
           line > 0 : {audio id} {onset} {offset} {phn} {prev phn} {next phn} {spk}
@@ -56,6 +56,7 @@ def convert_item_to_output_format(item_file,
   audio_ids = []
   with open(item_file, 'r') as in_f,\
        open(output_file, 'r') as out_f:
+    out_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
     for idx, line in enumerate(in_f):
       if idx == 0:
         continue
@@ -91,8 +92,49 @@ def convert_item_to_output_format(item_file,
       sequence_str = ','.join(sequence)
       out_f.write(f'{audio_id} {sequence_str}\n')
 
+def convert_json_to_item(json_path, output_path):
+  """
+  Args :
+      json_path : str, .json file, each line storing a dict of
+          {"utterance_id" : str,
+           "words" : a list of list of word boundary info}
+ 
+      output_path : str, path to .item file of format
+          line 0 : whatever
+          line > 0 : {audio id} {onset} {offset} {phn} {prev phn} {next phn} {spk}
+          onset : beginning of the triplet (in s)
+          offset : end of the triplet (in s)
+          frame_rate : float, frame rate per feature frame (in s)
+  """
+  with open(json_path, 'r') as in_f,\
+       open(output_path, 'w') as out_f:
+    out_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+    for line in in_f:
+      label_dict = json.loads(line.rstrip('\n'))
+      if 'utterance_id' in label_dict:
+        utt_id = label_dict['utterance_id']
+      else:
+        utt_id = label_dict['audio_id']
+      
+      phonemes_with_stress = [phn for w in label_dict['words'] for phn in w['phonemes']]
+      for phn_idx, phn in enumerate(phonemes_with_stress):
+        token = re.sub(r'[0-9]', '', phn['text'])
+        if phn_idx == 0:
+          prev_token = SIL
+        else:
+          prev_token = re.sub(r'[0-9]', '', phonemes_with_stress[phn_idx-1]['text']) 
+        
+        if phn_idx == len(phonemes_with_stress) - 1:
+          next_token = SIL
+        else:
+          next_token = re.sub(r'[0-9]', '', phonemes_with_stress[phn_idx+1]['text']) 
+        
+        out_f.write('{utt_id} {phn["begin"]} {phn["end"]} {token} {prev_token} {next_token} 0\n') 
+  
+
 if __name__ == '__main__':
-  convert_item_to_output_format('../../../../data/zerospeech2021-dataset/phonetic/dev-clean/dev-clean.item',
-                                'gold_quantized_outputs.txt',
-                                frame_rate=0.02,
-                                max_len=1024)        
+  # convert_item_to_output_format('../../../../data/zerospeech2021-dataset/phonetic/dev-clean/dev-clean.item',
+  #                              'gold_quantized_outputs.txt',
+  #                              frame_rate=0.01,
+  #                              max_len=2048)
+  convert_json_to_item('../../../../data/zerospeech2021-dataset/phonetic/dev-clean/dev-clean.json', 'dev-clean_nonoverlap.item')        
