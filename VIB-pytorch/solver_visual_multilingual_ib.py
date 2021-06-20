@@ -37,6 +37,7 @@ class Solver(object):
       self.audio_feature_net = None
       self.input_size = 80
       self.hop_len_ms = 10
+
     elif config.audio_feature == 'wav2vec2':
       self.audio_feature_net = cuda(fairseq.checkpoint_utils.load_model_ensemble_and_task([config.wav2vec_path])[0][0],
                                     self.cuda)
@@ -71,8 +72,8 @@ class Solver(object):
                               self.K,
                               input_size=self.input_size,
                               n_layers=self.n_layers,
-                              n_class=self.n_visual_class,
-                              n_gumbel_units=self.n_phone_class,
+                              n_class=self.n_visual_class+self.n_phone_class,
+                              n_gumbel_units=40,
                               ds_ratio=1,
                               bidirectional=True), self.cuda)
       self.K = 2 * self.K
@@ -80,14 +81,14 @@ class Solver(object):
       self.audio_net = cuda(GumbelMLP(
                                 self.K,
                                 input_size=self.input_size,
-                                n_class=self.n_visual_class,
-                                n_gumbel_units=self.n_phone_class,
+                                n_class=self.n_visual_class+self.n_phone_class,
+                                n_gumbel_units=40,
                             ), self.cuda)
     elif config.model_type == 'tds':
       self.audio_net = cuda(GumbelTDS(
                               input_size=self.input_size,
-                              n_class=self.n_visual_class,
-                              n_gumbel_units=self.n_phone_class
+                              n_class=self.n_phone_class+self.n_phone_class,
+                              n_gumbel_units=40,
                             ), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
@@ -163,11 +164,13 @@ class Solver(object):
         sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
 
-        phone_logits, word_logits, _, embedding = self.audio_net(
+        gumbel_logits, out_logits, _, embedding = self.audio_net(
                                x, masks=audio_masks,
                                temp=temp,
                                num_sample=self.num_sample,
                                return_feat=True)
+        phone_logits = out_logits[:self.n_phone_class]
+        word_logits = out_logits[self.n_phone_class:]
         word_logits = torch.matmul(word_masks, word_logits)
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
                                     ignore_index=-100,
@@ -177,8 +180,8 @@ class Solver(object):
                                 phoneme_labels,
                                 audio_lens,
                                 sent_lens) 
-        info_loss = (F.softmax(phone_logits, dim=-1)\
-                      * F.log_softmax(phone_logits, dim=-1)
+        info_loss = (F.softmax(gumbel_logits, dim=-1)\
+                      * F.log_softmax(gumbel_logits, dim=-1)
                     ).sum().div(sent_lens.sum()*math.log(2)) 
         loss = self.weight_phone_loss * phone_loss +\
                self.weight_word_loss * word_loss +\
@@ -290,10 +293,12 @@ class Solver(object):
         sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
         
-        phone_logits, word_logits, encoding, embedding = self.audio_net(
+        gumbel_logits, out_logits, encoding, embedding = self.audio_net(
                                                            audios, masks=audio_masks,
-                                                           return_feat=True)
+                                                           return_feat=True) # TODO
 
+        phone_logits = out_logits[:self.n_phone_class]
+        word_logits = out_logits[self.n_phone_class:]
         word_logits = torch.matmul(word_masks, word_logits)
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), 
                                     word_labels,
@@ -304,8 +309,8 @@ class Solver(object):
                                 phoneme_labels,
                                 audio_lens,
                                 sent_lens)
-        info_loss = (F.softmax(phone_logits, dim=-1)\
-                      * F.log_softmax(phone_logits, dim=-1)
+        info_loss = (F.softmax(gumbel_logits, dim=-1)\
+                      * F.log_softmax(gumbel_logits, dim=-1)
                     ).sum().div(sent_lens.sum() * math.log(2))
         total_loss += word_loss + phone_loss + self.beta * info_loss
         total_num += 1. 
