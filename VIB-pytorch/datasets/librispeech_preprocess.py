@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import json
 import argparse
 import nltk
@@ -7,6 +8,7 @@ from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
 stop_words = stopwords.words("english")
+IGNORE_TOKENS = ["ʰ", "ʼ"] 
 def extract_visual_words(data_path, split, visual_word_file):
   """
   Args :
@@ -57,7 +59,7 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
   """
   Args :
     data_path : str, path to the LibriSpeech root
-    split : str, {train-clean-100, train-clean-369, train-other-500}
+    split : str, {train-clean-100, train-clean-360, train-other-500}
     pseudo_phone_file : str, storing a dict of
       {"utts" : 
           {audio_id} : 
@@ -72,17 +74,15 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
   out_file = os.path.join(data_path, split, f"{split}_with_pseudo_phones.json")
   in_f = open(in_file, "r")
   out_f = open(out_file, "w")
-  n_sents = 0
-  n_words = 0
   tokens = set()
 
   for line in in_f:
     sent_dict = json.loads(line.rstrip("\n"))
-    audio_id = sent_dict["audio_id"]
-    rec_tokens = pseudo_phones[audio_id]["output"][0]["rec_tokens"]
+    audio_id = sent_dict["utterance_id"]
+    rec_tokens = pseudo_phones[audio_id]["output"][0]["rec_token"]
     sent_dict["pseudo_phones"] = []
     for phn in rec_tokens.split():
-      if phn in IGNORE_TOKENS: # TODO
+      if phn in IGNORE_TOKENS or (phn[0] == '<'):
         continue
       if not phn in tokens:
         tokens.add(phn)
@@ -90,6 +90,7 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
     out_f.write(json.dumps(sent_dict)+"\n") 
   in_f.close()
   out_f.close()
+  print(tokens)
   print(f"Pseudo-phone set size: {len(tokens)}")
    
 def main(argv):
@@ -103,7 +104,8 @@ def main(argv):
     visual_word_file = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/phrase_classes.json"
     extract_visual_words(args.data_path, args.split, visual_word_file)
   elif args.TASK == 1:
-    pseudo_phone_file = "/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_librispeech/train_clean_100_decode_li10/data.json"
+    split = re.sub("-", "_", args.split)
+    pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_librispeech/{split}_decode_li10/data.json"
     extract_pseudo_phones(args.data_path, args.split, pseudo_phone_file)
 
 if __name__ == "__main__":
