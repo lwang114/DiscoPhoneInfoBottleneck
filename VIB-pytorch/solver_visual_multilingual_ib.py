@@ -67,14 +67,15 @@ class Solver(object):
                         .dataset.preprocessor.visual_words 
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
-   
+  
+    self.model_type = config.model_type 
     if config.model_type == 'blstm':
       self.audio_net = cuda(GumbelBLSTM(
                               self.K,
                               input_size=self.input_size,
                               n_layers=self.n_layers,
-                              n_class=self.n_visual_class+self.n_phone_class,
-                              n_gumbel_units=40,
+                              n_class=self.n_visual_class,
+                              n_gumbel_units=self.n_phone_class,
                               ds_ratio=1,
                               bidirectional=True), self.cuda)
       self.K = 2 * self.K
@@ -82,16 +83,22 @@ class Solver(object):
       self.audio_net = cuda(GumbelMLP(
                                 self.K,
                                 input_size=self.input_size,
-                                n_class=self.n_visual_class+self.n_phone_class,
-                                n_gumbel_units=40,
+                                n_class=self.n_visual_class,
+                                n_gumbel_units=self.n_phone_class,
                             ), self.cuda)
     elif config.model_type == 'tds':
       self.audio_net = cuda(GumbelTDS(
                               input_size=self.input_size,
-                              n_class=self.n_phone_class+self.n_phone_class,
-                              n_gumbel_units=40,
+                              n_class=self.n_visual_class,
+                              n_gumbel_units=self.n_phone_class,
                             ), self.cuda)
-    self.word_to_phone_net = cuda(nn.Linear(self.n_visual_class, self.n_phone_class), self.cuda)
+    elif config.model_type == 'vq-mlp':
+      self.audio_net = cuda(VQMLP(
+                              input_size=self.input_size,
+                              n_class=self.n_visual_class,
+                              n_embeddings=self.n_phone_class
+                            ), self.cuda) 
+    # self.word_to_phone_net = cuda(nn.Linear(self.n_visual_class, self.n_phone_class), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
@@ -171,11 +178,16 @@ class Solver(object):
                                temp=temp,
                                num_sample=self.num_sample,
                                return_feat=True)
-        phone_logits = out_logits[:, :, :self.n_phone_class]
-        word_logits = out_logits[:, :, self.n_phone_class:]
-        phone_logits = phone_logits\
-                         + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
-                         * self.word_to_phone_net(word_logits)
+        phone_logits = gumbel_logits
+        word_logits = out_logits
+        quantized = None
+        if self.model_type == 'vq-mlp':
+          word_logits = out_logits[:self.n_visual_class]
+          quantized = out_logits[self.n_visual_class:]
+
+        # phone_logits = phone_logits\
+        #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
+        #                  * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
 
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
@@ -192,7 +204,10 @@ class Solver(object):
         loss = self.weight_phone_loss * phone_loss +\
                self.weight_word_loss * word_loss +\
                self.beta * info_loss
-        
+        if self.model_type == 'vq-mlp':
+          loss += self.audio_net.module.quantize_loss(embedding, quantized,
+                                                      masks=audio_masks)
+
         izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
         total_loss += loss.cpu().detach().numpy()
@@ -303,11 +318,14 @@ class Solver(object):
                                                            audios, masks=audio_masks,
                                                            return_feat=True)
 
-        phone_logits = out_logits[:, :, :self.n_phone_class]
-        word_logits = out_logits[:, :, self.n_phone_class:]
-        phone_logits = phone_logits\
-                         + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
-                         * self.word_to_phone_net(word_logits)
+        phone_logits = gumbel_logits
+        word_logits = out_logits
+        if self.model_type == 'vq-mlp':
+          word_logits = out_logits[:self.n_visual_class]
+
+        # phone_logits = phone_logits\
+        #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
+        #                  * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), 
                                     word_labels,
