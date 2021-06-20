@@ -39,7 +39,7 @@ class VQCPCEncoder(nn.Module):
     def forward(self, mels):
         z = self.conv(mels)
         z = self.encoder(z.transpose(1, 2))
-        z, loss = self.codebook(z)
+        z, d, loss = self.codebook(z)
         c, _ = self.rnn(z)
         return z, c, loss
 
@@ -103,8 +103,68 @@ class VQEmbeddingEMA(nn.Module):
         avg_probs = torch.mean(encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        return quantized, loss
+        return quantized, distances, loss
 
+class VQMLP(torch.nn.Module):
+  def __init__(self, 
+               embedding_dim,
+               n_layers=1,
+               n_class=65,
+               n_embeddings=40,
+               input_size=80):
+    super(VQMLP, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.conv = nn.Conv2d(1, embedding_dim,
+                          kernel_size=(input_size, 5),
+                          stride=(1, 1),
+                          padding=(0, 2))
+    self.mlp = nn.Sequential(
+                 nn.LayerNorm(embedding_dim),
+                 nn.Dropout(0.2),
+                 nn.ReLU(),
+                 nn.Linear(embedding_dim, embedding_dim),
+                 nn.LayerNorm(embedding_dim),
+
+                 nn.Dropout(0.2),
+                 nn.ReLU(),
+                 nn.Linear(embedding_dim, embedding_dim),
+                 nn.LayerNorm(embedding_dim),
+                 nn.Dropout(0.2),
+                 nn.ReLU()
+               )
+    self.bottleneck = VQEmbeddingEMA(n_embeddings, embedding_dim)
+    self.decode = nn.Linear(n_embeddings, self.n_class)
+    self.ds_ratio = 1
+
+  def forward(self, x,
+              num_sample=1,
+              masks=None,
+              temp=1.,
+              return_feat=False):
+    B = x.size(0)
+    D = x.size(1)
+    embed = self.conv(x.unsqueeze(1)).squeeze(2)  
+    embed = embed.permute(0, 2, 1)
+    embed = self.mlp(embed)
+    quantized, logits, loss = self.bottleneck(embed)
+
+    logits = logits / temp
+    encoding = F.softmax(logits, dim=-1)
+    if masks is not None:
+      quantized = quantized * masks.unsqueeze(2)
+      logits = logits * masks.unsqueeze(2)
+    out = self.decode(encoding)
+    out = torch.cat((out, quantized), dim=2)
+    if return_feat:
+      return logits, out, encoding, embed 
+    else:
+      return logits, out
+    
+  def quantize_loss(embed, quantized, masks=None):
+    return self.bottleneck.commitment_cost * F.mse_loss(masks.unsqueeze(2) * embed, 
+      masks.unsqueeze(2) * quantized.detach())
 
 class TDSBlock(torch.nn.Module):
     def __init__(self, in_channels, num_features, kernel_size, dropout):
@@ -240,7 +300,7 @@ class GumbelMLP(nn.Module):
                embedding_dim,
                n_layers=1,
                n_class=65,
-               n_gumbel_units=49,
+               n_gumbel_units=40,
                input_size=80):
     super(GumbelMLP, self).__init__()
     self.K = embedding_dim
