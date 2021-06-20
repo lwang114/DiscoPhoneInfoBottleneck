@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
 import fairseq
@@ -90,6 +91,7 @@ class Solver(object):
                               n_class=self.n_phone_class+self.n_phone_class,
                               n_gumbel_units=40,
                             ), self.cuda)
+    self.word_to_phone_net = cuda(nn.Linear(self.n_visual_class, self.n_phone_class), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
@@ -169,9 +171,13 @@ class Solver(object):
                                temp=temp,
                                num_sample=self.num_sample,
                                return_feat=True)
-        phone_logits = out_logits[:self.n_phone_class]
-        word_logits = out_logits[self.n_phone_class:]
+        phone_logits = out_logits[:, :, :self.n_phone_class]
+        word_logits = out_logits[:, :, self.n_phone_class:]
+        phone_logits = phone_logits\
+                         + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
+                         * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
+
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
                                     ignore_index=-100,
                                     ).div(math.log(2))
@@ -295,10 +301,13 @@ class Solver(object):
         
         gumbel_logits, out_logits, encoding, embedding = self.audio_net(
                                                            audios, masks=audio_masks,
-                                                           return_feat=True) # TODO
+                                                           return_feat=True)
 
-        phone_logits = out_logits[:self.n_phone_class]
-        word_logits = out_logits[self.n_phone_class:]
+        phone_logits = out_logits[:, :, :self.n_phone_class]
+        word_logits = out_logits[:, :, self.n_phone_class:]
+        phone_logits = phone_logits\
+                         + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
+                         * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), 
                                     word_labels,
