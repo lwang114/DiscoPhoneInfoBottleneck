@@ -115,11 +115,19 @@ def compute_token_f1(pred_path, gold_path, out_path):
     if len(gold_dirs):
       continue
     else:
-      for gold_file in gold_files:
-        if gold_file.endswith('.item'):
-          gold_file_path = os.path.join(gold_root, gold_file)
-          _extract_gold_units(gold_file_path)
-          break
+      nonoverlap_candidates = [gold_file for gold_file in gold_files if gold_file.split('_')[-1] == 'nonoverlap.item']
+      candidates = [gold_file for gold_file in gold_files if gold_file.endswith('.item')]
+      
+      if len(nonoverlap_candidates):
+        gold_file = nonoverlap_candidates[0]
+        print(gold_file) # XXX
+      elif len(candidates):
+        gold_file = candidates[0]
+      else:
+        continue
+      gold_file_path = os.path.join(gold_root, gold_file)
+      _extract_gold_units(gold_file_path)
+    
 
   pred_units = dict()
   pred_tokens = set()
@@ -143,7 +151,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
           end = interval[1]
         else:
           end = min(gold_unit[i+1][0], interval[1])
-        pred_units[sent_id][interval] = pred_unit[begin:end+1] 
+        pred_units[sent_id][interval] = pred_unit[begin:end] 
 
   n_gold_tokens = len(gold_tokens)
   n_pred_tokens = len(pred_tokens)
@@ -157,7 +165,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
       for pred_unit in pred_units[sent_id][interval]:
         p_idx = pred_stoi[pred_unit]
         confusion[g_idx, p_idx] += 1
-  
+        
   n = confusion.sum()
   token_recall = confusion.max(1).sum() / n
   token_precision = confusion.max(0).sum() / n
@@ -222,9 +230,32 @@ def main():
     conf_df.to_csv('confusion_matrix.csv')
   elif args.task == 1:
     gold_path = config['data_path']
-    pred_path = os.path.join(config['model_path'], 'quantized_outputs.txt')
-    out_path = os.path.join(config['model_path'], 'results/confusion.png')
+    pred_path = os.path.join(config['ckpt_dir'], 'quantized_outputs.txt')
+    out_path = os.path.join(config['ckpt_dir'], 'confusion.png')
     compute_token_f1(pred_path, gold_path, out_path)
+  elif args.task == 2:
+    gold_path = 'unit_tests/'
+    if not os.path.exists(gold_path):
+        os.makedirs(gold_path)
+    gold_file = os.path.join(gold_path, 'test_token_f1_gold.item')
+    pred_file = os.path.join(gold_path, 'test_token_f1_pred.txt')
+    gold_f = open(gold_file, 'w')
+    pred_f = open(pred_file, 'w')
+
+    gold_f.write('header\n')
+    gold_f.write('file_01 0.0 0.01 1 # # 0\n')
+    gold_f.write('file_01 0.01 0.02 2 # # 0\n')
+    gold_f.write('file_01 0.02 0.03 3 # # 0\n')
+    gold_f.write('file_01 0.03 0.04 2 # # 0\n')
+    pred_f.write('file_01 3,1,2,1\n')
+    gold_f.close()
+    pred_f.close()
+    
+    out_file = os.path.join(gold_path, 'confusion')
+    compute_token_f1(pred_file,
+                     gold_path,
+                     out_file)
+    
 
 if __name__ == '__main__':
     main()
