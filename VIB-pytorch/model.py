@@ -39,7 +39,7 @@ class VQCPCEncoder(nn.Module):
     def forward(self, mels):
         z = self.conv(mels)
         z = self.encoder(z.transpose(1, 2))
-        z, d, loss = self.codebook(z)
+        z, loss = self.codebook(z)
         c, _ = self.rnn(z)
         return z, c, loss
 
@@ -103,7 +103,7 @@ class VQEmbeddingEMA(nn.Module):
         avg_probs = torch.mean(encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        return quantized, distances, loss
+        return quantized, loss
 
 class VQMLP(torch.nn.Module):
   def __init__(self, 
@@ -145,12 +145,19 @@ class VQMLP(torch.nn.Module):
               return_feat=False):
     B = x.size(0)
     D = x.size(1)
-    embed = self.conv(x.unsqueeze(1)).squeeze(2)  
-    embed = embed.permute(0, 2, 1)
-    embed = self.mlp(embed)
-    quantized, logits, loss = self.bottleneck(embed)
+    T = x.size(2)
 
-    logits = logits / temp
+    x = self.conv(x.unsqueeze(1)).squeeze(2)  
+    x = x.permute(0, 2, 1)
+    embed = self.mlp(x)
+    x_flat = embed.view(-1, D)
+    quantized, loss = self.bottleneck(embed)
+    logits = torch.addmm(torch.sum(self.bottleneck.embedding ** 2, dim=1) +
+                         torch.sum(x_flat ** 2, dim=1, keepdim=True),
+                         x_flat, self.bottleneck.embedding.t(),
+                         alpha=2.0, beta=-1.0).view(B, T, -1)
+
+    logits = logits / ((D ** 0.5) * temp)
     encoding = F.softmax(logits, dim=-1)
     if masks is not None:
       quantized = quantized * masks.unsqueeze(2)
@@ -162,9 +169,11 @@ class VQMLP(torch.nn.Module):
     else:
       return logits, out
     
-  def quantize_loss(embed, quantized, masks=None):
-    return self.bottleneck.commitment_cost * F.mse_loss(masks.unsqueeze(2) * embed, 
-      masks.unsqueeze(2) * quantized.detach())
+  def quantize_loss(self, embed, quantized, masks=None):
+    if masks is not None:
+      embed = masks.unsqueeze(2) * embed
+      masks = masks.unsqueeze(2) * quantized.detach() 
+    return self.bottleneck.commitment_cost * F.mse_loss(embed, masks)
 
 class TDSBlock(torch.nn.Module):
     def __init__(self, in_channels, num_features, kernel_size, dropout):

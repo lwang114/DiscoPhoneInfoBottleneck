@@ -12,7 +12,7 @@ import math
 from utils.utils import cuda
 from pathlib import Path
 from sklearn.metrics import accuracy_score
-from model import GumbelBLSTM, GumbelMLP, GumbelTDS
+from model import GumbelBLSTM, GumbelMLP, GumbelTDS, VQMLP
 from datasets.datasets import return_data 
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -94,6 +94,7 @@ class Solver(object):
                             ), self.cuda)
     elif config.model_type == 'vq-mlp':
       self.audio_net = cuda(VQMLP(
+                              self.K,
                               input_size=self.input_size,
                               n_class=self.n_visual_class,
                               n_embeddings=self.n_phone_class
@@ -182,8 +183,8 @@ class Solver(object):
         word_logits = out_logits
         quantized = None
         if self.model_type == 'vq-mlp':
-          word_logits = out_logits[:self.n_visual_class]
-          quantized = out_logits[self.n_visual_class:]
+          word_logits = out_logits[:, :, :self.n_visual_class]
+          quantized = out_logits[:, :, self.n_visual_class:]
 
         # phone_logits = phone_logits\
         #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
@@ -205,8 +206,8 @@ class Solver(object):
                self.weight_word_loss * word_loss +\
                self.beta * info_loss
         if self.model_type == 'vq-mlp':
-          loss += self.audio_net.module.quantize_loss(embedding, quantized,
-                                                      masks=audio_masks)
+          loss += self.audio_net.quantize_loss(embedding, quantized,
+                                               masks=audio_masks)
 
         izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
@@ -321,7 +322,7 @@ class Solver(object):
         phone_logits = gumbel_logits
         word_logits = out_logits
         if self.model_type == 'vq-mlp':
-          word_logits = out_logits[:self.n_visual_class]
+          word_logits = out_logits[:, :, :self.n_visual_class]
 
         # phone_logits = phone_logits\
         #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
