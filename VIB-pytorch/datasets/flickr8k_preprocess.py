@@ -10,6 +10,7 @@ import re
 from tqdm import tqdm
 stop_words = stopwords.words("english")
 SIL = "SIL"
+IGNORED_TOKENS = ["SIL", "GARBAGE"]
 
 def extract_word_dataset(data_path,
                          min_class_size=50,
@@ -69,7 +70,7 @@ def extract_word_dataset(data_path,
       audio_id = phrase["utterance_id"]
       spk = utt2spk[audio_id]
       if audio_id != prev_id:
-        print(audio_id)
+        print(audio_id, split)
         word_idx = 0
         prev_id = audio_id
 
@@ -172,25 +173,27 @@ def extract_zs_item_file_full_data(data_path):
   for split in ["test", "train", "val"]:
     sent_f = open(os.path.join(data_path,
                                f"{split}_flickr_audio/{split}_flickr_audio.json"), "r")
-    abx_f = open(os.path.join(data_path, 
-                              dataset_name, 
-                              split, 
+    abx_f = open(os.path.join(data_path,
                               f"{split}_flickr_audio/{split}_flickr_audio.item"), "w")
     abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
 
-    label_counts = dict()    
     for line in sent_f:
       sent = json.loads(line.rstrip("\n"))
-      audio_id = sent["utterance_id"]
-      print(audio_id, split) # XXX
-      spk = word["spk"]
-      phonemes = [phn for word in sent["words"] for phn in word["phonemes"]]
+      audio_id = sent["utterance_id"].split("/")[-1]
+      # print(audio_id, split) # XXX
+      spk = 0
+      phonemes = []
+      for word in sent["words"]:
+        for phn in word["phonemes"]:
+          phn["text"] = re.sub(r"[0-9]", "", phn["text"])
+          phonemes.append(phn)
+
       for phn_idx, phone in enumerate(phonemes):
         phn = phone["text"]
-        if (phn[0] == "+") or (phn in SIL):
+        if (phn[0] == "+") or (phn in IGNORED_TOKENS):
           continue
-        begin_phn = round(phone["begin"] - begin, 3)
-        end_phn = round(phone["end"] - begin, 3) 
+        begin_phn = round(phone["begin"], 3)
+        end_phn = round(phone["end"], 3) 
         if phn_idx == 0:
           prev_phn = SIL
         else:
@@ -200,11 +203,9 @@ def extract_zs_item_file_full_data(data_path):
           next_phn = SIL
         else:
           next_phn = phonemes[phn_idx+1]["text"]
-        abx_f.write(f"{audio_file_id} {begin_phn} {end_phn} {phn} {prev_phn} {next_phn} {spk}\n")
+        abx_f.write(f"{audio_id} {begin_phn} {end_phn} {phn} {prev_phn} {next_phn} {spk}\n")
+    sent_f.close()
     abx_f.close()
-  word_f.close()
-
-
 
 def extract_audio_for_concepts(data_path, 
                                min_class_size,
@@ -272,7 +273,6 @@ def match_words_with_phones(words, phones):
   for phone in phones:
     begin, end = phone["begin"], phone["end"]
     word = words[w_idx]
-
     if word["end"] <= begin:
       w_idx += 1
       if w_idx >= len(words):
@@ -300,28 +300,27 @@ def extract_sentence_info(data_path, split):
   with open(split_file, "r") as f:
     audio_ids = [line.rstrip("\n").split("/")[-1].split(".")[0] for line in f]
   
-  sent_f = open(os.path.join(data_path, f"flickr8k_sentences_{split}.json"), "w")
-  phones = None
-  words = None
+  sent_f = open(os.path.join(data_path, f"{split}_flickr_audio.json"), "w")
+  phones = []
+  words = []
   audio_id = None
   idx = 0
   for line in phone_f:
-    if "align" in line:
+    if "align" in line:      
+      if audio_id in audio_ids:
+        print(audio_id)
+        example = match_words_with_phones(words, phones)
+        example["utterance_id"] = os.path.join(data_path, f"flickr_audio/wavs/{audio_id}")
+        sent_f.write(json.dumps(example)+"\n")
+
       audio_id = "_".join(line.rstrip("\n").split(".")[0].split("_")[1:])
+      phones = []
+      words = []
       if not audio_id in audio_ids:
         continue
       # XXX if idx > 10:
       #   break
       # idx += 1
-      
-      if words is not None:
-        example = match_words_with_phones(words, phones)
-        example["utterance_id"] = os.path.join(data_path, f"flickr_audio/wavs/{audio_id}")
-        print(split, example["utterance_id"])
-        sent_f.write(json.dumps(example)+"\n")
-
-      phones = []
-      words = []
       word_fn = os.path.join(word_dir, audio_id+".words")
       if not os.path.exists(word_fn):
         continue
@@ -362,8 +361,8 @@ def extract_visual_words(data_path,
   lemmatizer = WordNetLemmatizer()
   visual_classes = json.load(open(os.path.join(data_path, "phrase_classes.json")))  
   word_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  in_f = open(os.path.join(data_path, f"flickr8k_sentences_{split}.json"), "r")
-  out_f = open(os.path.join(data_path, f"flickr8k_sentences_{split}_with_visual_words.json"), "w")
+  in_f = open(os.path.join(data_path, f"{split}.json"), "r")
+  out_f = open(os.path.join(data_path, f"{split}_with_visual_words.json"), "w")
 
   visual_words = dict()
   for line in word_f:
@@ -375,22 +374,23 @@ def extract_visual_words(data_path,
     audio_id = phrase["utterance_id"]
     if not audio_id in visual_words:
       visual_words[audio_id] = dict()
-      for word in phrase["children"]:
-        visual_words[audio_id][(word["begin"], word["end"])] = {"text": word["text"],
-                                                                "bbox": phrase["bbox"]}
+
+    for word in phrase["children"]:
+      visual_words[audio_id][(word["begin"], word["end"])] = {"text": word["text"],
+                                                              "bbox": phrase["bbox"]}
 
   for line in in_f:
     sent = json.loads(line.rstrip("\n"))
     sent["visual_words"] = []
     sent["bboxes"] = []
-    print(sent.keys())
-    audio_id = sent["audio_id"].split("/")[-1]
+    audio_id = sent["utterance_id"].split("/")[-1]
     if not audio_id in visual_words:
       out_f.write(json.dumps(sent)+"\n")
       continue
     print(audio_id)
     for w_idx, word in enumerate(sent["words"]):
       interval = (word["begin"], word["end"])
+      # print(interval, visual_words[audio_id].keys()) # XXX
       if interval in visual_words[audio_id]:
         sent["visual_words"].append(w_idx)
         sent["bboxes"].append(visual_words[audio_id][interval]["bbox"])
@@ -426,15 +426,15 @@ def main(argv):
     extract_sentence_info(config["data_path"], "val")
     extract_sentence_info(config["data_path"], "test")
 
-    extract_visual_words(config["data_path"], "train", 50)
-    extract_visual_words(config["data_path"], "val", 50)
-    extract_visual_words(config["data_path"], "test", 50)
+    extract_visual_words(config["data_path"], "train_flickr_audio", 50)
+    extract_visual_words(config["data_path"], "val_flickr_audio", 50)
+    extract_visual_words(config["data_path"], "test_flickr_audio", 50)
   elif args.TASK == 4:
-    extract_visual_words(config["data_path"], "train", 50)
-    extract_visual_words(config["data_path"], "val", 50)
-    extract_visual_words(config["data_path"], "test", 50)
+    extract_visual_words(os.path.join(config["data_path"], '../'), "train_flickr_audio/train_flickr_audio", 50)
+    extract_visual_words(os.path.join(config["data_path"], '../'), "val_flickr_audio/val_flickr_audio", 50)
+    extract_visual_words(os.path.join(config["data_path"], '../'), "test_flickr_audio/test_flickr_audio", 50)
   elif args.TASK == 5:
-    extract_zs_item_file_full_data(config["data_path"])
+    extract_zs_item_file_full_data(os.path.join(config["data_path"], '../'))
 
 if __name__ == "__main__":
   argv = sys.argv[1:]

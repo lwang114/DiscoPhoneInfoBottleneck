@@ -73,20 +73,30 @@ def return_data(args):
                                            use_segment=args.use_segment,
                                            ds_method=args.downsample_method) 
     elif args.dataset == 'librispeech':
-      preprocessor = LibriSpeechPreprocessor(dset_dir, 80,
-     audio_feature=args.audio_feature)
+      if args.audio_feature == 'mfcc':
+        wav2vec_path = None
+      else:
+        wav2vec_path = args.wav2vec_path 
+      preprocessor = LibriSpeechPreprocessor(
+                       dset_dir, 80,
+                       splits=args.splits,
+                       audio_feature=args.audio_feature)
       train_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
-                       'train', 
+                       'train',
+                       splits=args.splits, 
                        augment=True,
-                       audio_feature="mfcc") 
+                       audio_feature=args.audio_feature,
+                       wav2vec_path=wav2vec_path) 
       test_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
-                       'test', 
+                       'test',
+                       splits=args.splits,
                        augment=True,
-                       audio_feature="mfcc") 
+                       audio_feature=args.audio_feature,
+                       wav2vec_path=wav2vec_path) 
     else : raise UnknownDatasetError()
 
 
