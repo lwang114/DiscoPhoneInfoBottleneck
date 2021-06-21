@@ -168,6 +168,44 @@ def extract_zs_item_file(data_path,
     abx_f.close()
   word_f.close()
 
+def extract_zs_item_file_full_data(data_path):
+  for split in ["test", "train", "val"]:
+    sent_f = open(os.path.join(data_path,
+                               f"{split}_flickr_audio/{split}_flickr_audio.json"), "r")
+    abx_f = open(os.path.join(data_path, 
+                              dataset_name, 
+                              split, 
+                              f"{split}_flickr_audio/{split}_flickr_audio.item"), "w")
+    abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+
+    label_counts = dict()    
+    for line in sent_f:
+      sent = json.loads(line.rstrip("\n"))
+      audio_id = sent["utterance_id"]
+      print(audio_id, split) # XXX
+      spk = word["spk"]
+      phonemes = [phn for word in sent["words"] for phn in word["phonemes"]]
+      for phn_idx, phone in enumerate(phonemes):
+        phn = phone["text"]
+        if (phn[0] == "+") or (phn in SIL):
+          continue
+        begin_phn = round(phone["begin"] - begin, 3)
+        end_phn = round(phone["end"] - begin, 3) 
+        if phn_idx == 0:
+          prev_phn = SIL
+        else:
+          prev_phn = phonemes[phn_idx-1]["text"]
+        
+        if phn_idx == len(phonemes) - 1:
+          next_phn = SIL
+        else:
+          next_phn = phonemes[phn_idx+1]["text"]
+        abx_f.write(f"{audio_file_id} {begin_phn} {end_phn} {phn} {prev_phn} {next_phn} {spk}\n")
+    abx_f.close()
+  word_f.close()
+
+
+
 def extract_audio_for_concepts(data_path, 
                                min_class_size,
                                concepts,
