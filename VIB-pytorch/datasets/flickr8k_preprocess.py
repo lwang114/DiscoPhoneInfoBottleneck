@@ -433,6 +433,8 @@ def main(argv):
     extract_visual_words(config["data_path"], "train", 50)
     extract_visual_words(config["data_path"], "val", 50)
     extract_visual_words(config["data_path"], "test", 50)
+  elif args.TASK == 5:
+    extract_zs_item_file_full_data(config["data_path"])
 
 if __name__ == "__main__":
   argv = sys.argv[1:]
