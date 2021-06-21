@@ -280,7 +280,7 @@ def match_words_with_phones(words, phones):
     words[w_idx]["phonemes"].append(phone)
   return {"words": words, "text": text}
 
-def extract_sentence_info(data_path, split):
+def extract_sentence_info(data_path, out_path, split):
   """
   Returns :
       flickr_audio_{split}.json : file storing the dict with items
@@ -300,7 +300,7 @@ def extract_sentence_info(data_path, split):
   with open(split_file, "r") as f:
     audio_ids = [line.rstrip("\n").split("/")[-1].split(".")[0] for line in f]
   
-  sent_f = open(os.path.join(data_path, f"{split}_flickr_audio.json"), "w")
+  sent_f = open(out_path, "w")
   phones = []
   words = []
   audio_id = None
@@ -350,8 +350,10 @@ def extract_sentence_info(data_path, split):
   sent_f.close()
 
 
-def extract_visual_words(data_path,
-                         split,
+def extract_visual_words(sentence_info_path,
+                         phrase_info_path,
+                         visual_class_path,
+                         out_path,
                          min_class_size):
   """
   Add the following keys :
@@ -359,10 +361,10 @@ def extract_visual_words(data_path,
     "bboxes" : a list of tuple of (left, upper, right, lower)
   """
   lemmatizer = WordNetLemmatizer()
-  visual_classes = json.load(open(os.path.join(data_path, "phrase_classes.json")))  
-  word_f = open(os.path.join(data_path, "flickr8k_phrases.json"), "r")
-  in_f = open(os.path.join(data_path, f"{split}.json"), "r")
-  out_f = open(os.path.join(data_path, f"{split}_with_visual_words.json"), "w")
+  visual_classes = json.load(open(visual_class_path)) # TODO  
+  word_f = open(phrase_info_path, "r")
+  in_f = open(sentence_info_path, "r")
+  out_f = open(out_path, "w")
 
   visual_words = dict()
   for line in word_f:
@@ -399,6 +401,21 @@ def extract_visual_words(data_path,
   in_f.close()
   out_f.close()
 
+def extract_speaker_info(sentence_info_path, utt2spk_path, out_path):
+  utt2spk = dict()
+  with open(utt2spk_path, "r") as utt_f,
+       open(sentence_info_path, "r") as sent_f,
+       open(out_path, "w") as out_f:
+    for line in utt_f:
+      utt_id, spk = line.rstrip("\n").split()
+      utt2spk[utt_id.split(".")[0]] = spk
+
+    for line in sent_f:
+      sent_dict = json.loads(line.rstrip("\n"))
+      utt_id = sent_dict["utterance_id"].split("/")[-1]
+      spk = utt2spk[utt_id]
+      sent_dict["speaker"] = spk
+      out_f.write(json.dumps(sent_dict)+"\n")
 
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -422,19 +439,41 @@ def main(argv):
                                config["min_class_size"],
                                concepts)
   elif args.TASK == 3:
-    extract_sentence_info(config["data_path"], "train")
-    extract_sentence_info(config["data_path"], "val")
-    extract_sentence_info(config["data_path"], "test")
-
-    extract_visual_words(config["data_path"], "train_flickr_audio", 50)
-    extract_visual_words(config["data_path"], "val_flickr_audio", 50)
-    extract_visual_words(config["data_path"], "test_flickr_audio", 50)
+    old_data_root = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k" 
+    new_data_root = os.path.join(config["data_path"], "../")
+    visual_class_path = os.path.join(old_data_root, "phrase_classes.json")
+    phrase_info_path = os.path.join(old_data_root, "flickr8k_phrases.json")
+    for split in ["train", "val", "test"]: 
+      sentence_info_path = os.path.join(new_data_root, f"{split}_flickr_audio/{split}_flickr_audio.json")
+      out_path = os.path.join(new_data_root, f"{split}_flickr_audio/{split}_flickr_audio_with_visual_words.json")
+      extract_sentence_info(old_data_root, 
+                            out_path, 
+                            split)
+      extract_visual_words(sentence_info_path, 
+                           phrase_info_path,
+                           visual_class_path,
+                           out_path, 50)
   elif args.TASK == 4:
-    extract_visual_words(os.path.join(config["data_path"], '../'), "train_flickr_audio/train_flickr_audio", 50)
-    extract_visual_words(os.path.join(config["data_path"], '../'), "val_flickr_audio/val_flickr_audio", 50)
-    extract_visual_words(os.path.join(config["data_path"], '../'), "test_flickr_audio/test_flickr_audio", 50)
+    new_data_root = os.path.join(config["data_path"], "../")
+    for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
+      sentence_info_path = os.path.join(new_data_root, f"{split}/{split}.json")
+      out_path = os.path.join(new_data_root, f"{split}/{split}_with_visual_words.json")
+      extract_visual_words(sentence_info_path, 
+                           phrase_info_path,
+                           visual_class_path,
+                           out_path, 50)
   elif args.TASK == 5:
     extract_zs_item_file_full_data(os.path.join(config["data_path"], '../'))
+  elif args.TASK == 6: 
+    new_data_root = os.path.join(config["data_path"], "../")
+    utt2spk_path = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/flickr_audio/wav2spk.txt" 
+    for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
+      sentence_info_path = os.path.join(new_data_root, f"{split}.json")
+      out_path = os.path.join(new_data_root, f"{split}_with_spk_info.json")
+      extract_speaker_info(sentence_info_path, 
+                           utt2spk_path,
+                           out_path, 50)
+   
 
 if __name__ == "__main__":
   argv = sys.argv[1:]
