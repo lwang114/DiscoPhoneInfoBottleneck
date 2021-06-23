@@ -8,7 +8,7 @@ from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
 stop_words = stopwords.words("english")
-IGNORE_TOKENS = ["ʰ", "ʼ"] 
+IGNORE_TOKENS = ["ʰ", "ʼ", "ˈ"] 
 def extract_visual_words(data_path, split, visual_word_file):
   """
   Args :

@@ -342,8 +342,9 @@ def extract_sentence_info(data_path, out_path, split):
       phones.append({"text": phn,
                      "begin": float(begin),
                      "end": float(end)})
-  example = match_words_with_phones(words, phones)
-  example["utterance_id"] = os.path.join(data_path, f"flickr_audio/wavs/{audio_id}")
+  if audio_id in audio_ids:
+    example = match_words_with_phones(words, phones)
+    example["utterance_id"] = os.path.join(data_path, f"flickr_audio/wavs/{audio_id}")
 
   sent_f.write(json.dumps(example)+"\n") 
   phone_f.close()
@@ -403,8 +404,8 @@ def extract_visual_words(sentence_info_path,
 
 def extract_speaker_info(sentence_info_path, utt2spk_path, out_path):
   utt2spk = dict()
-  with open(utt2spk_path, "r") as utt_f,
-       open(sentence_info_path, "r") as sent_f,
+  with open(utt2spk_path, "r") as utt_f,\
+       open(sentence_info_path, "r") as sent_f,\
        open(out_path, "w") as out_f:
     for line in utt_f:
       utt_id, spk = line.rstrip("\n").split()
@@ -468,11 +469,11 @@ def main(argv):
     new_data_root = os.path.join(config["data_path"], "../")
     utt2spk_path = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/flickr_audio/wav2spk.txt" 
     for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
-      sentence_info_path = os.path.join(new_data_root, f"{split}.json")
-      out_path = os.path.join(new_data_root, f"{split}_with_spk_info.json")
+      sentence_info_path = os.path.join(new_data_root, f"{split}/{split}.json")
+      out_path = os.path.join(new_data_root, f"{split}/{split}_with_spk_info.json")
       extract_speaker_info(sentence_info_path, 
                            utt2spk_path,
-                           out_path, 50)
+                           out_path)
    
 
 if __name__ == "__main__":
