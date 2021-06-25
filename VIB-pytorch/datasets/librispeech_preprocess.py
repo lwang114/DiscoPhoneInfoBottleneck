@@ -78,9 +78,14 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
 
   for line in in_f:
     sent_dict = json.loads(line.rstrip("\n"))
-    audio_id = sent_dict["utterance_id"]
-    rec_tokens = pseudo_phones[audio_id]["output"][0]["rec_token"]
+    audio_id = sent_dict["utterance_id"].split('/')[-1]
     sent_dict["pseudo_phones"] = []
+
+    if not audio_id in pseudo_phones:
+      print(f'{audio_id} not found')
+      continue
+
+    rec_tokens = pseudo_phones[audio_id]["output"][0]["rec_token"]
     for phn in rec_tokens.split():
       if phn in IGNORE_TOKENS or (phn[0] == '<'):
         continue
@@ -106,6 +111,10 @@ def main(argv):
   elif args.TASK == 1:
     split = re.sub("-", "_", args.split)
     pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_librispeech/{split}_decode_li10/data.json"
+    extract_pseudo_phones(args.data_path, args.split, pseudo_phone_file)
+  elif args.TASK == 2:
+    split = re.sub("-", "_", args.split)
+    pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_flickr/{split}_decode_li10/data.json"
     extract_pseudo_phones(args.data_path, args.split, pseudo_phone_file)
 
 if __name__ == "__main__":

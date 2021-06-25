@@ -186,9 +186,6 @@ class Solver(object):
           word_logits = out_logits[:, :, :self.n_visual_class]
           quantized = out_logits[:, :, self.n_visual_class:]
 
-        # phone_logits = phone_logits\
-        #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
-        #                  * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
 
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
@@ -364,7 +361,7 @@ class Solver(object):
 
           feat_fn = self.ckpt_dir.joinpath(f'outputs/phonetic/dev-clean/{audio_id}.txt')
           if save_embedding:
-            np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]].cpu().detach().numpy())
+            np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]][::2].cpu().detach().numpy()) # XXX
            
           gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
           pred_phone_label = encoding[idx, :audio_lens[idx]].max(-1)[1]

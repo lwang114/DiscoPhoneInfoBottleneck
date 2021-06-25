@@ -10,7 +10,8 @@ import re
 from tqdm import tqdm
 stop_words = stopwords.words("english")
 SIL = "SIL"
-IGNORED_TOKENS = ["SIL", "GARBAGE"]
+IGNORED_TOKENS = ["SIL", "GARBAGE", "ʰ", "ʼ", "ˈ"] 
+
 
 def extract_word_dataset(data_path,
                          min_class_size=50,
@@ -418,6 +419,52 @@ def extract_speaker_info(sentence_info_path, utt2spk_path, out_path):
       sent_dict["speaker"] = spk
       out_f.write(json.dumps(sent_dict)+"\n")
 
+def extract_pseudo_phones(data_path, split, pseudo_phone_file):
+  """
+  Args :
+    data_path : str, path to the LibriSpeech root
+    split : str, {train-clean-100, train-clean-360, train-other-500}
+    pseudo_phone_file : str, storing a dict of
+      {"utts" : 
+          {audio_id} : 
+              "output" : [{"rec_text" : str,
+                           "rec_token" : str}],
+              "utt2spk" : str
+          }
+      }
+  """
+  pseudo_phones = json.load(open(pseudo_phone_file))["utts"]
+  in_file = os.path.join(data_path, split, f"{split}.json")
+  out_file = os.path.join(data_path, split, f"{split}_with_pseudo_phones.json")
+  in_f = open(in_file, "r")
+  out_f = open(out_file, "w")
+  tokens = set()
+
+  for line in in_f:
+    sent_dict = json.loads(line.rstrip("\n"))
+    audio_id = '_'.join(sent_dict["utterance_id"].split('/')[-1].split('_')[1:])
+    spk = sent_dict["speaker"]
+    sent_dict["pseudo_phones"] = []
+
+    utt_id = f'{int(spk):05d}_{audio_id}'
+    if not utt_id in pseudo_phones:
+      print(f'{utt_id} not found')
+      continue
+
+    rec_tokens = pseudo_phones[utt_id]["output"][0]["rec_token"]
+    for phn in rec_tokens.split():
+      if phn in IGNORED_TOKENS or (phn[0] == '<'):
+        continue
+      if not phn in tokens:
+        tokens.add(phn)
+      sent_dict["pseudo_phones"].append(phn)
+    out_f.write(json.dumps(sent_dict)+"\n") 
+  in_f.close()
+  out_f.close()
+  print(tokens)
+  print(f"Pseudo-phone set size: {len(tokens)}")
+ 
+
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)
@@ -474,7 +521,11 @@ def main(argv):
       extract_speaker_info(sentence_info_path, 
                            utt2spk_path,
                            out_path)
-   
+  elif args.TASK == 7:
+    new_data_root = os.path.join(config["data_path"], "../")
+    for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
+      pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_flickr/{split}_decode_li10/data.json"
+      extract_pseudo_phones(new_data_root, split, pseudo_phone_file)
 
 if __name__ == "__main__":
   argv = sys.argv[1:]

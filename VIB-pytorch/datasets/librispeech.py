@@ -272,18 +272,19 @@ def load_data_split(data_path, sp,
     visual_words = [label_dict["words"][i] for i in label_dict["visual_words"]]
     
     phonemes_with_stress = [phn for w in label_dict["words"] for phn in w["phonemes"]]
+    '''
     phonemes = []
     for phn in phonemes_with_stress: # Remove stress label
       if (phn["text"][0] == "+") or (phn["text"] in IGNORED_TOKENS):
         continue
       phn["text"] = re.sub(r"[0-9]", "", phn["text"])
       phonemes.append(phn)
-    
     '''
+    
     phonemes = [{"text": phn, 
                  "begin": 0.0, 
                  "end": 0.0} for phn in label_dict["pseudo_phones"]]
-    '''
+    
     if len(utt_id.split("/")) > 1:
       audio_path = f"{utt_id}.wav"
     else:
