@@ -70,11 +70,12 @@ def compute_accuracy(reference, test):
     raise ValueError("Lists must have the same length.")
   return sum(x == y for x, y in zip(reference, test)) / len(test)
 
-def compute_edit_distance(predictions, targets, preprocessor):
+def compute_edit_distance(predictions, targets, preprocessor=None):
   tokens_dist = 0
   n_tokens = 0
   for p, t in zip(predictions, targets):
-    p, t = preprocessor.tokens_to_text(p), preprocessor.to_text(t)
+    if preprocessor is not None:
+      p, t = preprocessor.tokens_to_text(p), preprocessor.to_text(t)
     p, t = list(filter(None, p)), list(filter(None, t))
     tokens_dist += editdistance.eval(p, t)
     n_tokens += len(t)
