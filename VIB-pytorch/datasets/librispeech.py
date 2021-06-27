@@ -93,7 +93,6 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     else:
       raise ValueError(f"Feature type {audio_feature} not supported")
 
-
     ''' TODO
     self.image_transforms = transforms.Compose(
                 [transforms.Scale(256),
@@ -199,7 +198,7 @@ class LibriSpeechPreprocessor:
       tokens.update(sent)
       visual_words.update(visual_sent)
     self.tokens = [BLANK]+sorted(tokens)
-    self.visual_words = sorted(visual_words)
+    self.visual_words = [BLANK]+sorted(visual_words)
     # print(self.tokens)
     # print(self.visual_words) # XXX
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
@@ -232,6 +231,19 @@ class LibriSpeechPreprocessor:
 
   def to_word_text(self, indices):
     return [self.visual_words[i] for i in indices]
+
+  def tokens_to_word_text(self, indices):
+    T = len(indices)
+    path = [self.visual_words[i] for i in indices]
+    sent = []
+    for i in range(T):
+      if path[i] == BLANK:
+        continue
+      elif (i != 0) and (path[i] == path[i-1]):
+        continue
+      else:
+        sent.append(path[i])
+    return sent
 
   def tokens_to_text(self, indices): 
     T = len(indices)
