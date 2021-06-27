@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 from torch.autograd import Variable
+import json
+import re
 
 SIL = "SIL"
 def str2bool(v):
@@ -39,7 +41,7 @@ class Weight_EMA_Update(object):
 def convert_item_to_output_format(item_file, 
                                   output_file, 
                                   frame_rate=0.01,
-                                  max_len=2048): # TODO
+                                  max_len=2048):
   """
   Args :
       item_file : str, path to file of format
@@ -66,31 +68,41 @@ def convert_item_to_output_format(item_file,
       
       if not audio_id in triplets:
         triplets[audio_id] = []
+        audio_ids.append(audio_id)
       begin = int(float(begin) / frame_rate)
       end = int(float(end) / frame_rate)
       triplets[audio_id].append((begin, end, phn))
-      audio_ids.append(audio_id)
 
     tokens = ['BLANK']+sorted(tokens)
     stoi = {t:i for i, t in enumerate(tokens)}
 
     for audio_id in audio_ids:
+      print(audio_id)
       sequence = ['0']*max_len
       for i, tri in enumerate(sorted(triplets[audio_id])):
-        if i == 0:
-          begin = tri[0]
-        else:
-          begin = max(triplets[audio_id][i-1], tri[0])
-
         if i == len(triplets[audio_id]) - 1:
-          end = tri[1]
+          if i > 1:
+            begin = max(triplets[audio_id][i-2][1], tri[0])
+          else:
+            begin = tri[0]
         else:
-          end = min(triplets[audio_id][i+1], tri[1])
+          begin = max(triplets[audio_id][i+1][0], tri[0])
+
+        if i == 0:
+          if i < len(triplets[audio_id]) - 2: 
+            end = min(triplets[audio_id][2][0], tri[1])
+          else:
+            end = tri[1]
+        else:
+          end = min(triplets[audio_id][i-1][1], tri[1])
         if max(begin, end) > max_len:
-          continue 
-        sequence[begin:end] = str(stoi[tri[2]])
+          continue
+        
+        for t in range(begin, end): 
+          sequence[t] = str(stoi[tri[2]])
       sequence_str = ','.join(sequence)
       out_f.write(f'{audio_id} {sequence_str}\n')
+
 
 def convert_json_to_item(json_path, output_path):
   """
@@ -128,8 +140,10 @@ def convert_json_to_item(json_path, output_path):
           next_token = SIL
         else:
           next_token = re.sub(r'[0-9]', '', phonemes_with_stress[phn_idx+1]['text']) 
-        
-        out_f.write('{utt_id} {phn["begin"]} {phn["end"]} {token} {prev_token} {next_token} 0\n') 
+
+        begin = round(phn["begin"], 3)
+        end = round(phn["end"], 3)
+        out_f.write(f'{utt_id} {begin} {end} {token} {prev_token} {next_token} 0\n') 
   
 
 if __name__ == '__main__':

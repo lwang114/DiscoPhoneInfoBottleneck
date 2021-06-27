@@ -99,7 +99,6 @@ class Solver(object):
                               n_class=self.n_visual_class,
                               n_embeddings=self.n_phone_class
                             ), self.cuda) 
-    # self.word_to_phone_net = cuda(nn.Linear(self.n_visual_class, self.n_phone_class), self.cuda)
   
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
@@ -113,7 +112,7 @@ class Solver(object):
     if not self.ckpt_dir.exists(): 
       self.ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt: 
+    if self.load_ckpt or config.mode == 'test': 
       self.load_checkpoint()
     
     # History
@@ -321,9 +320,6 @@ class Solver(object):
         if self.model_type == 'vq-mlp':
           word_logits = out_logits[:, :, :self.n_visual_class]
 
-        # phone_logits = phone_logits\
-        #                  + word_masks.sum(1, keepdim=True).permute(0, 2, 1)\
-        #                  * self.word_to_phone_net(word_logits)
         word_logits = torch.matmul(word_masks, word_logits)
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), 
                                     word_labels,
@@ -364,7 +360,7 @@ class Solver(object):
             np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]][::2].cpu().detach().numpy()) # XXX
            
           gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
-          pred_phone_label = encoding[idx, :audio_lens[idx]].max(-1)[1]
+          pred_phone_label = gumbel_logits[idx, :audio_lens[idx]].max(-1)[1]
           gold_phone_names = ','.join(preprocessor.to_text(gold_phone_label))
           pred_phone_names = ','.join(preprocessor.tokens_to_text(pred_phone_label))
           phone_readable_f.write(f'Utterance id: {audio_id}\n'
@@ -429,7 +425,7 @@ class Solver(object):
     }
     file_path = self.ckpt_dir.joinpath(filename)
     torch.save(states, file_path.open('wb+'))
-    print('=> saved checkpoint "{}" (iter {})'.format(file_path, self.global_iter)) 
+    print('=> saved checkpoint "{}" (iter {}, epoch {})'.format(file_path, self.global_iter, self.global_epoch)) 
 
   def load_checkpoint(self, filename='best_acc.tar'):
     file_path = self.ckpt_dir.joinpath(filename)
@@ -439,7 +435,9 @@ class Solver(object):
       self.global_epoch = checkpoint['epoch']
       self.global_iter = checkpoint['iter']
       self.history = checkpoint['history']
-      print('=> loaded checkpoint "{} (iter {})"'.format(
-                file_path, self.global_iter))
+
+      self.audio_net.load_state_dict(checkpoint['model_states']['net'])
+      print('=> loaded checkpoint "{} (iter {}, epoch {})"'.format(
+                file_path, self.global_iter, self.global_epoch))
     else:
       print('=> no checkpoint found at "{}"'.format(file_path))

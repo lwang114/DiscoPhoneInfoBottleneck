@@ -46,19 +46,22 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       augment=False,
       audio_feature="mfcc",
       image_feature="image",
+      phone_label="multilingual",
       sample_rate=16000,
       wav2vec_path=None
   ):
     self.preprocessor = preprocessor
     self.splits = splits[split]
     self.data_path = data_path
+    self.phone_label = phone_label
    
     data = [] 
     for sp in self.splits:
       # Load data paths to audio and visual features
       examples = load_data_split(data_path, sp,
                                  audio_feature=audio_feature,
-                                 image_feature=image_feature)
+                                 image_feature=image_feature,
+                                 phone_label=self.phone_label)
       data.extend(examples)
     print(f"Number of {split} audio files = {len(data)}")
 
@@ -175,6 +178,7 @@ class LibriSpeechPreprocessor:
     },
     audio_feature="mfcc",
     image_feature="rcnn",
+    phone_label="multilingual",
     sample_rate=16000,
     ignore_index=-100
   ):
@@ -185,7 +189,8 @@ class LibriSpeechPreprocessor:
       for sp in splits[spl]:
         data.extend(load_data_split(data_path, sp,
                                     audio_feature=audio_feature,
-                                    image_feature=image_feature))
+                                    image_feature=image_feature,
+                                    phone_label=phone_label))
     tokens = set()
     visual_words = set()
     for ex in data:
@@ -195,8 +200,8 @@ class LibriSpeechPreprocessor:
       visual_words.update(visual_sent)
     self.tokens = [BLANK]+sorted(tokens)
     self.visual_words = sorted(visual_words)
-    print(self.tokens)
-    print(self.visual_words) # XXX
+    # print(self.tokens)
+    # print(self.visual_words) # XXX
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
     self.word_to_index = {w:i for i, w in enumerate(self.visual_words)}
 
@@ -243,7 +248,8 @@ class LibriSpeechPreprocessor:
                                     
 def load_data_split(data_path, sp,
                     audio_feature="mfcc",
-                    image_feature="rcnn"):
+                    image_feature="rcnn",
+                    phone_label="multilingual"):
   """
   Returns: 
       examples : a list of mappings of
@@ -272,19 +278,21 @@ def load_data_split(data_path, sp,
     visual_words = [label_dict["words"][i] for i in label_dict["visual_words"]]
     
     phonemes_with_stress = [phn for w in label_dict["words"] for phn in w["phonemes"]]
-    '''
+    
     phonemes = []
-    for phn in phonemes_with_stress: # Remove stress label
-      if (phn["text"][0] == "+") or (phn["text"] in IGNORED_TOKENS):
-        continue
-      phn["text"] = re.sub(r"[0-9]", "", phn["text"])
-      phonemes.append(phn)
-    '''
-    
-    phonemes = [{"text": phn, 
-                 "begin": 0.0, 
-                 "end": 0.0} for phn in label_dict["pseudo_phones"]]
-    
+    if phone_label == "groundtruth":
+      for phn in phonemes_with_stress: # Remove stress label
+        if (phn["text"][0] == "+") or (phn["text"] in IGNORED_TOKENS):
+          continue
+        phn["text"] = re.sub(r"[0-9]", "", phn["text"])
+        phonemes.append(phn)
+    elif phone_label == "multilingual":
+      phonemes = [{"text": phn, 
+                   "begin": 0.0, 
+                   "end": 0.0} for phn in label_dict["pseudo_phones"]]
+    else:
+      raise ValueError(f"Invalid phone label type: {phone_label}")
+
     if len(utt_id.split("/")) > 1:
       audio_path = f"{utt_id}.wav"
     else:

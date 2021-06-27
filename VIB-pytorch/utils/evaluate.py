@@ -155,6 +155,7 @@ def compute_token_f1(pred_path, gold_path, out_path):
 
   n_gold_tokens = len(gold_tokens)
   n_pred_tokens = len(pred_tokens)
+
   pred_stoi = {p:i for i, p in enumerate(sorted(pred_tokens, key=lambda x:int(x)))}
   gold_stoi = {g:i for i, g in enumerate(sorted(gold_tokens))}
   confusion = np.zeros((n_gold_tokens, n_pred_tokens))
