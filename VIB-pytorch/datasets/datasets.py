@@ -80,7 +80,9 @@ def return_data(args):
       preprocessor = LibriSpeechPreprocessor(
                        dset_dir, 80,
                        splits=args.splits,
-                       audio_feature=args.audio_feature)
+                       audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
+                       ignore_index=args.ignore_index)
       train_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
@@ -88,6 +90,7 @@ def return_data(args):
                        splits=args.splits, 
                        augment=True,
                        audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
                        wav2vec_path=wav2vec_path) 
       test_data = LibriSpeechDataset(
                        dset_dir, 
@@ -96,6 +99,7 @@ def return_data(args):
                        splits=args.splits,
                        augment=True,
                        audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
                        wav2vec_path=wav2vec_path) 
     else : raise UnknownDatasetError()
 

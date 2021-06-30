@@ -377,6 +377,112 @@ class GumbelMLP(nn.Module):
     encoding = F.gumbel_softmax(x, tau=temp)
     return encoding         
 
+class BLSTM(nn.Module):
+  def __init__(self, 
+               embedding_dim, 
+               n_layers=1, 
+               n_class=65,
+               input_size=80, 
+               ds_ratio=1,
+               bidirectional=True):
+    super(BLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.ds_ratio = ds_ratio
+    self.bidirectional = bidirectional
+    self.rnn = nn.LSTM(input_size=input_size,
+                       hidden_size=embedding_dim,
+                       num_layers=n_layers,
+                       batch_first=True,
+                       bidirectional=bidirectional)
+    self.decode = nn.Linear(2 * embedding_dim if bidirectional
+                            else embedding_dim, self.n_class)
+
+  def forward(self, x, 
+              return_feat=False):
+    device = x.device
+    ds_ratio = self.ds_ratio
+    if x.dim() < 3:
+        x = x.unsqueeze(0)
+    elif x.dim() > 3:
+        x = x.squeeze(1)
+    x = x.permute(0, 2, 1)
+    
+    B = x.size(0)
+    T = x.size(1)
+    if self.bidirectional:
+      h0 = torch.zeros((2 * self.n_layers, B, self.K), device=device)
+      c0 = torch.zeros((2 * self.n_layers, B, self.K), device=device)
+    else:
+      h0 = torch.zeros((self.n_layers, B, self.K), device=device)
+      c0 = torch.zeros((self.n_layers, B, self.K), device=device)
+       
+    embed, _ = self.rnn(x, (h0, c0))
+    logit = self.decode(embed)
+
+    if return_feat:
+        L = ds_ratio * (T // ds_ratio)
+        embedding = embed[:, :L].view(B, int(L // ds_ratio), ds_ratio, -1)
+        embedding = embedding.sum(-2)
+        return logit, embedding
+    return logit
+
+class GaussianBLSTM(nn.Module):
+    def __init__(self,
+                 embedding_dim,
+                 n_layers=1,
+                 n_class=65,
+                 input_size=80,
+                 ds_ratio=1,
+                 bidirectional=True):
+        super(GaussianBLSTM, self).__init__()
+        self.K = embedding_dim
+        self.n_layers = n_layers
+        self.n_class = n_class
+        self.ds_ratio = ds_ratio
+        self.bidirectional = bidirectional
+        self.rnn = nn.LSTM(input_size=input_size,
+                           hidden_size=embedding_dim,
+                           num_layers=n_layers,
+                           batch_first=True,
+                           bidirectional=bidirectional)
+        self.decode = nn.Linear( * embedding_dim if bidirectional
+                                else embedding_dim, self.n_class)
+        
+    def forward(self, x, num_sample=1, return_feat=False): # TODO
+        if x.dim() > 2 : x = x.view(x.size(0),-1)
+
+        statistics = self.rnn(x)
+        mu = statistics[:,:self.K]
+        std = F.softplus(-1*torch.ones((x.size(0), self.K), device=x.device),beta=1) # XXX F.softplus(statistics[:,self.K:]-5,beta=1)
+
+        encoding = self.reparametrize_n(mu,std,num_sample)
+        logit = self.decode(encoding)
+
+        if num_sample == 1 : pass
+        elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+
+        return (mu, std), logit
+
+    def reparametrize_n(self, mu, std, n=1):
+        # reference :
+        # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
+        def expand(v):
+            if isinstance(v, Number):
+                return torch.Tensor([v]).expand(n, 1)
+            else:
+                return v.expand(n, *v.size())
+
+        if n != 1 :
+            mu = expand(mu)
+            std = expand(std)
+
+        eps = Variable(cuda(std.data.new(std.size()).normal_(), std.is_cuda))
+
+        return mu + eps * std
+
+      
 
 class GumbelBLSTM(nn.Module):
   def __init__(self, 

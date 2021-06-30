@@ -93,15 +93,6 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     else:
       raise ValueError(f"Feature type {audio_feature} not supported")
 
-    ''' TODO
-    self.image_transforms = transforms.Compose(
-                [transforms.Scale(256),
-                 transforms.CenterCrop(224),
-                 transforms.ToTensor(),
-                 transforms.Normalize((0.485, 0.456, 0.406), 
-                                      (0.229, 0.224, 0.225))]
-                )
-    '''
     # Load each image-caption pairs
     audio = [example["audio"] for example in data]
     visual_words = [example["visual_words"] for example in data]
@@ -119,12 +110,14 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     audio, _ = torchaudio.load(audio_file)
     if self.audio_feature == "mfcc":
       inputs = self.audio_transforms(audio).squeeze(0) 
-      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()      
       nframes = inputs.size(-1)
+      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()      
+
     elif self.audio_feature == "wav2vec2":
+      nframes = int(audio.size(-1) // 320)
       inputs = fix_embedding_length(audio.t(), (self.max_feat_len+1)*320).t()
       inputs = inputs.squeeze(0)
-      nframes = int(inputs.size(0) // 320)
+
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
     return inputs, input_mask
@@ -138,10 +131,10 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     word_labels = self.preprocessor.to_word_index(visual_sent)
     phoneme_labels = fix_embedding_length(phoneme_labels,
                                           self.max_phone_num,
-                                          padding=-100)
+                                          padding=self.preprocessor.ignore_index)
     word_labels = fix_embedding_length(word_labels, 
                                        self.max_word_num,
-                                       padding=-100)
+                                       padding=self.preprocessor.ignore_index)
 
     phone_mask = torch.zeros(self.max_phone_num)
     n_phones = len(sent)
@@ -182,7 +175,8 @@ class LibriSpeechPreprocessor:
     ignore_index=-100
   ):
     self.num_features = num_features 
-
+    self.ignore_index = ignore_index
+    
     data = []
     for spl in splits:
       for sp in splits[spl]:
@@ -199,8 +193,6 @@ class LibriSpeechPreprocessor:
       visual_words.update(visual_sent)
     self.tokens = [BLANK]+sorted(tokens)
     self.visual_words = [BLANK]+sorted(visual_words)
-    # print(self.tokens)
-    # print(self.visual_words) # XXX
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
     self.word_to_index = {w:i for i, w in enumerate(self.visual_words)}
 

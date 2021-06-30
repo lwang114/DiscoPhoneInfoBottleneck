@@ -37,7 +37,6 @@ def main(argv):
   if config.mode == 'train':
     net.train(save_embedding=save_embedding)
   elif config.mode == 'test':
-    net.load_checkpoint()
     net.test(save_embedding=save_embedding) 
   else:
     return 0
