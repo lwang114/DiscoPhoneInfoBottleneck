@@ -447,22 +447,46 @@ class GaussianBLSTM(nn.Module):
                            num_layers=n_layers,
                            batch_first=True,
                            bidirectional=bidirectional)
-        self.decode = nn.Linear( * embedding_dim if bidirectional
+        self.encode = nn.Linear(2 * embedding_dim if bidirectional
+                                else embedding_dim,
+                                4 * embedding_dim if bidirectional
+                                else 2 * embedding_dim) # TODO
+        self.decode = nn.Linear(2 * embedding_dim if bidirectional
                                 else embedding_dim, self.n_class)
         
-    def forward(self, x, num_sample=1, return_feat=False): # TODO
-        if x.dim() > 2 : x = x.view(x.size(0),-1)
-
-        statistics = self.rnn(x)
-        mu = statistics[:,:self.K]
-        std = F.softplus(-1*torch.ones((x.size(0), self.K), device=x.device),beta=1) # XXX F.softplus(statistics[:,self.K:]-5,beta=1)
-
-        encoding = self.reparametrize_n(mu,std,num_sample)
+    def forward(self, x, 
+                num_sample=1, 
+                masks=None,
+                temp=1.,
+                return_feat=False): # TODO
+        ds_ratio = self.ds_ratio
+        device = x.device
+        if x.dim() < 3: 
+          x = x.unsqueeze(0)
+        elif x.dim() > 3:
+          x = x.squeeze(1)
+        x = x.permute(0, 2, 1)
+        
+        B = x.size(0)
+        T = x.size(1)
+        if self.bidirectional:
+          h0 = torch.zeros((2 * self.n_layers, B, self.K), device=x.device)
+          c0 = torch.zeros((2 * self.n_layers, B, self.K), device=x.device)
+        else:
+          h0 = torch.zeros((self.n_layers, B, self.K), device=x.device)
+          c0 = torch.zeros((self.n_layers, B, self.K), device=x.device)          
+        embedding, _ = self.rnn(x, (h0, c0))
+        statistics = self.encode(embedding) 
+        mu = statistics[:, :self.K]
+        std = F.softplus(statistics[:,self.K:]-5,beta=1)
+        encoding = self.reparametrize_n(mu, std, num_sample)
         logit = self.decode(encoding)
 
-        if num_sample == 1 : pass
-        elif num_sample > 1 : logit = F.softmax(logit, dim=2).mean(0)
+        if num_sample == 1: pass
+        elif num_sample > 1: logit = torch.log(F.softmax(logit, dim=2).mean(0))
 
+        if return_feat:
+          return (mu, std), logit, embedding
         return (mu, std), logit
 
     def reparametrize_n(self, mu, std, n=1):
@@ -479,7 +503,6 @@ class GaussianBLSTM(nn.Module):
             std = expand(std)
 
         eps = Variable(cuda(std.data.new(std.size()).normal_(), std.is_cuda))
-
         return mu + eps * std
 
       
