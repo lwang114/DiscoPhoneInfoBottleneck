@@ -16,8 +16,12 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     if [ -d $model_root/score_aud ]; then
       rm -r $model_root/score_aud
     fi
+
     ref_ali=$data_root/dev-clean/dev-clean.ali
     hyp_ali=$model_root/pred_dev-clean.ali
+    python ../VIB-pytorch/utils/utils.py 2 $data_root/dev-clean/dev-clean.item $data_root/dev-clean/dev-clean.ali $ref_ali $model_root/quantized_outputs.txt
+    python ../VIB-pytorch/utils/utils.py 3 $model_root/quantized_outputs.txt $hyp_ali 
+
     cwd=$(pwd)
     cd $eval_root
     bash $eval_root/steps/score_aud.sh $ref_ali $hyp_ali $model_root/score_aud
