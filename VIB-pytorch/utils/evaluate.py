@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import sys
 import matplotlib.pyplot as plt
 import editdistance
 
@@ -12,12 +13,12 @@ def parse_args():
         description='Evaluate the discovered phone units.'
     )
     parser.add_argument(
-        '--config', type=str
+        'TASK', type=int
     )
     parser.add_argument(
-        '--task', type=int
+        '--config', type=str
     )
-    return parser.parse_args()
+    return parser.parse_known_args()[0]
     
 def evaluate(pred_dicts, gold_dicts, token_path=None, ds_rate=1): # TODO Merge this with token f1
   '''
@@ -215,27 +216,21 @@ def compute_token_f1(pred_path, gold_path, out_path):
   plt.close()
   return token_f1, token_precision, token_recall
 
-def main():
+def main(argv):
   args = parse_args()
   
-  config = json.load(open(args.config)) 
-  if args.task == 0:
-    data_path = config['data_path']
-    # checkpoint_path = config['data']['checkpoint_path']
-    gold_path = os.path.join(data_path, 'gold_units.json')
-    # token_path = os.path.join(data_path, 'phone2id.json')
-    # gold_path = os.path.join(checkpoint_path, 'pred_units.json') 
-
-    gold_dicts = json.load(open(gold_path))
-    token_f1, conf_df, token_prec, token_rec = evaluate(gold_dicts, gold_dicts)
-    print('Token precision={:.3f}\tToken recall={:.3f}\tToken F1={:.3f}'.format(token_prec, token_rec, token_f1))  
-    conf_df.to_csv('confusion_matrix.csv')
-  elif args.task == 1:
-    gold_path = config['data_path']
-    pred_path = os.path.join(config['ckpt_dir'], 'quantized_outputs.txt')
-    out_path = os.path.join(config['ckpt_dir'], 'confusion.png')
+  if args.TASK == 0:
+    if args.config is not None:
+        config = json.load(open(args.config)) 
+        gold_path = config['data_path']
+        pred_path = os.path.join(config['ckpt_dir'], 'quantized_outputs.txt')
+        out_path = os.path.join(config['ckpt_dir'], 'confusion.png')
+    else:
+        gold_path = argv[1]
+        pred_path = argv[2]
+        out_path = argv[3]
     compute_token_f1(pred_path, gold_path, out_path)
-  elif args.task == 2:
+  elif args.TASK == 1:
     gold_path = 'unit_tests/'
     if not os.path.exists(gold_path):
         os.makedirs(gold_path)
@@ -260,4 +255,5 @@ def main():
     
 
 if __name__ == '__main__':
-    main()
+    argv = sys.argv[1:]
+    main(argv)

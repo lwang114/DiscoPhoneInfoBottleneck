@@ -437,7 +437,8 @@ class GaussianBLSTM(nn.Module):
                  ds_ratio=1,
                  bidirectional=True):
         super(GaussianBLSTM, self).__init__()
-        self.K = embedding_dim
+        self.K = 2 * embedding_dim if bidirectional\
+                 else embedding_dim
         self.n_layers = n_layers
         self.n_class = n_class
         self.ds_ratio = ds_ratio
@@ -450,7 +451,7 @@ class GaussianBLSTM(nn.Module):
         self.encode = nn.Linear(2 * embedding_dim if bidirectional
                                 else embedding_dim,
                                 4 * embedding_dim if bidirectional
-                                else 2 * embedding_dim) # TODO
+                                else 2 * embedding_dim)
         self.decode = nn.Linear(2 * embedding_dim if bidirectional
                                 else embedding_dim, self.n_class)
         
@@ -458,7 +459,7 @@ class GaussianBLSTM(nn.Module):
                 num_sample=1, 
                 masks=None,
                 temp=1.,
-                return_feat=False): # TODO
+                return_feat=False):
         ds_ratio = self.ds_ratio
         device = x.device
         if x.dim() < 3: 
@@ -470,15 +471,15 @@ class GaussianBLSTM(nn.Module):
         B = x.size(0)
         T = x.size(1)
         if self.bidirectional:
-          h0 = torch.zeros((2 * self.n_layers, B, self.K), device=x.device)
-          c0 = torch.zeros((2 * self.n_layers, B, self.K), device=x.device)
+          h0 = torch.zeros((2 * self.n_layers, B, int(self.K // 2)), device=x.device)
+          c0 = torch.zeros((2 * self.n_layers, B, int(self.K // 2)), device=x.device)
         else:
           h0 = torch.zeros((self.n_layers, B, self.K), device=x.device)
           c0 = torch.zeros((self.n_layers, B, self.K), device=x.device)          
         embedding, _ = self.rnn(x, (h0, c0))
         statistics = self.encode(embedding) 
-        mu = statistics[:, :self.K]
-        std = F.softplus(statistics[:,self.K:]-5,beta=1)
+        mu = statistics[:, :, :self.K]
+        std = F.softplus(statistics[:, :, self.K:]-5, beta=1)
         encoding = self.reparametrize_n(mu, std, num_sample)
         logit = self.decode(encoding)
 

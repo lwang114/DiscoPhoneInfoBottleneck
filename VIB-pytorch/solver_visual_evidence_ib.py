@@ -28,7 +28,9 @@ class Solver(object):
     self.beta = config.beta
     self.lr = config.lr
     self.n_layers = config.get('num_layers', 1)
+    self.weight_word_loss = config.get('weight_word_loss', 1.)
     self.weight_evidence = config.get('weight_evidence', 1.)
+    self.anneal_rate = config.get('anneal_rate', 3e-6)
     self.num_sample = config.get('num_sample', 1)
     self.eps = 1e-9
     if config.audio_feature == 'mfcc':
@@ -45,7 +47,7 @@ class Solver(object):
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
   
-    self K = config.K
+    self.K = config.K
     self.global_iter = 0
     self.global_epoch = 0
     self.audio_feature = config.audio_feature
@@ -59,17 +61,17 @@ class Solver(object):
     self.n_visual_class = self.data_loader['train']\
                           .dataset.preprocessor.num_visual_words
     self.n_phone_class = 50
-    self.visual_words = self.data_loader['train']                        .dataset.preprocessor.visual_words
+    self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     print(f'Number of visual label classes = {self.n_visual_class}')
     
     self.audio_net = cuda(GaussianBLSTM(
                             self.K,
                             input_size=self.input_size,
                             n_layers=self.n_layers,
-                            n_class=self.n_visual_class+self.input_size,
+                            n_class=self.n_visual_class+2*self.input_size,
                             ds_ratio=1,
                             bidirectional=True
-                          ))
+                          ), self.cuda)
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
     if optim_type == 'sgd':
@@ -78,12 +80,6 @@ class Solver(object):
       self.optim = optim.Adam(trainables,
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
-    self.ckpt_dir = Path(config.ckpt_dir)
-    if not self.ckpt_dir.exists():
-      self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-    self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode == 'test':
-      self.load_checkpoint()
 
     # History
     self.history = dict()
@@ -92,6 +88,14 @@ class Solver(object):
     self.history['loss'] = 0.
     self.history['epoch'] = 0
     self.history['iter'] = 0 
+    self.history['temp'] = 1.
+
+    self.ckpt_dir = Path(config.ckpt_dir)
+    if not self.ckpt_dir.exists():
+      self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+    self.load_ckpt = config.load_ckpt
+    if self.load_ckpt or config.mode == 'test':
+      self.load_checkpoint()
 
   def set_mode(self, mode='train'):
     if mode == 'train':
@@ -110,7 +114,7 @@ class Solver(object):
     preprocessor = self.data_loader['train'].dataset.preprocessor
     temp_min = 0.1
     anneal_rate = self.anneal_rate
-    temp = 1.
+    temp = self.history['temp']
         
     total_loss = 0.
     total_step = 0.
@@ -144,16 +148,17 @@ class Solver(object):
                                                 ) 
         word_logits = outputs[:, :, :self.n_visual_class]
         word_logits = torch.matmul(word_masks, word_logits)
-        mu_x = outputs[:, :, self.n_visual_class:]
-        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
-                                    ignore_index=-100,
-                                    ).div(math.log(2))
-        info_loss = -0.5 * (1 + 2*std.log() - mu.pow(2) - std.pow(2)).sum(-1).mean().div(math.log(2)) 
-        evidence_loss = F.mse_loss(x, mu_x)
-        loss = word_loss\
-               + self.weight_evidence * evidence_loss\
-               + self.beta * info_loss 
+        mu_x = outputs[:, :, self.n_visual_class:self.n_visual_class+self.input_size]
+        std_x = outputs[:, :, self.n_visual_class+self.input_size:self.n_visual_class+2*self.input_size]
+        std_x = F.softplus(std_x-5, beta=1)
 
+        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
+                                     ignore_index=-100,
+                                     ).div(math.log(2))
+        info_loss = -0.5 * (1 + 2*std.log() - mu.pow(2) - std.pow(2)).sum(-1).mean().div(math.log(2)) 
+        evidence_loss = self.weight_evidence * F.mse_loss(x.permute(0, 2, 1), mu_x)
+
+        loss = self.weight_word_loss * word_loss + evidence_loss + self.beta * info_loss
         izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
         total_loss += loss.cpu().detach().numpy()
@@ -164,6 +169,7 @@ class Solver(object):
         self.optim.step()
 
         for i in range(audios.size(0)):
+          word_len = word_lens[i]
           if word_len > 0:
             gold_word_labels.append(word_labels[i, :word_len].cpu().detach().numpy().tolist())
             pred_word_label = word_logits[i, :word_len].max(-1)[1]
@@ -175,21 +181,24 @@ class Solver(object):
           print(f'i:{self.global_iter:d} temp:{temp} avg loss (total loss):{avg_loss:.2f} ({total_loss:.2f}) '
                   f'IZY:{izy_bound:.2f} IZX:{izx_bound:.2f} Evidence:{evidence_loss}')
 
-    acc = compute_accuracy(gold_word_labels, pred_word_labels)
-    print(f'Epoch {self.global_epoch}\ttraining visual word accuracy: {acc:.3f}')
-    if (self.global_epoch % 2) == 0:
-      self.scheduler.step()
-    self.test(save_embedding=save_embedding)
+      acc = compute_accuracy(gold_word_labels, pred_word_labels)
+      print(f'Epoch {self.global_epoch}\ttraining visual word accuracy: {acc:.3f}')
+      if (self.global_epoch % 2) == 0:
+        self.scheduler.step()
+      self.test(save_embedding=save_embedding)
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset 
     preprocessor = testset.preprocessor
+    temp = self.history['temp']
     
     total_loss = 0.
+    total_neg_evidence = 0.
     total_num = 0.
-    gold_labels = []
-    pred_labels = []
+    gold_word_labels = []
+    pred_word_labels = []
+    gold_word_names = []
     if not self.ckpt_dir.joinpath('outputs/phonetic/dev-clean').is_dir():
       os.makedirs(self.ckpt_dir.joinpath('outputs/phonetic/dev-clean'))
 
@@ -220,7 +229,6 @@ class Solver(object):
         word_masks = cuda(word_masks, self.cuda)
 
         audio_lens = audio_masks.sum(-1).long()
-        sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
         (mu, std),\
         outputs,\
@@ -228,13 +236,27 @@ class Solver(object):
                                    masks=audio_masks,
                                    temp=temp,
                                    num_sample=self.num_sample,
-                                   return_feat=True
-                                                ) 
+                                   return_feat=True)
+         
         word_logits = outputs[:, :, :self.n_visual_class]
         word_logits = torch.matmul(word_masks, word_logits)
-        mu_x = outputs[:, :, self.n_visual_class:]
- 
-        for idx in range(audios.size(0)):
+        mu_x = outputs[:, :, self.n_visual_class:self.n_visual_class+self.input_size]
+        std_x = outputs[:, :, self.n_visual_class+self.input_size:self.n_visual_class+2*self.input_size]
+        std_x = F.softplus(std_x-5, beta=1)
+
+        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1),
+                                    word_labels,
+                                    ignore_index=-100)\
+                                    .div(math.log(2))
+
+        info_loss = -0.5 * (1 + 2*std.log() - mu.pow(2) - std.pow(2)).sum(-1).mean().div(math.log(2))
+        evidence_loss = self.weight_evidence * F.mse_loss(x.permute(0, 2, 1), mu_x).div(math.log(2))
+
+        total_loss += (self.weight_word_loss * word_loss + evidence_loss + self.beta * info_loss).cpu().detach().numpy()
+        total_neg_evidence += evidence_loss.cpu().detach().numpy()
+        total_num += 1.
+        
+        for idx in range(audios.size(0)): 
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
           if word_lens[idx] > 0:
@@ -247,7 +269,6 @@ class Solver(object):
             pred_word_labels.append(pred_words)       
             gold_word_names.append(preprocessor.to_word_text(gold_words))
             gold_word_str = ','.join(gold_word_names[-1])
-            
             pred_word_str = ','.join(preprocessor.to_word_text(pred_words))
  
             word_f.write(f'{audio_id}\t{gold_word_str}\t{pred_word_str}\n')
@@ -256,11 +277,12 @@ class Solver(object):
             np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]][::2].cpu().detach().numpy()) # XXX
     word_f.close()
     avg_loss = total_loss / total_num 
+    avg_neg_evidence = total_neg_evidence / total_num
     acc = compute_accuracy(gold_word_labels, pred_word_labels)
     
     print('[TEST RESULT]')
-    print('Epoch {}\tLoss: {:.4f}\tWord Acc.: {:.3f}'\
-          .format(self.global_epoch, avg_loss, acc))
+    print('Epoch {}\tLoss: {:.4f}\tEvidence Loss: {:.4f}\tWord Acc.: {:.3f}'\
+          .format(self.global_epoch, avg_loss, avg_neg_evidence, acc))
     if self.history['acc'] < acc:
       self.history['acc'] = acc
       self.history['loss'] = avg_loss
