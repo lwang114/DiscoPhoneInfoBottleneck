@@ -7,6 +7,12 @@ data_root=/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/
 eval_root=/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/beer/recipes/aud
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
+    python ../VIB-pytorch/utils/evaluate.py 0 $data_root/dev-clean \
+	   $model_root/quantized_outputs.txt \
+	   $model_root/token_f1_confusion.png
+fi
+    
+if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then    
     if [ -d $model_root/score_aud ]; then
       rm -r $model_root/score_aud
     fi
