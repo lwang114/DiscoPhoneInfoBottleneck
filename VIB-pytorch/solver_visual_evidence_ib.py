@@ -9,10 +9,11 @@ import argparse
 import os
 import json
 import math
+import time
 from itertools import groupby
 from pathlib import Path
 from sklearn.metrics import accuracy_score
-from sklearn.clustering import KMeans
+from sklearn.cluster import KMeans
 from utils.utils import cuda
 from model import GumbelBLSTM, GaussianBLSTM
 from datasets.datasets import return_data
@@ -31,6 +32,7 @@ class Solver(object):
     self.lr = config.lr
     self.n_layers = config.get('num_layers', 1)
     self.weight_word_loss = config.get('weight_word_loss', 1.)
+    self.weight_phone_loss = config.get('weight_phone_loss', 0.)
     self.weight_evidence = config.get('weight_evidence', 1.)
     self.anneal_rate = config.get('anneal_rate', 3e-6)
     self.num_sample = config.get('num_sample', 1)
@@ -62,15 +64,18 @@ class Solver(object):
     self.ignore_index = config.get('ignore_index', -100)
     self.n_visual_class = self.data_loader['train']\
                           .dataset.preprocessor.num_visual_words
-    self.n_phone_class = 50
+    self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     print(f'Number of visual label classes = {self.n_visual_class}')
-    
+   
+    output_size = self.n_visual_class+2*self.input_size
+    if self.weight_phone_loss > 0:
+      output_size += self.n_phone_class 
     self.audio_net = cuda(GaussianBLSTM(
                             self.K,
                             input_size=self.input_size,
                             n_layers=self.n_layers,
-                            n_class=self.n_visual_class+2*self.input_size,
+                            n_class=output_size,
                             ds_ratio=1,
                             bidirectional=True
                           ), self.cuda)
@@ -96,7 +101,7 @@ class Solver(object):
     if not self.ckpt_dir.exists():
       self.ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode == 'test':
+    if self.load_ckpt or config.mode in ['test', 'cluster']:
       self.load_checkpoint()
 
   def set_mode(self, mode='train'):
@@ -124,8 +129,8 @@ class Solver(object):
       self.global_epoch += 1
       pred_word_labels = []
       gold_word_labels = []
-      for idx, (audios, _, word_labels,\
-                audio_masks, _, word_masks)\
+      for idx, (audios, phoneme_labels, word_labels,\
+                audio_masks, phone_masks, word_masks)\
           in enumerate(self.data_loader['train']):
         if idx > 2 and self.debug:
           break
@@ -136,10 +141,14 @@ class Solver(object):
         if self.audio_feature == 'wav2vec2':
           x = self.audio_feature_net.feature_extractor(audios)
         word_labels = cuda(word_labels, self.cuda)
+        phoneme_labels = cuda(phoneme_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
+        phone_masks = cuda(phone_masks, self.cuda)
         word_masks = cuda(word_masks, self.cuda)
         audio_lens = audio_masks.sum(-1).long()
+        sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels > 0).long().sum(-1)
+
         (mu, std),\
         outputs,\
         embedding = self.audio_net(x,
@@ -157,10 +166,21 @@ class Solver(object):
         word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
                                      ignore_index=-100,
                                      ).div(math.log(2))
+        if self.weight_phone_loss > 0:
+          phone_logits = outputs[:, :, self.n_visual_class+2*self.input_size:]
+          phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1)\
+                                  .permute(1, 0, 2,),
+                                  phoneme_labels,
+                                  audio_lens,
+                                  sent_lens)
+        else:
+          phone_loss = 0
         info_loss = -0.5 * (1 + 2*std.log() - mu.pow(2) - std.pow(2)).sum(-1).mean().div(math.log(2)) 
         evidence_loss = self.weight_evidence * F.mse_loss(x.permute(0, 2, 1), mu_x)
 
-        loss = self.weight_word_loss * word_loss + evidence_loss + self.beta * info_loss
+        loss = self.weight_phone_loss * phone_loss +\
+               self.weight_word_loss * word_loss +\
+               evidence_loss + self.beta * info_loss
         izy_bound = math.log(self.n_visual_class, 2) - word_loss
         izx_bound = info_loss
         total_loss += loss.cpu().detach().numpy()
@@ -187,7 +207,10 @@ class Solver(object):
       print(f'Epoch {self.global_epoch}\ttraining visual word accuracy: {acc:.3f}')
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
+      if (self.global_epoch % 10) == 0:
+        self.cluster()
       self.test(save_embedding=save_embedding)
+
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -211,11 +234,12 @@ class Solver(object):
                      )
     word_f = open(out_word_file, 'w')
     word_f.write('Image ID\tGold label\tPredicted label\n')
+    phone_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt'), 'w')
 
     with torch.no_grad():
       B = 0
-      for b_idx, (audios, _, word_labels,\
-                  audio_masks, _, word_masks)\
+      for b_idx, (audios, phoneme_labels, word_labels,\
+                  audio_masks, phone_masks, word_masks)\
                   in enumerate(self.data_loader['test']):
         if b_idx > 2 and self.debug:
           break
@@ -225,12 +249,17 @@ class Solver(object):
         audios = cuda(audios, self.cuda)
         if self.audio_feature == 'wav2vec2':
           x = self.audio_feature_net.feature_extractor(audios)
+        else:
+          x = audios
         
         word_labels = cuda(word_labels, self.cuda)
+        phoneme_labels = cuda(phoneme_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
+        phone_masks = cuda(phone_masks, self.cuda)
         word_masks = cuda(word_masks, self.cuda)
 
         audio_lens = audio_masks.sum(-1).long()
+        sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
         (mu, std),\
         outputs,\
@@ -251,10 +280,22 @@ class Solver(object):
                                     ignore_index=-100)\
                                     .div(math.log(2))
 
+        if self.weight_phone_loss > 0:
+          phone_logits = outputs[:, :, self.n_visual_class+2*self.input_size:]
+          phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1)\
+                                  .permute(1, 0, 2),
+                                  phoneme_labels,
+                                  audio_lens,
+                                  sent_lens)
+        else:
+          phone_logits = None
+          phone_loss = 0.
         info_loss = -0.5 * (1 + 2*std.log() - mu.pow(2) - std.pow(2)).sum(-1).mean().div(math.log(2))
         evidence_loss = self.weight_evidence * F.mse_loss(x.permute(0, 2, 1), mu_x).div(math.log(2))
 
-        total_loss += (self.weight_word_loss * word_loss + evidence_loss + self.beta * info_loss).cpu().detach().numpy()
+        total_loss += (self.weight_phone_loss * phone_loss +\
+                       self.weight_word_loss * word_loss +\
+                       evidence_loss + self.beta * info_loss).cpu().detach().numpy()
         total_neg_evidence += evidence_loss.cpu().detach().numpy()
         total_num += 1.
         
@@ -275,9 +316,21 @@ class Solver(object):
  
             word_f.write(f'{audio_id}\t{gold_word_str}\t{pred_word_str}\n')
           self.ckpt_dir.joinpath(f'outputs/phonetic/dev-clean/{audio_id}.txt')
+          
+          if self.weight_phone_loss > 0:
+            gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
+            pred_phone_label = phone_logits[idx, :audio_lens[idx]].max(-1)[1] 
+            gold_phone_names = ','.join(preprocessor.to_text(gold_phone_label))
+            pred_phone_names = ','.join(preprocessor.tokens_to_text(pred_phone_label))
+            phone_readable_f.write(f'Utterance id: {audio_id}\n'
+                                   f'Gold transcript: {gold_phone_names}\n'
+                                   f'Pred transcript: {pred_phone_names}\n\n')
+
           if save_embedding:
             np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]][::2].cpu().detach().numpy()) # XXX
+          
     word_f.close()
+    phone_readable_f.close()
     avg_loss = total_loss / total_num 
     avg_neg_evidence = total_neg_evidence / total_num
     acc = compute_accuracy(gold_word_labels, pred_word_labels)
@@ -290,11 +343,18 @@ class Solver(object):
       self.history['loss'] = avg_loss
       self.history['epoch'] = self.global_epoch
       self.history['iter'] = self.global_iter
+      self.save_checkpoint()
+    else:
+      self.save_checkpoint(filename='latest.tar')
     self.set_mode('train')
 
   def cluster(self, 
               n_clusters=50,
               out_prefix='quantized_outputs'):
+    self.set_mode('eval')
+    testset = self.data_loader['test'].dataset 
+    temp = self.history['temp']
+
     us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio 
     with torch.no_grad():
       B = 0
@@ -307,33 +367,40 @@ class Solver(object):
           break
         if b_idx == 0:
           B = audios.size(0)
+
         
+        audios = cuda(audios, self.cuda)
+        audio_masks = cuda(audio_masks, self.cuda)
         if self.audio_feature == 'wav2vec2':
           x = self.audio_feature_net.feature_extractor(audios)
-          audio_masks = cuda(audio_masks, self.cuda)
-          audio_lens = audio_masks.sum(-1).long()
-          _, _, embedding = self.audio_net(x,
-                                           masks=audio_masks,
-                                           temp=temp,
-                                           num_sample=self.num_sample,
-                                           return_feat=True)
+        else:
+          x = audios
+        
+        audio_lens = audio_masks.sum(-1).long()
+        _, _, embedding = self.audio_net(x,
+                                         temp=temp,
+                                         masks=audio_masks,
+                                         num_sample=self.num_sample,
+                                         return_feat=True)
         
         for idx in range(audios.size(0)): 
           global_idx = b_idx * B + idx
           utt_id = os.path.splitext(os.path.basename(testset.dataset[global_idx][0]))[0] 
-          X.extend(embedding[idx, :audio_lens[idx]].cpu().detach().numpy().tolist())
-          utt_ids.extend([utt_id]*audio_lens[idx])
-          print(utt_id) # XXX
+          embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+          X.extend(embed.tolist())
+          utt_ids.extend([utt_id]*embed.shape[0])
+
       X = np.asarray(X)
+      begin_time = time.time()
       clusterer = KMeans(n_clusters=n_clusters).fit(X) 
+      print(f'KMeans take {time.time()-begin_time} s to finish')
       np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
       
       ys = clusterer.predict(X)
       filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
       out_f = open(filename, 'w')
-      for _, (utt_id, group) in itertools.groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
-        print(utt_id, list(group)) # XXX
-        y = ' '.join([str(g[1]) for g in group for _ in range(us_ratio)])
+      for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
+        y = ','.join([str(g[1]) for g in group for _ in range(us_ratio)])
         out_f.write(f'{utt_id} {y}\n') 
       out_f.close()
       gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
@@ -362,7 +429,7 @@ class Solver(object):
     torch.save(states, file_path.open('wb+'))
     print('=> saved checkpoint "{}" (iter {}, epoch {})'.format(file_path, self.global_iter, self.global_epoch)) 
 
-  def load_checkpoint(self, filename='best_acc.tar'):
+  def load_checkpoint(self, filename='latest.tar'): # XXX 'best_acc.tar' 
     file_path = self.ckpt_dir.joinpath(filename)
     if file_path.is_file():
       print(f'=> loading checkpoint "{file_path}"')

@@ -12,7 +12,7 @@ import math
 from utils.utils import cuda
 from pathlib import Path
 from sklearn.metrics import accuracy_score
-from model import GumbelBLSTM, GumbelMLP, GumbelTDS, VQMLP
+from model import GumbelBLSTM, GumbelMLP, GumbelTDS, VQMLP, BLSTM
 from datasets.datasets import return_data 
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -69,7 +69,7 @@ class Solver(object):
     print(f'Number of phone classes = {self.n_phone_class}')
   
     self.model_type = config.model_type 
-    if config.model_type == 'blstm':
+    if config.model_type == 'gumbel_blstm':
       self.audio_net = cuda(GumbelBLSTM(
                               self.K,
                               input_size=self.input_size,
@@ -78,6 +78,14 @@ class Solver(object):
                               n_gumbel_units=self.n_phone_class,
                               ds_ratio=1,
                               bidirectional=True), self.cuda)
+      self.K = 2 * self.K
+    elif config.model_type == 'blstm':
+      self.audio_net = cuda(BLSTM(
+        self.K,
+        input_size=self.input_size,
+        n_layers=self.n_layers,
+        n_class=self.n_visual_class+self.n_phone_class,
+        bidirectional=True), self.cuda)
       self.K = 2 * self.K
     elif config.model_type == 'mlp':
       self.audio_net = cuda(GumbelMLP(
@@ -173,13 +181,18 @@ class Solver(object):
         sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
 
-        gumbel_logits, out_logits, _, embedding = self.audio_net(
-                               x, masks=audio_masks,
-                               temp=temp,
-                               num_sample=self.num_sample,
-                               return_feat=True)
-        phone_logits = gumbel_logits
-        word_logits = out_logits
+        if self.model_type == "blstm":
+          out_logits, embedding = self.audio_net(x, return_feat=True)
+          word_logits = out_logits[:, :, :self.n_visual_class]
+          phone_logits = out_logits[:, :, self.n_visual_class:]
+        else:
+          gumbel_logits, out_logits, _, embedding = self.audio_net(
+            x, masks=audio_masks,
+            temp=temp,
+            num_sample=self.num_sample,
+            return_feat=True)
+          phone_logits = gumbel_logits
+          word_logits = out_logits
         quantized = None
         if self.model_type == 'vq-mlp':
           word_logits = out_logits[:, :, :self.n_visual_class]
@@ -195,8 +208,8 @@ class Solver(object):
                                 phoneme_labels,
                                 audio_lens,
                                 sent_lens) 
-        info_loss = (F.softmax(gumbel_logits, dim=-1)\
-                      * F.log_softmax(gumbel_logits, dim=-1)
+        info_loss = (F.softmax(phone_logits, dim=-1)\
+                      * F.log_softmax(phone_logits, dim=-1)
                     ).sum().div(sent_lens.sum()*math.log(2)) 
         loss = self.weight_phone_loss * phone_loss +\
                self.weight_word_loss * word_loss +\
@@ -310,13 +323,18 @@ class Solver(object):
         audio_lens = audio_masks.sum(-1).long()
         sent_lens = phone_masks.sum(-1).long()
         word_lens = (word_labels >= 0).long().sum(-1)
-        
-        gumbel_logits, out_logits, encoding, embedding = self.audio_net(
-                                                           audios, masks=audio_masks,
-                                                           return_feat=True)
 
-        phone_logits = gumbel_logits
-        word_logits = out_logits
+        if self.model_type == 'blstm':
+          out_logits, embedding = self.audio_net(audios, return_feat=True)
+          word_logits = out_logits[:, :, :self.n_visual_class]
+          phone_logits = out_logits[:, :, self.n_visual_class:]
+        else:
+          gumbel_logits, out_logits, encoding, embedding = self.audio_net(
+            audios, masks=audio_masks,
+            return_feat=True)
+          phone_logits = gumbel_logits
+          word_logits = out_logits
+
         if self.model_type == 'vq-mlp':
           word_logits = out_logits[:, :, :self.n_visual_class]
 
@@ -330,8 +348,8 @@ class Solver(object):
                                 phoneme_labels,
                                 audio_lens,
                                 sent_lens)
-        info_loss = (F.softmax(gumbel_logits, dim=-1)\
-                      * F.log_softmax(gumbel_logits, dim=-1)
+        info_loss = (F.softmax(phone_logits, dim=-1)\
+                      * F.log_softmax(phone_logits, dim=-1)
                     ).sum().div(sent_lens.sum() * math.log(2))
         total_loss += word_loss + phone_loss + self.beta * info_loss
         total_num += 1. 
@@ -360,7 +378,7 @@ class Solver(object):
             np.savetxt(feat_fn, embedding[idx, :audio_lens[idx]][::2].cpu().detach().numpy()) # XXX
            
           gold_phone_label = phoneme_labels[idx, :sent_lens[idx]]
-          pred_phone_label = gumbel_logits[idx, :audio_lens[idx]].max(-1)[1]
+          pred_phone_label = phone_logits[idx, :audio_lens[idx]].max(-1)[1]
           gold_phone_names = ','.join(preprocessor.to_text(gold_phone_label))
           pred_phone_names = ','.join(preprocessor.tokens_to_text(pred_phone_label))
           phone_readable_f.write(f'Utterance id: {audio_id}\n'

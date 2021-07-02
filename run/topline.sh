@@ -14,6 +14,8 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
     hyp_ali=$model_root/pred_dev-clean.ali
     cwd=$(pwd)
     cd $eval_root
+    conda activate beer
     bash $eval_root/steps/score_aud.sh $ref_ali $hyp_ali $model_root/score_aud
+    conda deactivate
     cd $cwd
 fi

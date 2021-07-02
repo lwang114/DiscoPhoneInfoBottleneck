@@ -1,16 +1,16 @@
 #!/bin/bash/
 
 gpu_num=1
-stage=1
+stage=0
 stop_stage=1
-model_root=/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/VIB-pytorch/checkpoints/phone_discovery_librispeech_wav2vec2_evidence_ib_vae/
+model_root=/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/VIB-pytorch/checkpoints/phone_discovery_librispeech_wav2vec2_multilingual_evidence_ib/
 data_root=/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/
 eval_root=/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/beer/recipes/aud
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   cwd=$(pwd)
   cd ../VIB-pytorch
-  CUDA_VISIBLE_DEVICES=$gpu_num python main_visual_evidence_ib.py configs/librispeech_wav2vec2_evidence_ib.json || exit 1; 
+  CUDA_VISIBLE_DEVICES=$gpu_num python main_visual_evidence_ib.py configs/librispeech_wav2vec2_multilingual_evidence_ib.json || exit 1; 
   cd $cwd 
 fi
 

@@ -130,7 +130,6 @@ def compute_token_f1(pred_path, gold_path, out_path):
       gold_file_path = os.path.join(gold_root, gold_file)
       _extract_gold_units(gold_file_path)
     
-
   pred_units = dict()
   pred_tokens = set()
   with open(pred_path, 'r') as f:
