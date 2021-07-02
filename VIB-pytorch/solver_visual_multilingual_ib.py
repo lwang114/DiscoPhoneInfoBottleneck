@@ -120,7 +120,7 @@ class Solver(object):
     if not self.ckpt_dir.exists(): 
       self.ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode == 'test': 
+    if self.load_ckpt or config.mode in ['test', 'cluster']: 
       self.load_checkpoint()
     
     # History
@@ -425,6 +425,68 @@ class Solver(object):
       self.history['token_f1'] = token_f1
       self.save_checkpoint('best_acc.tar')
     self.set_mode('train')
+
+  def cluster(self,
+              n_clusters=50,
+              out_prefix='quantized_outputs'):
+    self.set_mode('eval')
+    testset = self.data_loader['test'].dataset
+    temp = self.history['temp']
+
+    us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio 
+    with torch.no_grad():
+      B = 0
+      utt_ids = []
+      X = []      
+      for b_idx, (audios, phoneme_labels, word_labels,\
+                  audio_masks, phone_masks, word_masks)\
+                  in enumerate(self.data_loader['test']):
+        if b_idx > 2 and self.debug:
+          break
+        if b_idx == 0:
+          B = audios.size(0)
+
+        
+        audios = cuda(audios, self.cuda)
+        audio_masks = cuda(audio_masks, self.cuda)
+        if self.audio_feature == 'wav2vec2':
+          x = self.audio_feature_net.feature_extractor(audios)
+        else:
+          x = audios
+        
+        audio_lens = audio_masks.sum(-1).long()
+        _, _, embedding = self.audio_net(x,
+                                         temp=temp,
+                                         masks=audio_masks,
+                                         num_sample=self.num_sample,
+                                         return_feat=True)
+        
+        for idx in range(audios.size(0)): 
+          global_idx = b_idx * B + idx
+          utt_id = os.path.splitext(os.path.basename(testset.dataset[global_idx][0]))[0] 
+          embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+          X.extend(embed.tolist())
+          utt_ids.extend([utt_id]*embed.shape[0])
+
+      X = np.asarray(X)
+      begin_time = time.time()
+      clusterer = KMeans(n_clusters=n_clusters).fit(X) 
+      print(f'KMeans take {time.time()-begin_time} s to finish')
+      np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
+      
+      ys = clusterer.predict(X)
+      filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
+      out_f = open(filename, 'w')
+      for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
+        y = ','.join([str(g[1]) for g in group for _ in range(us_ratio)])
+        out_f.write(f'{utt_id} {y}\n') 
+      out_f.close()
+      gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
+      token_f1, token_prec, token_recall = compute_token_f1(
+                                             filename,
+                                             gold_path,
+                                             self.ckpt_dir.joinpath(f'confusion.png'),
+                                           )
 
   def save_checkpoint(self, filename='best_acc.tar'):
     model_states = {
