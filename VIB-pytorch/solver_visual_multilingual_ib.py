@@ -9,9 +9,12 @@ import argparse
 import os
 import json
 import math
+import time
+from itertools import groupby
 from utils.utils import cuda
 from pathlib import Path
 from sklearn.metrics import accuracy_score
+from sklearn.cluster import KMeans
 from model import GumbelBLSTM, GumbelMLP, GumbelTDS, VQMLP, BLSTM
 from datasets.datasets import return_data 
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -130,6 +133,7 @@ class Solver(object):
     self.history['loss']=0.
     self.history['epoch']=0
     self.history['iter']=0
+    self.history['temp']=1.
  
   def set_mode(self, mode='train'):
     if mode == 'train':
@@ -251,7 +255,8 @@ class Solver(object):
           avg_loss = total_loss / total_step
           print(f'i:{self.global_iter:d} temp:{temp} avg loss (total loss):{avg_loss:.2f} ({total_loss:.2f}) '
                 f'IZY:{izy_bound:.2f} IZX:{izx_bound:.2f}')
-      
+          self.history['temp'] = temp
+
       # Evaluate training visual word classification accuracy and phone token error rate
       acc = compute_accuracy(gold_word_labels, pred_word_labels)
       dist, n_tokens = compute_edit_distance(pred_phone_labels, gold_phone_labels, preprocessor)
@@ -455,12 +460,9 @@ class Solver(object):
           x = audios
         
         audio_lens = audio_masks.sum(-1).long()
-        _, _, embedding = self.audio_net(x,
-                                         temp=temp,
-                                         masks=audio_masks,
-                                         num_sample=self.num_sample,
-                                         return_feat=True)
-        
+        outputs = self.audio_net(x, return_feat=True)
+        embedding = outputs[-1]
+
         for idx in range(audios.size(0)): 
           global_idx = b_idx * B + idx
           utt_id = os.path.splitext(os.path.basename(testset.dataset[global_idx][0]))[0] 

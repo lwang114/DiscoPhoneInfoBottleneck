@@ -38,6 +38,8 @@ def main(argv):
     net.train(save_embedding=save_embedding)
   elif config.mode == 'test':
     net.test(save_embedding=save_embedding) 
+  elif config.mode == 'cluster':
+    net.cluster()
   else:
     return 0
 
