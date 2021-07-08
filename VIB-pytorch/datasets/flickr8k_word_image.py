@@ -67,6 +67,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.ds_method = ds_method
     self.sample_rate = sample_rate
     self.max_feat_len = 100
+    self.max_word_len = 100
     self.max_segment_num = 10
     
     data = []
@@ -207,16 +208,25 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     return feat.squeeze(-1)
 
   def __getitem__(self, idx):
-    audio_file, image_file, label, phoneme, box, box_idx = self.dataset[idx]
+    audio_file, image_file, label, phoneme_dicts, box, box_idx = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
     if self.use_segment:
       audio_inputs, input_mask = self.segment(audio_inputs.t(), 
-                                              phoneme,
+                                              phoneme_dicts,
                                               method=self.ds_method)
       audio_inputs = audio_inputs.t()
+    phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     image_inputs = self.load_image(image_file, box, box_idx)
-    outputs = self.preprocessor.to_index(label).squeeze(0)
-    return audio_inputs, image_inputs, outputs, input_mask, 1. 
+    word_labels = self.preprocessor.to_index(label).squeeze(0)
+    phone_labels = self.preprocessor.to_phone_index(phonemes)
+
+    word_mask = torch.zeros((1, self.max_feat_len, self.max_feat_len))
+    for t in range(input_mask.sum()):
+      word_mask[0, t, t] = 1. 
+    phone_mask = torch.zeros(self.max_phone_num,)
+    phone_mask[:len(phoneme)] = 1.
+
+    return audio_inputs, image_inputs, word_labels, phone_labels, input_mask, word_mask, phone_mask 
 
   def __len__(self):
     return len(self.dataset)
@@ -281,20 +291,33 @@ class FlickrWordImagePreprocessor:
                                     image_feature=image_feature,
                                     min_class_size=self.min_class_size)) 
     tokens = set()
-    lexicon = {}
+    phone_tokens = set()
     for ex in data:
       tokens.add(ex["text"])
+      for phn in ex["phonemes"]:
+        phone_tokens.add(phn["text"])
     self.tokens = sorted(tokens)
+    self.phone_tokens = sorted(phone_tokens)
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
+    self.phone_tokens_to_index = {t:i for i, t in enumerate(self.phone_tokens)}
     print(f"Number of classes: {self.num_tokens}")
-  
+    print(f"Number of phone classes: {self.num_phone_tokens}")
+    
   @property
   def num_tokens(self):
     return len(self.tokens)
 
+  @property
+  def num_phone_tokens(self):
+    return len(self.phone_tokens)
+
   def to_index(self, line):
     tok_to_idx = self.tokens_to_index
     return torch.LongTensor([tok_to_idx.get(t, 0) for t in line.split(self.wordsep)])
+
+  def to_phone_index(self, sent):
+    tok_to_idx = self.phone_tokens_to_index
+    return torch.LongTensor([tok_to_idx.get(t, 0) for t in sent])
 
 def load_data_split(data_path, split,
                     audio_feature="mfcc",

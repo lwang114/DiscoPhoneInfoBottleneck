@@ -32,7 +32,6 @@ def fix_embedding_length(emb, L, padding=0):
     emb = emb[:L]
   return emb
 
-
 class LibriSpeechDataset(torch.utils.data.Dataset):
   
   
@@ -105,6 +104,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       self.max_feat_len = 1024
     self.max_phone_num = 200
     self.max_word_num = 10
+    self.max_word_len = 100
 
   def load_audio(self, audio_file):
     audio, _ = torchaudio.load(audio_file)
@@ -140,11 +140,14 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     n_phones = len(sent)
     phone_mask[:n_phones] = 1.
     
-    word_mask = torch.zeros(self.max_word_num, self.max_feat_len)
+    word_mask = torch.zeros(self.max_word_num, self.max_word_len, self.max_feat_len)
     for i, w in enumerate(visual_words):
       begin_frame = int(w['begin']*1000/self.hop_length)
       end_frame = int(w['end']*1000/self.hop_length)
-      word_mask[i, begin_frame:end_frame] = 1.
+      for j, t in enumerate(range(begin_frame, end_frame+1)):
+        if j >= self.max_word_len:
+          break
+        word_mask[i, j, t] = 1.
 
     return audio_inputs,\
            phoneme_labels,\
