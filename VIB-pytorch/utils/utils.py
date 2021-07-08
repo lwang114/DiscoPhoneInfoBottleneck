@@ -107,7 +107,7 @@ def convert_item_to_output_format(item_file,
       out_f.write(f'{audio_id} {sequence_str}\n')
 
 
-def convert_json_to_item(json_path, output_path):
+def convert_json_to_item(json_path, output_path, visual_word_only=False):
   """
   Args :
       json_path : str, .json file, each line storing a dict of
@@ -130,8 +130,12 @@ def convert_json_to_item(json_path, output_path):
         utt_id = label_dict['utterance_id']
       else:
         utt_id = label_dict['audio_id']
-      
-      phonemes_with_stress = [phn for w in label_dict['words'] for phn in w['phonemes']]
+     
+      if visual_word_only:
+        visual_words = label_dict['visual_words']
+        phonemes_with_stress = [phn for w_idx, w in enumerate(label_dict['words']) for phn in w['phonemes'] if w_idx in visual_words] 
+      else: 
+        phonemes_with_stress = [phn for w in label_dict['words'] for phn in w['phonemes']]
       for phn_idx, phn in enumerate(phonemes_with_stress):
         token = re.sub(r'[0-9]', '', phn['text'])
         if phn_idx == 0:
@@ -239,3 +243,11 @@ if __name__ == '__main__':
       # output_file = '../../zerospeech2021-submission-baseline-lstm/code/zerospeech2021_baseline/outputs_quantized/quantized_outputs.txt' 
       # pred_beer_file = '../../zerospeech2021-submission-baseline-lstm/code/zerospeech2021_baseline/outputs_quantized/pred_dev-clean.ali'
     convert_output_to_beer_format(output_file, pred_beer_file)
+  elif args.TASK == 4:
+    if len(argv) > 1:
+      input_file = argv[1]
+      output_file = argv[2]
+    else:
+      input_file = '../../../../data/zerospeech2021-dataset/phonetic/dev-clean/dev-clean.json'
+      output_file = 'dev-clean_visual.item'
+    convert_json_to_item(input_file, output_file, visual_word_only=True)
