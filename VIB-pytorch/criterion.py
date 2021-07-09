@@ -23,10 +23,6 @@ class MicroTokenFLoss(nn.Module):
     EPS = 1e-10
     prediction = prediction * mask.unsqueeze(-1)
     target = target * mask.unsqueeze(-1)
-    total_seq_len = mask.sum().long()
-
-    if total_seq_len == 0:
-      return torch.tensor(0., device=input.device)
 
     TP = (prediction * target).sum() 
     H = self.beta * target.sum() + prediction.sum()
@@ -37,8 +33,27 @@ class MicroTokenFLoss(nn.Module):
       floss = 1 - fmeasure 
     return floss
 
-# class MacroTokenFLoss(nn.Module):
-#  def __init__(self, beta=0.3, log)
+class MacroTokenFLoss(nn.Module):
+  def __init__(self, beta=0.3, log_like=False):
+    super(MacroTokenFLoss, self).__init__()
+    self.beta = beta
+    self.log_like = log_like
+
+  def forward(self, prediction, target, mask):
+    EPS = 1e-10
+    K = prediction.size(-1)
+    prediction = prediction * mask.unsqueeze(-1)
+    target = target * mask.unsqueeze(-1)
+
+    TP = (prediction * target).view(-1, K).sum(dim=0)
+    H = self.beta * target.view(-1, K).sum(dim=0) + prediction.view(-1, K).sum(dim=0)
+    fmeasure = (1 + self.beta) * TP / (H + EPS)
+    fmeasure = fmeasure.mean()
+    if self.log_like:
+      floss = -torch.log(fmeasure)
+    else:
+      floss = 1 - fmeasure
+    return floss
 
 class WordLabelABXLoss(nn.Module):
   """
