@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import json
 
 class UnigramPronunciator(nn.Module):
   """
@@ -17,7 +18,7 @@ class UnigramPronunciator(nn.Module):
     self.ignore_index = ignore_index
 
     pron_counts = torch.zeros((self.n_word_class, self.n_phone_class))
-    self.register_buffer('pron_counts', pron_prob)
+    self.register_buffer('pron_counts', pron_counts)
 
   def update(self, words, phones):
     """
@@ -32,16 +33,18 @@ class UnigramPronunciator(nn.Module):
         for phn in phone:
           if phn == self.ignore_index:
             continue
-          self.pron_counts[x, y] = self.pron_counts[x, y] + 1.
+          self.pron_counts[wrd, phn] = self.pron_counts[wrd, phn] + 1.
 
-  @property
   def pronounce_prob(self):
-    return self.pron_counts / torch.maximum(self.pron_counts.sum(1, keepdim=True), 1) 
+    norm = self.pron_counts.sum(1, keepdim=True)
+    norm = torch.where(norm > 0, norm, torch.tensor(1., device=norm.device))
+    return self.pron_counts / norm
+                                         
 
   def forward(self, x):
-    x = np.where(x != self.ignore_index,
-                 x, torch.tensor(0, dtype=torch.long, device=x.device)) 
-    return self.pronounce_prob[x]
+    x = torch.where(x != self.ignore_index,
+                    x, torch.tensor(0, dtype=torch.long, device=x.device)) 
+    return self.pronounce_prob()[x]
   
   def save_readable(self, filename='pronounce_prob.json'):
     pron_counts = self.pron_counts.cpu().detach().numpy().tolist()
