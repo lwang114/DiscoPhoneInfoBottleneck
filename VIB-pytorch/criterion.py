@@ -1,33 +1,44 @@
+# Some code modified from https://github.com/zeakey/iccv2019-fmeasure/blob/master/pytorch/floss.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
 
-class MicroTokenF1Loss(nn.Module):
-  def __init__(self, beta=1.):
-    super(MicroTokenF1Loss, self).__init__()
+class MicroTokenFLoss(nn.Module):
+  def __init__(self, beta=0.3, log_like=False):
+    super(MicroTokenFLoss, self).__init__()
     self.beta = beta
+    self.log_like = log_like
 
-  def forward(self, input, target, seq_lens):
+  def forward(self, prediction, target, mask):
     """
     Args :
-        input : FloatTensor of size (batch size, sequence length, num. of clusters)
+        prediction : FloatTensor of size (batch size, sequence length, num. of clusters)
         target : FloatTensor of size (batch size, sequence length, num. of classes) 
-        seq_lens : LongTensor of size (batch size,)
+        mask : LongTensor of size (batch size, sequence length)
 
     Returns :
-        loss : torch.Float, the negative micro token F1  
+        floss : torch.Float, the negative micro token F1  
     """
-    total_seq_len = seq_lens.sum() 
-    
-    # (num. of classes, num. of clusters)
-    confusion = input.unsqueeze(-2) * target.unsqueeze(-1).sum(dim=(0, 1)) 
-    tpp = confusion.max(0)[0]
-    tpr = confusion.max(1)[0]
-    f_beta = (1 + self.beta.pow(2)) * tpp * tpr\
-             / (total_seq_len * (self.beta.pow(2) * tpp + tpr)) 
-    return -f_beta
+    EPS = 1e-10
+    prediction = prediction * mask.unsqueeze(-1)
+    target = target * mask.unsqueeze(-1)
+    total_seq_len = mask.sum().long()
 
+    if total_seq_len == 0:
+      return torch.tensor(0., device=input.device)
+
+    TP = (prediction * target).sum() 
+    H = self.beta * target.sum() + prediction.sum()
+    fmeasure = (1 + self.beta) * TP / (H + EPS)
+    if self.log_like:
+      floss = -torch.log(fmeasure)
+    else:
+      floss = 1 - fmeasure 
+    return floss
+
+# class MacroTokenFLoss(nn.Module):
+#  def __init__(self, beta=0.3, log)
 
 class WordLabelABXLoss(nn.Module):
   """
