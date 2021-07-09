@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from utils.utils import cuda
 from model import BLSTM
-from phone_model import UnigramPronunciator
+from phone_model import UnigramPronunciator, LinearPositionAligner
 from criterion import MicroTokenFLoss, MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -87,6 +87,7 @@ class Solver(object):
     self.phone_net = cuda(UnigramPronunciator(self.visual_words,
                                               self.phone_set,
                                               ignore_index=self.ignore_index), self.cuda)
+    self.align_net = cuda(LinearPositionAligner(), self.cuda)  
 
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
@@ -159,9 +160,18 @@ class Solver(object):
         word_lens = word_masks.sum(dim=(-1, -2)).long()
         
         cluster_logits, embedding = self.audio_net(x, return_feat=True)
-        # Extract cluster and phone counts for visual words 
-        # cluster_probs = F.softmax(cluster_logits, dim=-1).unsqueeze(1) 
-        # cluster_probs = cluster_probs / cluster_probs.max(-1, keepdim=True)[0]
+        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels, self.n_phone_class),
+                                                phone_masks,
+                                                audio_masks) 
+        loss = self.criterion(cluster_logits,
+                              phoneme_labels_aligned,
+                              phone_masks)
+
+        # Extract cluster and phone counts for visual words
+        cluster_probs = F.softmax(cluster_logits, dim=-1).unsqueeze(1) 
+        if self.max_normalize:
+          cluster_probs = cluster_probs / cluster_probs.max(-1, keepdim=True)[0]
+
         word_cluster_logits = torch.matmul(word_masks, cluster_logits.unsqueeze(1))
         word_cluster_probs = F.softmax(word_cluster_logits, dim=-1)\
                              .view(-1, self.max_word_len, self.n_phone_class)
@@ -174,9 +184,9 @@ class Solver(object):
         word_phone_probs = word_phone_probs\
                            .unsqueeze(1).expand(-1, self.max_word_len, -1)
 
-        loss = self.criterion(word_cluster_probs,
-                              word_phone_probs,
-                              word_masks.sum(-1).view(-1, self.max_word_len))
+        loss = loss + self.criterion(word_cluster_probs,
+                                     word_phone_probs,
+                                     word_masks.sum(-1).view(-1, self.max_word_len))
         total_loss += loss.cpu().detach().numpy() 
         total_step += 1.
 
@@ -246,10 +256,16 @@ class Solver(object):
         word_lens = word_masks.sum(dim=(-2, -1)).long()
         word_num = (word_labels >= 0).long().sum(-1)
         cluster_logits, embedding = self.audio_net(x, return_feat=True)
+        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels, self.n_phone_class), 
+                                                phone_masks, 
+                                                audio_masks)
 
         cluster_probs = F.softmax(cluster_logits, dim=-1)
         if self.max_normalize:
           cluster_probs = cluster_probs / cluster_probs.max(-1, keepdim=True)[0] 
+        loss = self.criterion(cluster_probs,
+                              phoneme_labels_aligned,
+                              phone_masks)
 
         word_cluster_logits = torch.matmul(word_masks, cluster_logits.unsqueeze(1))
         word_cluster_probs = F.softmax(word_cluster_logits, dim=-1)\
@@ -260,9 +276,9 @@ class Solver(object):
         word_phone_probs = word_phone_probs\
                            .unsqueeze(1).expand(-1, self.max_word_len, -1)
         
-        loss = self.criterion(word_cluster_probs,
-                              word_phone_probs,
-                              word_masks.sum(-1).view(-1, self.max_word_len))
+        loss = loss + self.criterion(word_cluster_probs,
+                                     word_phone_probs,
+                                     word_masks.sum(-1).view(-1, self.max_word_len))
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
         

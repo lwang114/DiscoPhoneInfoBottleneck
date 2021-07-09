@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import argparse
 from utils.utils import str2bool
-from solver_visual_multilingual_max_token_f1 import Solver
+from solver_visual_multilingual_max_token_f_measure import Solver
 from pyhocon import ConfigFactory
 import sys
 import os
