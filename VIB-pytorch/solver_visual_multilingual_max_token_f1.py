@@ -12,7 +12,7 @@ from pathlib import Path
 from utils.utils import cuda
 from model import BLSTM
 from phone_model import UnigramPronunciator
-from criterion import MicroTokenFLoss
+from criterion import MicroTokenFLoss, MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -54,7 +54,14 @@ class Solver(object):
     self.debug = config.debug
     self.dataset = config.dataset
     self.max_normalize = config.get('max_normalize', False)
-    self.beta_f_measure = config.get('beta_f_measure', 1.)
+    self.loss_type = config.get('loss_type', 'macro_token_floss')
+    self.beta_f_measure = config.get('beta_f_measure', 0.3)
+    if self.loss_type == 'macro_token_floss':
+      self.criterion = MacroTokenFLoss(beta=self.beta_f_measure)
+    elif self.loss_type == 'micro_token_floss':
+      self.criterion = MicroTokenFLoss(beta=self.beta_f_measure)
+    else:
+      raise ValueError(f'Invalid loss type {self.loss_type}')
 
     # Dataset
     self.data_loader = return_data(config)
@@ -122,7 +129,7 @@ class Solver(object):
     
     if not self.load_ckpt:
       self.train_phone_net()
-    criterion = MicroTokenFLoss(beta=self.beta_f_measure)
+    
     for e in range(self.epoch):
       self.global_epoch += 1
       pred_phone_labels = []
@@ -167,9 +174,9 @@ class Solver(object):
         word_phone_probs = word_phone_probs\
                            .unsqueeze(1).expand(-1, self.max_word_len, -1)
 
-        loss = criterion(word_cluster_probs,
-                         word_phone_probs,
-                         word_masks.sum(-1).view(-1, self.max_word_len))
+        loss = self.criterion(word_cluster_probs,
+                              word_phone_probs,
+                              word_masks.sum(-1).view(-1, self.max_word_len))
         total_loss += loss.cpu().detach().numpy() 
         total_step += 1.
 
@@ -195,7 +202,6 @@ class Solver(object):
     testset = self.data_loader['test'].dataset
     preprocessor = testset.preprocessor
 
-    criterion = MicroTokenFLoss(beta=self.beta_f_measure) 
     total_loss = 0.
     total_step = 0.
 
@@ -254,9 +260,9 @@ class Solver(object):
         word_phone_probs = word_phone_probs\
                            .unsqueeze(1).expand(-1, self.max_word_len, -1)
         
-        loss = criterion(word_cluster_probs,
-                         word_phone_probs,
-                         word_masks.sum(-1).view(-1, self.max_word_len))
+        loss = self.criterion(word_cluster_probs,
+                              word_phone_probs,
+                              word_masks.sum(-1).view(-1, self.max_word_len))
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
         
