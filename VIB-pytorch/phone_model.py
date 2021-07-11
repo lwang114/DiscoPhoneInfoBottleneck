@@ -3,6 +3,61 @@ import torch.nn as nn
 import torch.nn.functional as F
 import json
 import numpy as np
+from hmm_word_discoverer import HMMWordDiscoverer
+
+class HMMPronunciator(nn.Module):
+  def __init__(self, 
+               vocab,
+               phone_set,
+               ignore_index=-100,
+               config):
+    super(HMMPronunciator, self).__init__()
+    self.n_word_class = len(vocab)
+    self.n_phone_class = len(phone_set)
+    self.vocab = vocab
+    self.phone_set = phone_set
+    self.word_stoi = {w:i for i, w in enumerate(vocab)}
+    self.phone_stoi = {phn:i for i, phn in enumerate(phone_set)}
+    self.ignore_index = ignore_index
+    pretrained_model = config.get('pronounce_prob_path', None) 
+    if pretrained_model:
+      pron_counts = json.load(open(pretrained_model))
+      pron_counts = torch.FloatTensor(pron_counts)
+    else:
+      pron_counts = torch.zeros((self.n_word_class, self.n_phone_class))
+    self.register_buffer('pron_counts', pron_counts)
+    self.model = HMMWordDiscoverer(config) # TODO 
+    self.config = config
+
+  def update(self, words, phones):
+    return
+  
+  def pronounce_prob(self):
+    norm = self.pron_counts.sum(1, keepdim=True)
+    norm = torch.where(norm > 0, norm, torch.tensor(1., device=norm.device))
+    return self.pron_counts / norm
+
+  def train(num_iter=10):
+    self.model.trainUsingEM(num_iter, writeModel=True) 
+    trans = self.model.trans
+    for w in trans:
+      for phn in trans[w]:
+        word_idx = self.word_stoi[w]
+        phn_idx = self.phone_stoi[phn]
+        self.pron_counts[word_idx, phn_idx] = trans[w][phn] 
+    self.save_readable(filename=os.path.join(self.config['ckpt_dir'], 
+                                             'pronounce_prob.json'))
+
+  def save_readable(self, filename='pronounce_prob.json'):
+    pron_counts = self.pron_counts.cpu().detach().numpy().tolist()
+    pron_prob = self.pronounce_prob().cpu().detach().numpy().tolist()
+    pron_dict = dict()
+    for i, v in enumerate(self.vocab):
+      pron_dict[v] = dict() 
+      for j, phn in enumerate(self.phone_set):
+        pron_dict[v][phn] = {'count': pron_counts[i][j],
+                             'prob': pron_prob[i][j]}
+    json.dump(pron_dict, open(filename, 'w'), indent=2)
 
 class UnigramPronunciator(nn.Module):
   """
@@ -11,7 +66,8 @@ class UnigramPronunciator(nn.Module):
   def __init__(self, 
                vocab,
                phone_set,
-               ignore_index=-100):
+               ignore_index=-100,
+               config=None):
     super(UnigramPronunciator, self).__init__()
     self.n_word_class = len(vocab)
     self.n_phone_class = len(phone_set)
@@ -116,7 +172,6 @@ class PositionDependentUnigramPronunciator(nn.Module):
                                     'prob': pron_prob[i][pos][j]}
     json.dump(pron_dict, open(filename, 'w'), indent=2)
 
-
 class LinearPositionAligner(nn.Module):
   """
   Map a posterior sequence to a given length by a softmax kernel linear mapping
@@ -156,4 +211,3 @@ class LinearPositionAligner(nn.Module):
 
     prob = F.softmax(-distances, dim=-1)
     return prob
-
