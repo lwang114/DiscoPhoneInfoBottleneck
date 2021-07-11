@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import json
+import numpy as np
 
 class UnigramPronunciator(nn.Module):
   """
@@ -119,16 +121,14 @@ class LinearPositionAligner(nn.Module):
   """
   Map a posterior sequence to a given length by a softmax kernel linear mapping
   """
-  def __init__(self, in_scale=1., out_scale=0.1, cutoff=5):
+  def __init__(self, scale=1.):
     super(LinearPositionAligner, self).__init__()
-    self.in_scale = in_scale
-    self.out_scale = out_scale
-    self.cutoff = cutoff
+    self.scale = scale
 
   def forward(self, x, input_mask, output_mask):
     """
     Args :
-        x : FloatTensor of size (batch size, max seq len, num. of classes),
+        x : FloatTensor of size (batch size, max input len, num. of classes),
         input_mask : FloatTensor of size (batch size, max input len),
         output_mask : FloatTensor of size (batch size, max output len)
     
@@ -136,25 +136,24 @@ class LinearPositionAligner(nn.Module):
         output : FloatTensor of size (batch size, max output len, num. of classes) 
     """
     pos_prob = self.position_probability(input_mask, output_mask)
-    print('pos prob: ', pos_prob) # XXX
-    output = torch.matmul(pos_prob, x)
+    output = torch.matmul(pos_prob, x.float())
     return output 
   
   def position_probability(self, input_mask, output_mask):
-    T = input_mask.size(1)
-    L = output_mask.size(1)
-    # (batch size, max output len, max input len)
-    mask = input_mask.unsqueeze(-2) * output_mask.unsqueeze(-1)
+    EPS = 1e-10
+    device = input_mask.device
+    L = input_mask.size(1)
+    T = output_mask.size(1)
+    ds_ratios = input_mask.sum(-1) / (output_mask.sum(-1) + EPS)
 
-    # (max output len, max input len)
-    distances = torch.abs(
-                  self.in_scale * torch.arange(T).unsqueeze(-2)\
-                  - self.out_scale * torch.arange(L).unsqueeze(-1)\
-                )
-    distances = torch.where(distances > self.cutoff,                      
-                            torch.tensor(1e9, device=input_mask.device,
-                            distances)
-    
-    prob = F.softmax(-distances, dim=1) * mask
+    # (batch size, T, L)
+    mask = input_mask.unsqueeze(-2) * output_mask.unsqueeze(-1)
+    in_pos = torch.arange(L, device=device).view(1, 1, -1)
+    out_pos = ds_ratios.view(-1, 1, 1) * torch.arange(T, device=device).view(1, -1, 1)
+
+    # (batch size, T, L)
+    distances = self.scale * torch.abs(in_pos - out_pos) * mask + 1e9 * (1 - mask)
+
+    prob = F.softmax(-distances, dim=-1)
     return prob
 

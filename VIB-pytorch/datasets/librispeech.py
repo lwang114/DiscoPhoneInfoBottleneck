@@ -142,13 +142,14 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     
     word_mask = torch.zeros(self.max_word_num, self.max_word_len, self.max_feat_len)
     for i, w in enumerate(visual_words):
+      if i >= self.max_word_num:
+        break
       begin_frame = int(w['begin']*1000/self.hop_length)
       end_frame = int(w['end']*1000/self.hop_length)
       for j, t in enumerate(range(begin_frame, end_frame+1)):
-        if j >= self.max_word_len:
+        if (j >= self.max_word_len) or (t >= self.max_feat_len):
           break
         word_mask[i, j, t] = 1.
-
     return audio_inputs,\
            phoneme_labels,\
            word_labels,\
@@ -275,7 +276,7 @@ def load_data_split(data_path, sp,
   examples = []
   absent_utt_ids = []
   for idx, line in enumerate(label_f):
-    # if idx > 200: # XXX
+    # if idx > 100: # XXX
     #   break
     label_dict = json.loads(line.rstrip("\n"))
     if "utterance_id" in label_dict:

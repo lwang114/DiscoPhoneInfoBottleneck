@@ -87,8 +87,8 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
 
     rec_tokens = pseudo_phones[audio_id]["output"][0]["rec_token"]
     for phn in rec_tokens.split():
-      if phn in IGNORE_TOKENS or (phn[0] == '<'):
-        continue
+      # if phn in IGNORE_TOKENS or (phn[0] == '<'):
+      #   continue
       if not phn in tokens:
         tokens.add(phn)
       sent_dict["pseudo_phones"].append(phn)

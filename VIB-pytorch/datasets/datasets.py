@@ -55,7 +55,8 @@ def return_data(args):
         preprocessor = FlickrWordImagePreprocessor(dset_dir, 80,
                                                    audio_feature=args.audio_feature, 
                                                    image_feature=args.image_feature,
-                                                   min_class_size=args.min_class_size)
+                                                   min_class_size=args.min_class_size,
+                                                   ignore_index=args.ignore_index)
         train_data = FlickrWordImageDataset(dset_dir,
                                             preprocessor, 
                                             'train',

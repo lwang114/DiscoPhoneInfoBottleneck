@@ -8,6 +8,7 @@ import argparse
 import os
 import json
 import time
+import numpy as np
 from pathlib import Path
 from utils.utils import cuda
 from model import BLSTM
@@ -71,6 +72,7 @@ class Solver(object):
     self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
+    self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
 
     print(f'Number of visual label classes = {self.n_visual_class}')
@@ -87,7 +89,7 @@ class Solver(object):
     self.phone_net = cuda(UnigramPronunciator(self.visual_words,
                                               self.phone_set,
                                               ignore_index=self.ignore_index), self.cuda)
-    self.align_net = cuda(LinearPositionAligner(), self.cuda)  
+    self.align_net = cuda(LinearPositionAligner(scale=0.), self.cuda) # XXX 
 
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
@@ -95,7 +97,7 @@ class Solver(object):
       self.optim = optim.SGD(trainables, lr=self.lr)
     else:
       self.optim = optim.Adam(trainables,
-                              lr=self.lr, betas=(0.5,0.999))
+                              lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
     self.ckpt_dir = Path(config.ckpt_dir)
     if not self.ckpt_dir.exists(): 
@@ -160,18 +162,26 @@ class Solver(object):
         word_lens = word_masks.sum(dim=(-1, -2)).long()
         
         cluster_logits, embedding = self.audio_net(x, return_feat=True)
-        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels, self.n_phone_class),
-                                                phone_masks,
-                                                audio_masks) 
-        loss = self.criterion(cluster_logits,
-                              phoneme_labels_aligned,
-                              phone_masks)
-
-        # Extract cluster and phone counts for visual words
-        cluster_probs = F.softmax(cluster_logits, dim=-1).unsqueeze(1) 
+        ## Phone loss
+        cluster_probs = F.softmax(cluster_logits, dim=-1)\
+                        .view(-1, self.max_feat_len, self.n_phone_class) 
         if self.max_normalize:
           cluster_probs = cluster_probs / cluster_probs.max(-1, keepdim=True)[0]
 
+        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels * phone_masks.long(), 
+                                                          self.n_phone_class),
+                                                phone_masks,
+                                                audio_masks)
+
+        loss = self.criterion(cluster_probs,
+                              phoneme_labels_aligned,
+                              audio_masks) # XXX
+        loss = loss + F.ctc_loss(F.log_softmax(cluster_logits, dim =-1).permute(1, 0, 2),
+                                 phoneme_labels,
+                                 audio_lens,
+                                 sent_lens)
+
+        ## Word loss 
         word_cluster_logits = torch.matmul(word_masks, cluster_logits.unsqueeze(1))
         word_cluster_probs = F.softmax(word_cluster_logits, dim=-1)\
                              .view(-1, self.max_word_len, self.n_phone_class)
@@ -184,9 +194,10 @@ class Solver(object):
         word_phone_probs = word_phone_probs\
                            .unsqueeze(1).expand(-1, self.max_word_len, -1)
 
-        loss = loss + self.criterion(word_cluster_probs,
+        loss = loss + 0. * self.criterion(word_cluster_probs,
                                      word_phone_probs,
-                                     word_masks.sum(-1).view(-1, self.max_word_len))
+                                     word_masks.sum(-1).view(-1, self.max_word_len)) # XXX
+
         total_loss += loss.cpu().detach().numpy() 
         total_step += 1.
 
@@ -256,16 +267,23 @@ class Solver(object):
         word_lens = word_masks.sum(dim=(-2, -1)).long()
         word_num = (word_labels >= 0).long().sum(-1)
         cluster_logits, embedding = self.audio_net(x, return_feat=True)
-        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels, self.n_phone_class), 
+        phoneme_labels_aligned = self.align_net(F.one_hot(phoneme_labels * phone_masks.long(), 
+                                                          self.n_phone_class), 
                                                 phone_masks, 
                                                 audio_masks)
 
-        cluster_probs = F.softmax(cluster_logits, dim=-1)
+        cluster_probs = F.softmax(cluster_logits, dim=-1)\
+                        .view(-1, self.max_feat_len, self.n_phone_class)
         if self.max_normalize:
           cluster_probs = cluster_probs / cluster_probs.max(-1, keepdim=True)[0] 
+
+        phone_label_mask = F.one_hot(phoneme_labels * phone_masks.long(), self.n_phone_class).sum(1, keepdim=True)
+        phone_label_mask = (phone_label_mask > 0).long()
+        phoneme_labels_aligned_ctc = (cluster_probs * phone_label_mask).max(-1)[1]
+        phoneme_labels_aligned_ctc = F.one_hot(phoneme_labels_aligned_ctc, self.n_phone_class).detach()
         loss = self.criterion(cluster_probs,
-                              phoneme_labels_aligned,
-                              phone_masks)
+                              phoneme_labels_aligned_ctc,
+                              audio_masks)
 
         word_cluster_logits = torch.matmul(word_masks, cluster_logits.unsqueeze(1))
         word_cluster_probs = F.softmax(word_cluster_logits, dim=-1)\

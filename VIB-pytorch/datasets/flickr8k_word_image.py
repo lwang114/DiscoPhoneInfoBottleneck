@@ -20,6 +20,8 @@ from scipy import signal
 # lemmatizer = WordNetLemmatizer()
 UNK = "###UNK###"
 NULL = "###NULL###"
+BLANK = "###BLANK###"
+IGNORED_TOKENS = ["SIL", "GARBAGE"]  
 
 def log_normalize(x):
     x.add_(1e-6).log_()
@@ -27,11 +29,14 @@ def log_normalize(x):
     std = x.std()
     return x.sub_(mean).div_(std + 1e-6)
 
-def fix_embedding_length(emb, L):
+def fix_embedding_length(emb, L, padding=0):
   size = emb.size()[1:]
   if emb.size(0) < L:
-    pad = [torch.zeros(size, dtype=emb.dtype).unsqueeze(0) for _ in range(L-emb.size(0))]
-    emb = torch.cat([emb]+pad, dim=0)
+    if padding == 0:
+      pad = torch.zeros((L-emb.size(0),)+size, dtype=emb.dtype)
+    else:
+      pad = padding*torch.ones((L-emb.size(0),)+size, dtype=emb.dtype) 
+    emb = torch.cat([emb, pad], dim=0)
   else:
     emb = emb[:L]
   return emb
@@ -68,6 +73,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.sample_rate = sample_rate
     self.max_feat_len = 100
     self.max_word_len = 100
+    self.max_phone_num = 50 
     self.max_segment_num = 10
     
     data = []
@@ -217,16 +223,24 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       audio_inputs = audio_inputs.t()
     phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     image_inputs = self.load_image(image_file, box, box_idx)
-    word_labels = self.preprocessor.to_index(label).squeeze(0)
-    phone_labels = self.preprocessor.to_phone_index(phonemes)
+    word_labels = self.preprocessor.to_word_index([label])
+    phone_labels = self.preprocessor.to_index(phonemes)
+    phone_labels = fix_embedding_length(phone_labels,
+                                        self.max_phone_num,
+                                        padding=self.preprocessor.ignore_index) 
 
     word_mask = torch.zeros((1, self.max_feat_len, self.max_feat_len))
-    for t in range(input_mask.sum()):
+    for t in range(input_mask.sum().long()):
       word_mask[0, t, t] = 1. 
     phone_mask = torch.zeros(self.max_phone_num,)
-    phone_mask[:len(phoneme)] = 1.
+    phone_mask[:len(phonemes)] = 1.
 
-    return audio_inputs, image_inputs, word_labels, phone_labels, input_mask, word_mask, phone_mask 
+    return audio_inputs,\
+           phone_labels,\
+           word_labels,\
+           input_mask,\
+           phone_mask,\
+           word_mask
 
   def __len__(self):
     return len(self.dataset)
@@ -274,10 +288,12 @@ class FlickrWordImagePreprocessor:
     audio_feature="mfcc",
     image_feature="rcnn",
     sample_rate=16000,
-    min_class_size=50
+    min_class_size=50,
+    ignore_index=-100
   ):
     self.num_features = num_features
-    self.min_class_size= min_class_size
+    self.ignore_index = ignore_index
+    self.min_class_size = min_class_size
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
 
@@ -290,34 +306,76 @@ class FlickrWordImagePreprocessor:
                                     audio_feature=audio_feature,
                                     image_feature=image_feature,
                                     min_class_size=self.min_class_size)) 
+    visual_words = set()
     tokens = set()
-    phone_tokens = set()
     for ex in data:
-      tokens.add(ex["text"])
+      visual_words.add(ex["text"])
       for phn in ex["phonemes"]:
-        phone_tokens.add(phn["text"])
+        tokens.add(phn["text"])
+
     self.tokens = sorted(tokens)
-    self.phone_tokens = sorted(phone_tokens)
+    self.visual_words = sorted(visual_words)
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
-    self.phone_tokens_to_index = {t:i for i, t in enumerate(self.phone_tokens)}
-    print(f"Number of classes: {self.num_tokens}")
-    print(f"Number of phone classes: {self.num_phone_tokens}")
+    self.words_to_index = {t:i for i, t in enumerate(self.visual_words)}
+
+    print(f"Number of phone classes: {self.num_tokens}")
+    print(f"Number of visual word classes: {self.num_visual_words}")
     
   @property
   def num_tokens(self):
     return len(self.tokens)
 
   @property
-  def num_phone_tokens(self):
-    return len(self.phone_tokens)
+  def num_visual_words(self):
+    return len(self.visual_words)
 
-  def to_index(self, line):
+  def to_index(self, sent):
     tok_to_idx = self.tokens_to_index
-    return torch.LongTensor([tok_to_idx.get(t, 0) for t in line.split(self.wordsep)])
-
-  def to_phone_index(self, sent):
-    tok_to_idx = self.phone_tokens_to_index
     return torch.LongTensor([tok_to_idx.get(t, 0) for t in sent])
+
+  def to_word_index(self, sent):
+    tok_to_idx = self.words_to_index
+    return torch.LongTensor([tok_to_idx.get(t, 0) for t in sent])
+
+  def to_text(self, indices):
+    text = []
+    for t, i in enumerate(indices):
+      if (i == 0) and (t != 0):
+        prev_token = text[t-1]
+        text.append(prev_token)
+      else:
+        text.append(self.tokens[i])
+    return text
+
+  def to_word_text(self, indices):
+    return [self.visual_words[i] for i in indices]
+
+  def tokens_to_word_text(self, indices):
+    T = len(indices)
+    path = [self.visual_words[i] for i in indices]
+    sent = []
+    for i in range(T):
+      if path[i] == BLANK:
+        continue
+      elif (i != 0) and (path[i] == path[i-1]):
+        continue
+      else:
+        sent.append(path[i])
+    return sent
+
+  def tokens_to_text(self, indices): 
+    T = len(indices)
+    path = self.to_text(indices)
+    sent = []
+    for i in range(T):
+      if path[i] == BLANK:
+        continue
+      elif (i != 0) and (path[i] == path[i-1]):
+        continue 
+      else:
+        sent.append(path[i])
+    return sent
+ 
 
 def load_data_split(data_path, split,
                     audio_feature="mfcc",
@@ -346,6 +404,8 @@ def load_data_split(data_path, split,
                              f"flickr8k_word_{min_class_size}.json"), "r")
   label_counts = dict()
   for line in word_f:
+    # if len(examples) > 100: # XXX
+    #   break
     word = json.loads(line.rstrip("\n"))
     label = word["label"]
     if not label in label_counts:
@@ -375,7 +435,7 @@ def load_data_split(data_path, split,
     example = {"audio": audio_path,
                "image": image_path,
                "text": label,
-               "phonemes": word["phonemes"],
+               "phonemes": word["phonemes"]["children"],
                "box": box,
                "box_idx": box_idx} 
     examples.append(example)
