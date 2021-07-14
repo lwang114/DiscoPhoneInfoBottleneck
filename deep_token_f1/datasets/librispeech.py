@@ -32,7 +32,7 @@ def fix_embedding_length(emb, L, padding=0):
     emb = emb[:L]
   return emb
 
-class LibriSpeechDataset(torch.utils.data.Dataset):
+class SpeechDataset(torch.utils.data.Dataset):
   
   
   def __init__(
@@ -161,7 +161,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     return len(self.dataset)
  
 
-class LibriSpeechPreprocessor:
+class SpeechPreprocessor:
   
   
   def __init__(
