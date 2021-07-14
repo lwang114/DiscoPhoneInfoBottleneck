@@ -93,17 +93,73 @@ class GumbelBLSTM(nn.Module):
   def weight_init(self):
       pass
 
-class AttentionMLP(nn.Module): # TODO
-  def __init__(self, 
-               input_size,
-               output_size):
+class Davenet(nn.Module):
+    def __init__(self, input_dim, embedding_dim=1024):
+        super(Davenet, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.batchnorm1 = nn.BatchNorm2d(1)
+        self.conv1 = nn.Conv2d(1, 128, kernel_size=(input_dim,1), stride=(1,1), padding=(0,0))
+        self.conv2 = nn.Conv2d(128, 256, kernel_size=(1,11), stride=(1,1), padding=(0,5))
+        self.conv3 = nn.Conv2d(256, 512, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.conv4 = nn.Conv2d(512, 512, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.conv5 = nn.Conv2d(512, embedding_dim, kernel_size=(1,17), stride=(1,1), padding=(0,8))
+        self.pool = nn.MaxPool2d(kernel_size=(1,3), stride=(1,2),padding=(0,1))
 
-  def forward(self, src_input, trg_input):
+    def forward(self, x, l=5):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        x = self.batchnorm1(x)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = F.relu(self.conv3(x))
+        x = self.pool(x)
+        if l == 3:
+            return x
+        x = F.relu(self.conv4(x))
+        x = self.pool(x)
+        if l == 4:
+            return x
+        x = F.relu(self.conv5(x))
+        x = self.pool(x)
+        x = x.squeeze(2)
+        return x
+
+
+class DotProductClassAttender(nn.Module):
+  def __init__(self, 
+               input_dim,
+               hidden_dim,
+               n_class=self.n_visual_class):
+    super(DotProductClassAttender, self).__init__()
+    self.attention = nn.Linear(input_dim, self.n_visual_class, bias=False)
+    self.classifier = nn.Sequential(
+                        nn.Linear(input_dim, hidden_dim),
+                        nn.ReLU(),
+                        nn.Linear(hidden_dim, hidden_dim),
+                        nn.ReLU(),
+                        nn.Linear(hidden_dim, 1)
+                      )
+
+  def forward(self, x, mask):
     """
-    Args:
-        src_input : FloatTensor of size (batch size, src length, input size)
-        trg input : FloatTensor of size (batch size, trg length, input size)
+    Args :
+        x : FloatTensor of size (batch size, seq length, input size)
+        mask : FloatTensor of size (batch size, seq length)
     """
+    attn_weights = self.attention(x).permute(0, 2, 1)
+    attn_weights = attn_weights * mask.unsqueeze(-2)
+    attn_weights = torch.where(attn_weights != 0,
+                               attn_weights,
+                               torch.tensor(-1e10, device=x.device))
+    
+    # (batch size, n class, seq length)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    # (batch size, n class, input size)
+    attn_applied = torch.bmm(attn_weights, x)
+    # (batch size, n class)
+    out = self.classifier(x).squeeze(-1)
+    return out, attn_weights
 
 
 class HMMPronunciator(nn.Module):
