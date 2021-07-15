@@ -29,6 +29,7 @@ class Solver(object):
     self.get_dataset_config(config)
     self.get_model_config(config)    
     self.global_epoch = 0
+    self.best_threshold = None
     self.history = dict()
     self.history['f1'] =  0.
     self.history['loss'] = 0.
@@ -382,147 +383,203 @@ class Solver(object):
     print(f'Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}')
     return precision, recall, f1
 
-""" TODO
-def align_attention(audio_model, image_model, val_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    batch_time = AverageMeter() 
-
+  def align_finetune(self):
+    """ Fine-tune the localization threshold on validation set """
+    device = self.device
+    args = self.config
+    audio_model = self.audio_model
+    image_model = self.image_model
+    attention_model = self.attention_model
+    val_loader = self.data_loader['test']
+    n_visual_class = self.n_visual_class
+    epoch = self.global_epoch
+    batch_time = AverageMeter()
+    
     if not isinstance(audio_model, torch.nn.DataParallel):
         audio_model = nn.DataParallel(audio_model)
     if not isinstance(image_model, torch.nn.DataParallel):
         image_model = nn.DataParallel(image_model)
-    
-    if not args.audio_model_file or not args.image_model_file:
-        audio_model.load_state_dict(torch.load('{}/models/best_audio_model.pth'.format(args.exp_dir)))
-        image_model.load_state_dict(torch.load('{}/models/best_image_model.pth'.format(args.exp_dir)))
-    else:
-        audio_model.load_state_dict(torch.load(args.audio_model_file))
-        image_model.load_state_dict(torch.load(args.image_model_file))
-
+    if not isinstance(attention_model, torch.nn.DataParallel):
+        attention_model = nn.DataParallel(attention_model)
+  
     audio_model = audio_model.to(device)
     image_model = image_model.to(device)
+    attention_model = attention_model.to(device)
+
     # switch to evaluate mode
     image_model.eval()
     audio_model.eval()
+    attention_model.eval()
 
     end = time.time()
-    N_examples = val_loader.dataset.__len__()
-    max_num_units = val_loader.dataset.max_nphones
-    B = args.batch_size # TODO Add to config
-    split_file = None # args.datasplit
-    if not split_file:
-      selected_indices = list(range(N_examples))
-    else:
-      with open(split_file, 'r') as f:
-        selected_indices = [i for i, line in enumerate(f) if int(line)]
-    
-    I_embeddings = [] 
-    A_embeddings = [] 
-    frame_counts = []
-    region_counts = []
-    alignments = []
+    gold_masks = [] 
+    pred_masks = [] 
     with torch.no_grad():
-        for i, (audio_input, image_input, nphones, nregions) in enumerate(val_loader):
-            image_input = image_input.to(device)
+        for i, batch in enumerate(val_loader):
+            if self.debug and i > 2:
+              break
+            audio_input = batch[0]
+            word_label = batch[2]
+            input_mask = batch[3]
+            word_mask = batch[5] 
+            B = audio_input.size(0)
             audio_input = audio_input.to(device)
+            if self.audio_feature == 'wav2vec2':
+              audio_input = self.audio_feature_net.feature_extractor(audio_input)
 
-            # Compute output
-            image_output = image_model(image_input).transpose(1, 2).unsqueeze(-1) # Make the image output 4D
-            audio_output = audio_model(audio_input)
+            word_label = word_label.to(device)
+            input_mask = input_mask.to(device)
+            word_mask = word_mask.to(device)
+            nframes = input_mask.sum(-1) 
+            word_mask = torch.where(word_mask.sum(dim=(-2, -1)) > 0,
+                                    torch.tensor(1, device=device),
+                                    torch.tensor(0, device=device))
+            nwords = word_mask.sum(-1)
+            # (batch size, n word class)
+            word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
+            word_label_onehot = torch.where(word_label_onehot > 0,
+                                            torch.tensor(1, device=device),
+                                            torch.tensor(0, device=device)) 
 
-            image_output = image_output.to('cpu').detach()
-            audio_output = audio_output.to('cpu').detach()
+            audio_output = audio_model(audio_input, masks=input_mask)
+            pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
+            word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
 
-            pooling_ratio = round(audio_input.size(-1) / audio_output.size(-1))
-            n = image_output.size(0)
-           
-            # Optionally segment the acoustic features 
-            boundaries = None
-            if nphones.dim() > 1:
-                print('Segmentations detected, segment the acoustic features...')
-                boundaries = nphones.cpu().detach().numpy()
-                mask = np.zeros((n, max_num_units, audio_output.size(-1))) 
-                for i_b in range(n):
-                    starts = np.nonzero(boundaries[i_b, 0])[0] // pooling_ratio
-                    ends = np.nonzero(boundaries[i_b, 1])[0] // pooling_ratio
-                    if len(starts) == 0:
-                        continue
-                    for i_seg, (start, end) in enumerate(zip(starts, ends)): 
-                        mask[i_b, i_seg, start:end] = 1. / max(end - start, 1)
-                mask = torch.FloatTensor(mask).transpose(1, 2).to('cpu').detach()
-                audio_output = torch.matmul(audio_output, mask)
-                pooling_ratio = 1
-                n_segments = torch.sum(nphones[:, 0], dim=-1).cpu().detach().numpy()
-            else:
-                n_segments = nphones.cpu().detach().numpy()
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-            for i_b in range(n):
-              M = computeMatchmap(image_output[i_b], audio_output[i_b, :, :max(int(n_segments[i_b]), 1)])
-              alignment = np.argmax(M.squeeze(1).numpy(), axis=1).tolist()
-              cur_idx = selected_indices[i*B+i_b]
-              align_info = {
-                'index': cur_idx,
-                'alignment': alignment,
-                'image_concepts': [0]*len(alignment),
-                'align_probs': M.squeeze(1).numpy().tolist()
-                }
-              alignments.append(align_info)
-            print('Process {} batches after {}s'.format(i, time.time()-end))
-    with open('{}/{}'.format(args.exp_dir, args.alignment_scores), 'w') as f:
-      json.dump(alignments, f, indent=4, sort_keys=True)
+            for ex in range(B):
+              global_idx = i * val_loader.batch_size + ex
+              audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
+              gold_mask = torch.zeros((self.n_visual_class, nframes[ex]), device=device)
+              for w in range(nwords[ex]): # Aggregate masks for the same word class
+                gold_mask[word_label[ex, w]] = gold_mask[word_label[ex, w]]\
+                                               + word_mask[ex, w, :nframes[ex]]
 
-def evaluation_attention(audio_model, image_model, attention_model, test_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.set_grad_enabled(True)
-    # Initialize all of the statistics we want to keep track of
+              for v in range(self.n_visual_class):
+                if word_label_onehot[ex, v]:
+                  pred_mask = attn_weights[ex, v, :nframes[ex]]
+                  print('pred mask.size(), expected', pred_mask.size(), nframes[ex]) # XXX
+                  pred_masks.append(pred_mask.detach().cpu().numpy().flatten())
+                  gold_masks.append(gold_mask[v].detach().cpu().numpy().flatten())
+    
+        pred_masks_1d = np.concatenate(pred_masks)
+        gold_masks_1d = np.concatenate(gold_masks)
+        precision, recall, thresholds = precision_recall_curve(gold_masks_1d, pred_masks_1d)
+        EPS = 1e-10
+        f1 = 2 * precision * recall / (precision + recall + EPS)
+        best_idx = np.argmax(f1)
+        self.best_threshold = thresholds[best_idx]
+        best_precision = precision[best_idx]
+        best_recall = recall[best_idx]
+        best_f1 = f1[best_idx]
+        print(f'Best Localization Precision: {best_precision:.3f}\tRecall: {best_recall:.3f}\tF1: {best_f1:.3f}\tmAP: {np.mean(precision)}')
+    
+  def align(self):
+    if not self.best_threshold:
+      self.best_threshold = 0.5
+    print(f'Best Threshold: {self.best_threshold}')
+
+    device = self.device
+    args = self.config
+    audio_model = self.audio_model
+    image_model = self.image_model
+    attention_model = self.attention_model
+    train_loader = self.data_loader['train']
+    val_loader = self.data_loader['test']
+    n_visual_class = self.n_visual_class
+    epoch = self.global_epoch
     batch_time = AverageMeter()
-    data_time = AverageMeter()
-    loss_meter = AverageMeter()
-    progress = []
-    best_epoch, best_acc = 0, -np.inf
-    global_step, epoch = 0, 0
-    start_time = time.time()
-    exp_dir = args.exp_dir
-
-    def _save_progress():
-        progress.append([epoch, global_step, best_epoch, best_acc, 
-                time.time() - start_time])
-        with open("%s/progress.pkl" % exp_dir, "wb") as f:
-            pickle.dump(progress, f)
-
-    progress_pkl = "%s/progress.pkl" % exp_dir
-    progress, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
-    print("\nResume training from:")
-    print("  epoch = %s" % epoch)
-    print("  global_step = %s" % global_step)
-    print("  best_epoch = %s" % best_epoch)
-    print("  best_acc = %.4f" % best_acc)
-
     
     if not isinstance(audio_model, torch.nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-
+      audio_model = nn.DataParallel(audio_model)
     if not isinstance(image_model, torch.nn.DataParallel):
-        image_model = nn.DataParallel(image_model)
-    
-    
-    if epoch != 0:
-        audio_model.load_state_dict(torch.load("%s/models/audio_model.%d.pth" % (exp_dir, epoch)))
-        image_model.load_state_dict(torch.load("%s/models/image_model.%d.pth" % (exp_dir, epoch)))
-        print("loaded parameters from epoch %d" % epoch)
-
+      image_model = nn.DataParallel(image_model)
+    if not isinstance(attention_model, torch.nn.DataParallel):
+      attention_model = nn.DataParallel(attention_model)
+  
     audio_model = audio_model.to(device)
     image_model = image_model.to(device)
-    
-    recalls = validate_attention(audio_model, image_model, attention_model, test_loader, args)
-    
-    avg_acc = (recalls['A_r10'] + recalls['I_r10']) / 2
-    
-    info = ' Epoch: [{0}] Loss: {loss_meter.val:.4f}  Audio: R1: {R1_:.4f} R5: {R5_:.4f}  R10: {R10_:.4f}  Image: R1: {IR1_:.4f} R5: {IR5_:.4f}  R10: {IR10_:.4f}  \n \
-            '.format(epoch,loss_meter=loss_meter,R1_=recalls['A_r1'],R5_=recalls['A_r5'],R10_=recalls['A_r10'],IR1_=recalls['I_r1'],IR5_=recalls['I_r5'],IR10_=recalls['I_r10'])
-    print(info)
+    attention_model = attention_model.to(device)
 
+    # switch to evaluate mode
+    image_model.eval()
+    audio_model.eval()
+    attention_model.eval()
 
+    end = time.time()
+    gold_masks = [] 
+    pred_masks = [] 
+    with torch.no_grad():
+      # TODO Extract alignments for training set
+      pred_word_dict = dict()
+      for i, batch in enumerate(val_loader):
+        if self.debug and i > 2:
+          break
+        audio_input = batch[0]
+        word_label = batch[2]
+        input_mask = batch[3]
+        word_mask = batch[5] 
+        B = audio_input.size(0)
+        audio_input = audio_input.to(device)
+        if self.audio_feature == 'wav2vec2':
+          audio_input = self.audio_feature_net.feature_extractor(audio_input)
+
+        word_label = word_label.to(device)
+        input_mask = input_mask.to(device)
+        word_mask = word_mask.to(device)
+        nframes = input_mask.sum(-1) 
+        word_mask = torch.where(word_mask.sum(dim=(-2, -1)) > 0,
+                                torch.tensor(1, device=device),
+                                torch.tensor(0, device=device))
+        nwords = word_mask.sum(-1)
+        # (batch size, n word class)
+        word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
+        word_label_onehot = torch.where(word_label_onehot > 0,
+                                        torch.tensor(1, device=device),
+                                        torch.tensor(0, device=device)) 
+
+        audio_output = audio_model(audio_input, masks=input_mask)
+        pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
+        word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
+
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        for ex in range(B):
+          pred_word_dict[audio_id] = {'pred': []
+                                      'gold': []}                   
+          global_idx = i * val_loader.batch_size + ex
+          audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
+          pred_word_dict[audio_id]['gold'] = self.mask_to_interval(word_mask[ex, :nwords[ex], :nframes[ex]], word_label[ex, :nwords[ex]])
+          for v in range(self.n_visual_class):
+            if word_label_onehot[ex, v]:        
+              pred_mask = (attn_weights[ex, v, :nframes[ex]] >= self.best_threshold).long()
+              pred_word_dict[audio_id]['pred'].extend(self.mask_to_interval(pred_mask.unsqueeze(-1),
+                                                                            torch.tensor([v], device=device))
+    json.dump(pred_word_dict, open(os.path.join(self.ckpt_dir, 'pred_words.json'), 'w'), indent=2)
+  
+  def mask_to_interval(m, y):
+    intervals = []
+    y = y.detach().cpu().numpy().tolist()
+    for ex in m.size(0):
+      is_inside = False
+      begin = 0
+      for t, is_mask in enumerate(m[ex]):
+        if is_mask and not is_inside:
+          begin = t
+          is_inside = True
+        elif not is_mask and is_inside:
+          intervals.append({'begin': begin,
+                            'end': t-1,
+                            'text': y[ex]})
+          is_inside = False
+      if is_inside:
+        intervals.append({'begin': begin,
+                          'end': t})
+    return intervals
+
+"""
 def evaluation_vector(audio_model, image_model, test_loader, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_grad_enabled(True)
@@ -606,6 +663,8 @@ def main(argv):
         net.train()
       elif config.mode == 'test':
         net.validate() 
+      elif config.mode == 'align':
+        net.align_finetune()
       else:
         return 0
 
