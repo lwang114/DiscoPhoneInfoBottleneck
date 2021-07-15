@@ -5,6 +5,48 @@ import torch.nn.init as init
 from torch.autograd import Variable
 from utils.utils import cuda
 
+class BLSTM(nn.Module):
+  def __init__(self, 
+               embedding_dim, 
+               n_layers=1, 
+               n_class=65,
+               input_size=80, 
+               ds_ratio=1,
+               bidirectional=True):
+    super(BLSTM, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.ds_ratio = ds_ratio
+    self.bidirectional = bidirectional
+    self.rnn = nn.LSTM(input_size=input_size,
+                       hidden_size=embedding_dim,
+                       num_layers=n_layers,
+                       batch_first=True,
+                       bidirectional=bidirectional)
+
+  def forward(self, x,
+              masks=None):
+    device = x.device
+    ds_ratio = self.ds_ratio
+    if x.dim() < 3:
+        x = x.unsqueeze(0)
+    elif x.dim() > 3:
+        x = x.squeeze(1)
+    x = x.permute(0, 2, 1)
+    
+    B = x.size(0)
+    T = x.size(1)
+    if self.bidirectional:
+      h0 = torch.zeros((2 * self.n_layers, B, self.K), device=device)
+      c0 = torch.zeros((2 * self.n_layers, B, self.K), device=device)
+    else:
+      h0 = torch.zeros((self.n_layers, B, self.K), device=device)
+      c0 = torch.zeros((self.n_layers, B, self.K), device=device)
+       
+    embed, _ = self.rnn(x, (h0, c0))
+    return embed
+
 class GumbelBLSTM(nn.Module):
   def __init__(self, 
                embedding_dim, 
@@ -105,7 +147,7 @@ class Davenet(nn.Module):
         self.conv5 = nn.Conv2d(512, embedding_dim, kernel_size=(1,17), stride=(1,1), padding=(0,8))
         self.pool = nn.MaxPool2d(kernel_size=(1,3), stride=(1,2),padding=(0,1))
 
-    def forward(self, x, l=5):
+    def forward(self, x, l=5, masks=None):
         if x.dim() == 3:
             x = x.unsqueeze(1)
         x = self.batchnorm1(x)
@@ -123,6 +165,7 @@ class Davenet(nn.Module):
         x = F.relu(self.conv5(x))
         x = self.pool(x)
         x = x.squeeze(2)
+        x = x.permute(0, 2, 1)
         return x
 
 
@@ -130,13 +173,11 @@ class DotProductClassAttender(nn.Module):
   def __init__(self, 
                input_dim,
                hidden_dim,
-               n_class=self.n_visual_class):
+               n_class):
     super(DotProductClassAttender, self).__init__()
-    self.attention = nn.Linear(input_dim, self.n_visual_class, bias=False)
+    self.attention = nn.Linear(input_dim, n_class, bias=False)
     self.classifier = nn.Sequential(
                         nn.Linear(input_dim, hidden_dim),
-                        nn.ReLU(),
-                        nn.Linear(hidden_dim, hidden_dim),
                         nn.ReLU(),
                         nn.Linear(hidden_dim, 1)
                       )
@@ -158,7 +199,7 @@ class DotProductClassAttender(nn.Module):
     # (batch size, n class, input size)
     attn_applied = torch.bmm(attn_weights, x)
     # (batch size, n class)
-    out = self.classifier(x).squeeze(-1)
+    out = self.classifier(attn_applied).squeeze(-1)
     return out, attn_weights
 
 
