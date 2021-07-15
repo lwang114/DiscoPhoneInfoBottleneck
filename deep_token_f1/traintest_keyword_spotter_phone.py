@@ -8,7 +8,7 @@ import numpy as np
 import pickle
 import json
 from pyhocon import ConfigFactory
-from sklearn.metrics import precision_recall_fscore_support, precision_recall_curve
+from sklearn.metrics import precision_recall_fscore_support
 import pdb
 import os
 import argparse
@@ -37,26 +37,19 @@ class Solver(object):
     if not os.path.exists(config.exp_dir): 
       os.makedirs(config.exp_dir)
 
-  def get_feature_config(self, config):
+  def get_feature_config(self, config): # TODO
     self.audio_feature = config.audio_feature
-    if config.audio_feature == 'mfcc':
-      self.audio_feature_net = None
-      self.input_size = 80
-      self.hop_len_ms = 10
-    elif config.audio_feature == 'wav2vec2':
-      self.audio_feature_net = fairseq.checkpoint_utils.load_model_ensemble_and_task([config.wav2vec_path])[0][0]
-      self.audio_feature_net = self.audio_feature_net.to(self.device)
-
-      for p in self.audio_feature_net.parameters():
-        p.requires_grad = False
+    
+    p.requires_grad = False
       self.input_size = 512
       self.hop_len_ms = 20 
     elif config.audio_feature == 'cpc':
       self.audio_feature_net = None
       self.input_size = 256
       self.hop_len_ms = 10
-    else:
-      raise ValueError(f"Feature type {config.audio_feature} not supported")
+
+    self.input_size = self.n_phone_class
+    self.hop_len_ms = 10
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
@@ -245,7 +238,7 @@ class Solver(object):
             batch_time.update(time.time() - end_time)
             global_step += 1
             if i % 500 == 0:
-                info = 'Itr {} {loss_meter.val:.4f} ({loss_meter.avg:.4f})'.format(i,loss_meter=loss_meter)
+                info = 'Itr {} {loss_meter.val:.4f} ({loss_meter.avg:.4f} '.format(i,loss_meter=loss_meter)
                 print(info)
             i += 1
         info = ('Epoch: [{0}][{1}/{2}]\t'
@@ -263,7 +256,6 @@ class Solver(object):
             return
         if epoch % 1 == 0:
             precision, recall, f1 = self.validate()
-            self.align_finetune()
             avg_acc = f1
 
             torch.save(audio_model.state_dict(),
@@ -437,32 +429,28 @@ class Solver(object):
             word_label = word_label.to(device)
             input_mask = input_mask.to(device)
             word_mask = word_mask.to(device)
-            nframes = input_mask.sum(-1).long()
-            word_mask = word_mask.sum(-2)
-            word_mask_2d = torch.where(word_mask.sum(-1) > 0,
-                                       torch.tensor(1, device=device),
-                                       torch.tensor(0, device=device))
-            nwords = word_mask_2d.sum(-1).long()
+            nframes = input_mask.sum(-1) 
+            word_mask = torch.where(word_mask.sum(dim=(-2, -1)) > 0,
+                                    torch.tensor(1, device=device),
+                                    torch.tensor(0, device=device))
+            nwords = word_mask.sum(-1)
             # (batch size, n word class)
-            word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask_2d.unsqueeze(-1)).sum(-2) 
+            word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
             word_label_onehot = torch.where(word_label_onehot > 0,
                                             torch.tensor(1, device=device),
                                             torch.tensor(0, device=device)) 
 
             audio_output = audio_model(audio_input, masks=input_mask)
             pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
-            input_mask_ds = input_mask[:, ::pooling_ratio]
             word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
-            attn_weights = attn_weights.unsqueeze(-1).expand(-1, -1, -1, pooling_ratio)
-            attn_weights = attn_weights.view(B, self.n_visual_class, -1)
-            
+
             batch_time.update(time.time() - end)
             end = time.time()
 
             for ex in range(B):
               global_idx = i * val_loader.batch_size + ex
               audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
-              gold_mask = torch.zeros((self.n_visual_class, nframes[ex].item()), device=device)
+              gold_mask = torch.zeros((self.n_visual_class, nframes[ex]), device=device)
               for w in range(nwords[ex]): # Aggregate masks for the same word class
                 gold_mask[word_label[ex, w]] = gold_mask[word_label[ex, w]]\
                                                + word_mask[ex, w, :nframes[ex]]
@@ -470,6 +458,7 @@ class Solver(object):
               for v in range(self.n_visual_class):
                 if word_label_onehot[ex, v]:
                   pred_mask = attn_weights[ex, v, :nframes[ex]]
+                  print('pred mask.size(), expected', pred_mask.size(), nframes[ex]) # XXX
                   pred_masks.append(pred_mask.detach().cpu().numpy().flatten())
                   gold_masks.append(gold_mask[v].detach().cpu().numpy().flatten())
     
@@ -580,23 +569,22 @@ class Solver(object):
           begin = t
           is_inside = True
         elif not is_mask and is_inside:
-          intervals.append({'begin': begin * self.hop_len_ms / 1000,
-                            'end': (t-1) * self.hop_len_ms / 1000,
+          intervals.append({'begin': begin,
+                            'end': t-1,
                             'text': y[ex]})
           is_inside = False
       if is_inside:
-        intervals.append({'begin': begin * self.hop_len_ms / 1000,
-                          'end': t * self.hop_len_ms / 1000,
-                          'text': y[ex]})
+        intervals.append({'begin': begin,
+                          'end': t})
     return intervals
 
   def load_checkpoint(self):
     audio_model_file = os.path.join(self.config.exp_dir, 'best_audio_model.pth')
     image_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
-    attention_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
+    # XXX attention_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
     self.audio_model.load_state_dict(torch.load(audio_model_file))
     self.image_model.load_state_dict(torch.load(image_model_file))
-    self.attention_model.load_state_dict(torch.load(attention_model_file))
+    # XXX self.attention_model.load_state_dict(torch.load(attention_model_file))
                                                       
 """
 def evaluation_vector(audio_model, image_model, test_loader, args):
