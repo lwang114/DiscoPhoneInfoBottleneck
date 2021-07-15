@@ -25,7 +25,6 @@ class Solver(object):
     self.debug = config.debug
     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     self.global_epoch = 0
-    self.get_feature_config(config)
     self.get_dataset_config(config)
     self.get_model_config(config)    
     self.global_epoch = 0
@@ -36,20 +35,7 @@ class Solver(object):
     self.history['epoch'] = 0.
     if not os.path.exists(config.exp_dir): 
       os.makedirs(config.exp_dir)
-
-  def get_feature_config(self, config): # TODO
-    self.audio_feature = config.audio_feature
-    
-    p.requires_grad = False
-      self.input_size = 512
-      self.hop_len_ms = 20 
-    elif config.audio_feature == 'cpc':
-      self.audio_feature_net = None
-      self.input_size = 256
-      self.hop_len_ms = 10
-
     self.input_size = self.n_phone_class
-    self.hop_len_ms = 10
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
@@ -63,7 +49,6 @@ class Solver(object):
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
     self.max_normalize = config.get('max_normalize', False)
-
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
     print(f'Max normalized: {self.max_normalize}')
@@ -187,17 +172,15 @@ class Solver(object):
         for i, batch in enumerate(train_loader): 
             if self.debug and i > 2:
               break
-            audio_input = batch[0]
+            audio_input = batch[1]
             word_label = batch[2]
-            input_mask = batch[3]
+            input_mask = batch[4]
             word_mask = batch[5] 
+            audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1)
 
             # measure data loading time
             data_time.update(time.time() - end_time)
             B = audio_input.size(0)
-            audio_input = audio_input.to(device)
-            if self.audio_feature == 'wav2vec2':
-              audio_input = self.audio_feature_net.feature_extractor(audio_input)
 
             word_label = word_label.to(device)
             input_mask = input_mask.to(device)
@@ -256,6 +239,7 @@ class Solver(object):
             return
         if epoch % 1 == 0:
             precision, recall, f1 = self.validate()
+            self.align()
             avg_acc = f1
 
             torch.save(audio_model.state_dict(),
@@ -315,7 +299,6 @@ class Solver(object):
     attention_model.eval()
 
     end = time.time()
-    N_examples = val_loader.dataset.__len__()
     gold_labels = [] 
     pred_labels = [] 
     readable_f = open(os.path.join(args.exp_dir, f'keyword_predictions_{epoch}.txt'), 'w')
@@ -324,14 +307,13 @@ class Solver(object):
         for i, batch in enumerate(val_loader):
             if self.debug and i > 2:
               break
-            audio_input = batch[0]
+            audio_input = batch[1]
             word_label = batch[2]
-            input_mask = batch[3]
+            input_mask = batch[4]
             word_mask = batch[5] 
+            audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1)
             B = audio_input.size(0)
             audio_input = audio_input.to(device)
-            if self.audio_feature == 'wav2vec2':
-              audio_input = self.audio_feature_net.feature_extractor(audio_input)
 
             word_label = word_label.to(device)
             input_mask = input_mask.to(device)
@@ -381,99 +363,7 @@ class Solver(object):
     f1 = f1[1]
     print(f'Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}')
     return precision, recall, f1
-
-  def align_finetune(self):
-    """ Fine-tune the localization threshold on validation set """
-    device = self.device
-    args = self.config
-    audio_model = self.audio_model
-    image_model = self.image_model
-    attention_model = self.attention_model
-    val_loader = self.data_loader['test']
-    n_visual_class = self.n_visual_class
-    epoch = self.global_epoch
-    batch_time = AverageMeter()
-    
-    if not isinstance(audio_model, torch.nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-    if not isinstance(image_model, torch.nn.DataParallel):
-        image_model = nn.DataParallel(image_model)
-    if not isinstance(attention_model, torch.nn.DataParallel):
-        attention_model = nn.DataParallel(attention_model)
-  
-    audio_model = audio_model.to(device)
-    image_model = image_model.to(device)
-    attention_model = attention_model.to(device)
-
-    # switch to evaluate mode
-    image_model.eval()
-    audio_model.eval()
-    attention_model.eval()
-
-    end = time.time()
-    gold_masks = [] 
-    pred_masks = [] 
-    with torch.no_grad():
-        for i, batch in enumerate(val_loader):
-            if self.debug and i > 2:
-              break
-            audio_input = batch[0]
-            word_label = batch[2]
-            input_mask = batch[3]
-            word_mask = batch[5] 
-            B = audio_input.size(0)
-            audio_input = audio_input.to(device)
-            if self.audio_feature == 'wav2vec2':
-              audio_input = self.audio_feature_net.feature_extractor(audio_input)
-
-            word_label = word_label.to(device)
-            input_mask = input_mask.to(device)
-            word_mask = word_mask.to(device)
-            nframes = input_mask.sum(-1) 
-            word_mask = torch.where(word_mask.sum(dim=(-2, -1)) > 0,
-                                    torch.tensor(1, device=device),
-                                    torch.tensor(0, device=device))
-            nwords = word_mask.sum(-1)
-            # (batch size, n word class)
-            word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
-            word_label_onehot = torch.where(word_label_onehot > 0,
-                                            torch.tensor(1, device=device),
-                                            torch.tensor(0, device=device)) 
-
-            audio_output = audio_model(audio_input, masks=input_mask)
-            pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
-            word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
-
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-            for ex in range(B):
-              global_idx = i * val_loader.batch_size + ex
-              audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
-              gold_mask = torch.zeros((self.n_visual_class, nframes[ex]), device=device)
-              for w in range(nwords[ex]): # Aggregate masks for the same word class
-                gold_mask[word_label[ex, w]] = gold_mask[word_label[ex, w]]\
-                                               + word_mask[ex, w, :nframes[ex]]
-
-              for v in range(self.n_visual_class):
-                if word_label_onehot[ex, v]:
-                  pred_mask = attn_weights[ex, v, :nframes[ex]]
-                  print('pred mask.size(), expected', pred_mask.size(), nframes[ex]) # XXX
-                  pred_masks.append(pred_mask.detach().cpu().numpy().flatten())
-                  gold_masks.append(gold_mask[v].detach().cpu().numpy().flatten())
-    
-        pred_masks_1d = np.concatenate(pred_masks)
-        gold_masks_1d = np.concatenate(gold_masks)
-        precision, recall, thresholds = precision_recall_curve(gold_masks_1d, pred_masks_1d)
-        EPS = 1e-10
-        f1 = 2 * precision * recall / (precision + recall + EPS)
-        best_idx = np.argmax(f1)
-        self.best_threshold = thresholds[best_idx]
-        best_precision = precision[best_idx]
-        best_recall = recall[best_idx]
-        best_f1 = f1[best_idx]
-        print(f'Best Localization Precision: {best_precision:.3f}\tRecall: {best_recall:.3f}\tF1: {best_f1:.3f}\tmAP: {np.mean(precision)}')
-    
+   
   def align(self):
     if not self.best_threshold:
       self.best_threshold = 0.5
@@ -515,14 +405,14 @@ class Solver(object):
       for i, batch in enumerate(val_loader):
         if self.debug and i > 2:
           break
-        audio_input = batch[0]
+        audio_input = batch[1]
         word_label = batch[2]
-        input_mask = batch[3]
+        input_mask = batch[4]
         word_mask = batch[5] 
+        audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1) 
+
         B = audio_input.size(0)
         audio_input = audio_input.to(device)
-        if self.audio_feature == 'wav2vec2':
-          audio_input = self.audio_feature_net.feature_extractor(audio_input)
 
         word_label = word_label.to(device)
         input_mask = input_mask.to(device)
@@ -532,6 +422,7 @@ class Solver(object):
                                 torch.tensor(1, device=device),
                                 torch.tensor(0, device=device))
         nwords = word_mask.sum(-1)
+
         # (batch size, n word class)
         word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
         word_label_onehot = torch.where(word_label_onehot > 0,
@@ -546,11 +437,9 @@ class Solver(object):
         end = time.time()
 
         for ex in range(B):
-          pred_word_dict[audio_id] = {'pred': [],
-                                      'gold': []} 
+          pred_word_dict[audio_id] = {'pred': []} 
           global_idx = i * val_loader.batch_size + ex
           audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
-          pred_word_dict[audio_id]['gold'] = self.mask_to_interval(word_mask[ex, :nwords[ex], :nframes[ex]], word_label[ex, :nwords[ex]])
           for v in range(self.n_visual_class):
             if word_label_onehot[ex, v]:        
               pred_mask = (attn_weights[ex, v, :nframes[ex]] >= self.best_threshold).long()
@@ -586,59 +475,6 @@ class Solver(object):
     self.image_model.load_state_dict(torch.load(image_model_file))
     # XXX self.attention_model.load_state_dict(torch.load(attention_model_file))
                                                       
-"""
-def evaluation_vector(audio_model, image_model, test_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.set_grad_enabled(True)
-    # Initialize all of the statistics we want to keep track of
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    loss_meter = AverageMeter()
-    progress = []
-    best_epoch, best_acc = 0, -np.inf
-    global_step, epoch = 0, 0
-    start_time = time.time()
-    exp_dir = args.exp_dir
-
-    def _save_progress():
-        progress.append([epoch, global_step, best_epoch, best_acc, 
-                time.time() - start_time])
-        with open("%s/progress.pkl" % exp_dir, "wb") as f:
-            pickle.dump(progress, f)
-
-    progress_pkl = "%s/progress.pkl" % exp_dir
-    progress, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
-    print("\nResume training from:")
-    print("  epoch = %s" % epoch)
-    print("  global_step = %s" % global_step)
-    print("  best_epoch = %s" % best_epoch)
-    print("  best_acc = %.4f" % best_acc)
-
-    
-    if not isinstance(audio_model, torch.nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-
-    if not isinstance(image_model, torch.nn.DataParallel):
-        image_model = nn.DataParallel(image_model)
-    
-
-    if epoch != 0:
-        audio_model.load_state_dict(torch.load("%s/models/audio_model.%d.pth" % (exp_dir, epoch)))
-        image_model.load_state_dict(torch.load("%s/models/image_model.%d.pth" % (exp_dir, epoch)))
-        print("loaded parameters from epoch %d" % epoch)
-
-    audio_model = audio_model.to(device)
-    image_model = image_model.to(device)
-    
-    recalls = validate_vector(audio_model, image_model, test_loader, args)
-    
-    avg_acc = (recalls['A_r10'] + recalls['I_r10']) / 2
-    
-    info = ' Epoch: [{0}] Loss: {loss_meter.val:.4f}  Audio: R1: {R1_:.4f} R5: {R5_:.4f}  R10: {R10_:.4f}  Image: R1: {IR1_:.4f} R5: {IR5_:.4f}  R10: {IR10_:.4f}  \n \
-            '.format(epoch,loss_meter=loss_meter,R1_=recalls['A_r1'],R5_=recalls['A_r5'],R10_=recalls['A_r10'],IR1_=recalls['I_r1'],IR5_=recalls['I_r5'],IR10_=recalls['I_r10'])
-    print(info)
-"""
-
 def main(argv):
     parser = argparse.ArgumentParser(description='Deep Macro Token F1 for Keyword Spotting')
     parser.add_argument('CONFIG', type=str)
