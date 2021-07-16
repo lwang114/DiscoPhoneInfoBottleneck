@@ -453,7 +453,7 @@ class Solver(object):
             pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
             input_mask_ds = input_mask[:, ::pooling_ratio]
             word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
-            attn_weights = attn_weights.unsqueeze(-1).expand(-1, -1, -1, pooling_ratio)
+            attn_weights = attn_weights.unsqueeze(-1).expand(-1, -1, -1, pooling_ratio).contiguous()
             attn_weights = attn_weights.view(B, self.n_visual_class, -1)
             
             batch_time.update(time.time() - end)
@@ -466,7 +466,8 @@ class Solver(object):
               for w in range(nwords[ex]): # Aggregate masks for the same word class
                 gold_mask[word_label[ex, w]] = gold_mask[word_label[ex, w]]\
                                                + word_mask[ex, w, :nframes[ex]]
-
+              gold_mask = (gold_mask > 0).long()
+                
               for v in range(self.n_visual_class):
                 if word_label_onehot[ex, v]:
                   pred_mask = attn_weights[ex, v, :nframes[ex]]
@@ -557,10 +558,11 @@ class Solver(object):
         end = time.time()
 
         for ex in range(B):
-          pred_word_dict[audio_id] = {'pred': [],
-                                      'gold': []} 
           global_idx = i * val_loader.batch_size + ex
           audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
+          pred_word_dict[audio_id] = {'pred': [],
+                                      'gold': []} 
+
           pred_word_dict[audio_id]['gold'] = self.mask_to_interval(word_mask[ex, :nwords[ex], :nframes[ex]], word_label[ex, :nwords[ex]])
           for v in range(self.n_visual_class):
             if word_label_onehot[ex, v]:        

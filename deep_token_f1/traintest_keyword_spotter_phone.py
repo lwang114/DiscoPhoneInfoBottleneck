@@ -14,7 +14,7 @@ import os
 import argparse
 import sys
 from utils.util import *
-from model import BLSTM, Davenet, DotProductClassAttender
+from model import BLSTM, Davenet, DavenetSmall, DotProductClassAttender
 from criterion import MacroTokenFLoss, MicroTokenFLoss
 from datasets.datasets import return_data
 
@@ -26,6 +26,7 @@ class Solver(object):
     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     self.global_epoch = 0
     self.get_dataset_config(config)
+    self.input_size = self.n_phone_class
     self.get_model_config(config)    
     self.global_epoch = 0
     self.best_threshold = None
@@ -35,7 +36,6 @@ class Solver(object):
     self.history['epoch'] = 0.
     if not os.path.exists(config.exp_dir): 
       os.makedirs(config.exp_dir)
-    self.input_size = self.n_phone_class
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
@@ -55,7 +55,7 @@ class Solver(object):
 
   def get_model_config(self, config):
     if config.model_type == 'davenet':
-      self.audio_model = Davenet(input_dim=self.input_size,
+      self.audio_model = DavenetSmall(input_dim=self.input_size,
                                  embedding_dim=1024)
     elif config.model_type == 'blstm':
       self.audio_model = BLSTM(512,
@@ -177,6 +177,7 @@ class Solver(object):
             input_mask = batch[4]
             word_mask = batch[5] 
             audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1)
+            audio_input = audio_input.permute(0, 2, 1)
 
             # measure data loading time
             data_time.update(time.time() - end_time)
@@ -312,6 +313,7 @@ class Solver(object):
             input_mask = batch[4]
             word_mask = batch[5] 
             audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1)
+            audio_input = audio_input.permute(0, 2, 1)
             B = audio_input.size(0)
             audio_input = audio_input.to(device)
 
@@ -410,18 +412,18 @@ class Solver(object):
         input_mask = batch[4]
         word_mask = batch[5] 
         audio_input = F.one_hot(audio_input, self.n_phone_class) * input_mask.unsqueeze(-1) 
-
+        audio_input = audio_input.permute(0, 2, 1)
         B = audio_input.size(0)
         audio_input = audio_input.to(device)
 
         word_label = word_label.to(device)
         input_mask = input_mask.to(device)
         word_mask = word_mask.to(device)
-        nframes = input_mask.sum(-1) 
+        nframes = input_mask.sum(-1).long() 
         word_mask = torch.where(word_mask.sum(dim=(-2, -1)) > 0,
                                 torch.tensor(1, device=device),
                                 torch.tensor(0, device=device))
-        nwords = word_mask.sum(-1)
+        nwords = word_mask.sum(-1).long()
 
         # (batch size, n word class)
         word_label_onehot = (F.one_hot(word_label, n_visual_class) * word_mask.unsqueeze(-1)).sum(-2) 
@@ -431,26 +433,29 @@ class Solver(object):
 
         audio_output = audio_model(audio_input, masks=input_mask)
         pooling_ratio = round(audio_input.size(-1) / audio_output.size(-2))
+        input_mask_ds = input_mask[:, ::pooling_ratio]
         word_logit, attn_weights = attention_model(audio_output, input_mask_ds)
+        attn_weights = attn_weights.unsqueeze(-1).expand(-1, -1, -1, pooling_ratio).contiguous()
+        attn_weights = attn_weights.view(B, self.n_visual_class, -1)
 
         batch_time.update(time.time() - end)
         end = time.time()
 
         for ex in range(B):
-          pred_word_dict[audio_id] = {'pred': []} 
           global_idx = i * val_loader.batch_size + ex
           audio_id = os.path.splitext(os.path.split(val_loader.dataset.dataset[global_idx][0])[1])[0]
+          pred_word_dict[audio_id] = {'pred': []} 
           for v in range(self.n_visual_class):
             if word_label_onehot[ex, v]:        
               pred_mask = (attn_weights[ex, v, :nframes[ex]] >= self.best_threshold).long()
               pred_word_dict[audio_id]['pred'].extend(self.mask_to_interval(pred_mask.unsqueeze(-1),
                                                                             torch.tensor([v], device=device)))
-    json.dump(pred_word_dict, open(os.path.join(self.ckpt_dir, 'pred_words.json'), 'w'), indent=2)
+    json.dump(pred_word_dict, open(os.path.join(self.config.exp_dir, 'pred_words.json'), 'w'), indent=2)
   
-  def mask_to_interval(m, y):
+  def mask_to_interval(self, m, y):
     intervals = []
     y = y.detach().cpu().numpy().tolist()
-    for ex in m.size(0):
+    for ex in range(m.size(0)):
       is_inside = False
       begin = 0
       for t, is_mask in enumerate(m[ex]):
@@ -470,10 +475,10 @@ class Solver(object):
   def load_checkpoint(self):
     audio_model_file = os.path.join(self.config.exp_dir, 'best_audio_model.pth')
     image_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
-    # XXX attention_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
+    attention_model_file = os.path.join(self.config.exp_dir, 'best_image_model.pth')
     self.audio_model.load_state_dict(torch.load(audio_model_file))
     self.image_model.load_state_dict(torch.load(image_model_file))
-    # XXX self.attention_model.load_state_dict(torch.load(attention_model_file))
+    self.attention_model.load_state_dict(torch.load(attention_model_file))
                                                       
 def main(argv):
     parser = argparse.ArgumentParser(description='Deep Macro Token F1 for Keyword Spotting')
