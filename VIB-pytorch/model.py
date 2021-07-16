@@ -315,35 +315,40 @@ class GumbelMLP(nn.Module):
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
-    self.conv = nn.Conv2d(1, embedding_dim,
-                          kernel_size=(input_size, 5),
+    self.ds_ratio = 4
+    self.batchnorm1 = nn.BatchNorm2d(1)
+    self.conv1 = nn.Conv2d(1, 128,
+                          kernel_size=(input_size, 3),
                           stride=(1, 1),
-                          padding=(0, 2)) # nn.Linear(input_size, embedding_dim),
+                          padding=(0, 1)) # nn.Linear(input_size, embedding_dim),
+    self.conv2 = nn.Conv2d(128, embedding_dim,
+                           kernel_size=(1, 5), 
+                           stride=(1, 1), 
+                           padding=(0, 2))
+    self.pool = nn.MaxPool2d(kernel_size=(1, 3), stride=(1, 2), padding=(0, 1))
 
     self.mlp = nn.Sequential(
-                 nn.ReLU(),
-                 nn.Dropout(0.2),
                  nn.Linear(embedding_dim, embedding_dim),
                  nn.ReLU(),
-                 nn.Dropout(0.2),
                  nn.Linear(embedding_dim, embedding_dim),
-                 nn.ReLU(),
-                 nn.Dropout(0.2)
+                 nn.ReLU()
                )
     self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
-    self.decode = nn.Linear(n_gumbel_units, self.n_class)
-    self.ds_ratio = 1
+    self.decode = nn.Linear(n_gumbel_units * round(input_size // self.ds_ratio), self.n_class)
 
   def forward(self, x, 
               num_sample=1,
               masks=None,
               temp=1.,
               return_feat=False):
-    B = x.size(0)
-    D = x.size(1)
-    embed = self.conv(x.unsqueeze(1)).squeeze(2)
-    embed = embed.permute(0, 2, 1)
-    embed = self.mlp(embed)
+    x = x.unsqueeze(1))
+    x = self.batchnorm1(x)
+    x = F.relu(self.conv1(x))
+    x = self.pool(x)
+    x = F.relu(self.conv2(x))
+    x = self.pool(x).squeeze(2)
+    x = x.permute(0, 2, 1)
+    embed = self.mlp(x)
     logits = self.bottleneck(embed) 
 
     if masks is not None:
@@ -351,9 +356,12 @@ class GumbelMLP(nn.Module):
     encoding = self.reparametrize_n(logits, 
                                     n=num_sample, 
                                     temp=temp)
-    out = self.decode(encoding)
+    
     if num_sample > 1:
+      out = self.decode(encoding.view(num_sample, B, -1))
       out = out.mean(0)
+    else:
+      out = self.decode(encoding.view(B, -1))
         
     if return_feat:
       return logits, out, encoding, embed
@@ -427,6 +435,7 @@ class BLSTM(nn.Module):
         embedding = embedding.sum(-2)
         return logit, embedding
     return logit
+
 
 class GaussianBLSTM(nn.Module):
     def __init__(self,
