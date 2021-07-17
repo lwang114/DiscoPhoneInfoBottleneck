@@ -15,7 +15,7 @@ from pyhocon import ConfigFactory
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
 from utils.utils import cuda, str2bool
-from model import GumbelBLSTM
+from model import GumbelBLSTM, GumbelMLP, BLSTM, MLP, Reshape
 from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -49,7 +49,6 @@ class Solver(object):
     self.get_feature_config(config)
     self.get_dataset_config(config)
     self.get_model_config(config)
-    self.get_loss_config(config)
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
@@ -75,7 +74,7 @@ class Solver(object):
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
-
+    self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
     print(f'Max normalized: {self.max_normalize}')
@@ -100,24 +99,78 @@ class Solver(object):
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
   def get_model_config(self, config):
-    self.audio_net = cuda(GumbelBLSTM(self.K,
-                                n_layers=self.n_layers,
-                                n_gumbel_units=self.n_phone_class,
-                                n_class=self.n_visual_class,
-                                input_size=self.input_size,
-                                ds_ratio=1,
-                                bidirectional=True), self.cuda)
+    if config.model_type == 'blstm':
+      if config.use_segment:
+        self.audio_net = cuda(SegmentGumbelBLSTM(self.K,
+                                          n_layers=self.n_layers,
+                                          n_class=self.n_visual_class,
+                                          input_size=80,
+                                          ds_ratio=1,
+                                          bidirectional=True), self.cuda) # TODO 
+      else:
+        self.audio_net = cuda(BLSTM(self.K,
+                                    n_layers=self.n_layers,
+                                    n_class=self.n_visual_class,
+                                    input_size=80,
+                                    ds_ratio=1,
+                                    bidirectional=True), self.cuda)
+      
+    elif config.model_type == 'gumbel_blstm':
+      if config.use_segment:
+        self.audio_net = cuda(GumbelBLSTM(self.K,
+                                          n_layers=self.n_layers,
+                                          n_gumbel_units=self.n_phone_class,
+                                          n_class=self.n_visual_class,
+                                          input_size=self.input_size,
+                                          ds_ratio=1,
+                                          bidirectional=True,
+                                          decoder=nn.Sequential(
+                                                    Reshape((self.max_segment_num * self.n_phone_class,)),
+                                                    nn.Linear(self.max_segment_num * self.n_phone_class,
+                                                              self.n_visual_class))
+                                          ), self.cuda)
+      else:
+        self.audio_net = cuda(GumbelBLSTM(self.K,
+                                          n_layers=self.n_layers,
+                                          n_gumbel_units=self.n_phone_class,
+                                          n_class=self.n_visual_class,
+                                          input_size=self.input_size,
+                                          ds_ratio=1,
+                                          bidirectional=True), self.cuda)
+    elif config.model_type == 'mlp':
+      if config.use_segment:
+        self.audio_net = cuda(MLP(self.K,
+                                  n_layers=self.n_layers,
+                                  n_class=self.n_visual_class,
+                                  input_size=self.input_size,
+                                  max_seq_len=self.max_segment_num,
+                                  context_width=1), self.cuda)
+      else:
+        self.audio_net = cuda(MLP(self.K,
+                                  n_layers=self.n_layers,
+                                  n_class=self.n_visual_class,
+                                  input_size=self.input_size,
+                                  max_seq_len=self.max_word_len,
+                                  context_width=1), self.cuda)
+    elif config.model_type == 'gumbel_mlp':
+      if config.use_segment:
+        self.audio_net = cuda(GumbelMLP(self.K,
+                                        n_layers=self.n_layers,
+                                        n_gumbel_units=self.n_phone_class,
+                                        n_class=self.n_visual_class,
+                                        input_size=self.input_size,
+                                        max_seq_len=self.max_segment_num,
+                                        context_width=1), self.cuda)
+      else:
+        self.audio_net = cuda(GumbelMLP(self.K, 
+                                        n_layers=self.n_layers,
+                                        n_gumbel_units=self.n_phone_class,
+                                        n_class=self.n_visual_class,
+                                        input_size=self.input_size,
+                                        max_seq_len=self.max_word_len), self.cuda)
     # self.image_net = cuda(Resnet34(pretrained=True, n_class=self.n_visual_class)
     # if config.get(image_net_path, None):
     #   self.image_net.load_state_dict(config.image_net_path)
-
-  def get_loss_config(self, config):
-    if self.loss_type == 'macro_token_floss':
-      self.criterion = MacroTokenFLoss(beta=self.beta_f_measure)
-    elif self.loss_type == 'cross_entropy':
-      self.criterion = MacroTokenFLoss(beta=self.beta_f_measure)
-    else:
-      raise ValueError(f'Invalid loss type {self.loss_type}')
 
   def get_optim_config(self, config):
     trainables = [p for p in self.audio_net.parameters()]
@@ -132,10 +185,10 @@ class Solver(object):
   def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
+    trainset = self.data_loader['train'].dataset
     total_loss = 0.
+    total_step = 0.
     total_word_loss = 0.
-    total_phone_loss = 0.
-    total_step = 0
         
     for e in range(self.epoch):
       self.global_epoch += 1
@@ -160,40 +213,60 @@ class Solver(object):
         # (batch size, max word num, max word len, max audio len)
         word_masks = cuda(word_masks, self.cuda)
         # (batch size x max word num, max word len)
-        word_masks_2d = torch.where(word_masks.sum(-1).view(-1, self.max_word_len) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
+        if trainset.use_segment:
+          word_masks_2d = torch.where(word_masks.sum(-1).view(-1, self.max_segment_num) > 0,
+                                      torch.tensor(1, device=x.device),
+                                      torch.tensor(0, device=x.device))
+        else:
+          word_masks_2d = torch.where(word_masks.sum(-1).view(-1, self.max_word_len) > 0,
+                                      torch.tensor(1, device=x.device),
+                                      torch.tensor(0, device=x.device))
         # (batch size x max word num)
         word_masks_1d = torch.where(word_masks_2d.sum(-1) > 0,
                                     torch.tensor(1, device=x.device),
                                     torch.tensor(0, device=x.device))
         # images = cuda(images, self.cuda)
 
+        # (batch size, max word num, max word len, feat dim)
+        if trainset.ds_method == 'no-op':
+          x = x.permute(0, 1, 3, 2)
+          x_size = x.size()
+          # (batch size, max word num, max word len, max segment len x feat dim)
+          x = torch.matmul(word_masks, x.contiguous()
+                                        .view(*x_size[:-2], -1)
+                                        .unsqueeze(1))
+          # (batch size, max word num, max word len, max segment len, feat dim)
+          x = x.contiguous().view(*x.size()[:-1], *x_size[-2:])
+        else:
+          x = torch.matmul(word_masks, x.permute(0, 2, 1).unsqueeze(1))
+
+        # (batch size x max word num, feat dim, max word len)
+        if trainset.use_segment:
+          if trainset.ds_method == 'no-op':
+            x = x.view.permute(0, 1, 3, 2)
+            audio_masks = audio_masks.view(-1, audio_masks.size(-1))
+          else:
+            x = x.view(-1, self.max_segment_num, x.size(-1)).permute(0, 2, 1)
+        else:
+          x = x.view(-1, self.max_word_len, x.size(-1)).permute(0, 2, 1)
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]
-        audio_lens = audio_masks.sum(-1).long()
-        word_lens = word_masks.sum(dim=(-1, -2)).long()
-        sent_phone_logits,\
-        word_logits,\
-         _,\
-         embedding = self.audio_net(x,
-                                    masks=audio_masks,
-                                    return_feat=True)
+          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio, ::self.audio_net.ds_ratio]
 
-        # (batch size, max word num, max word len, n phone class)
-        phone_logits = torch.matmul(word_masks, sent_phone_logits.unsqueeze(1))
-        # (batch size x max word num, max word len, n phone class)
-        phone_logits = phone_logits.view(-1, self.max_word_len, self.n_phone_class)
-       
-        # (batch size, max word num, max word len, n word class)
-        word_logits = torch.matmul(word_masks, word_logits.unsqueeze(1))
-        # (batch size, max word num, n word class)
-        word_logits = (word_logits * word_masks.sum(-1, keepdim=True)).sum(-2) # / (word_lens.unsqueeze(-1) + EPS) # Average over frames 
-        # (batch size x max word num, n word class)
-        word_logits_2d = word_logits.view(-1, self.n_visual_class)
+        if self.config.model_type in ['blstm', 'mlp']:
+          word_logits,\
+          embedding = self.audio_net(x,
+                                     masks=audio_masks,
+                                     return_feat=True)
+        else:
+          phone_logits,\
+          word_logits,\
+          _,\
+          embedding = self.audio_net(x,
+                                     masks=audio_masks,
+                                     return_feat=True)
 
-        loss = F.cross_entropy(word_logits_2d,
+        loss = F.cross_entropy(word_logits,
                                word_labels.flatten(),
                                ignore_index=self.ignore_index)
         total_loss += loss.cpu().detach().numpy()
@@ -202,7 +275,8 @@ class Solver(object):
         if loss == 0:
           continue
         self.optim.zero_grad()
-        loss.backward()
+        loss.backward()        
+        np.savetxt(f'decode_weight_grad_{self.config.model_type}_use_segment{self.config.use_segment}.txt', self.audio_net.decode.weight.grad.cpu().detach().numpy()) # XXX
         self.optim.step()
 
         if self.global_iter % 1000 == 0:
@@ -222,8 +296,6 @@ class Solver(object):
     preprocessor = testset.preprocessor
 
     total_loss = 0.
-    total_word_loss = 0.
-    total_phone_loss = 0.
     total_step = 0.
 
     pred_word_labels = []
@@ -255,65 +327,67 @@ class Solver(object):
         audio_masks = cuda(audio_masks, self.cuda)
         # (batch size, max word num, max word len, max audio len)
         word_masks = cuda(word_masks, self.cuda)
-        # (batch size x max word num, max word len)
-        word_masks_2d = torch.where(word_masks.sum(-1).view(-1, self.max_word_len) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
-
-        # (batch size x max word num)
-        word_masks_1d = torch.where(word_masks_2d.sum(-1) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
         # images = cuda(images, self.cuda)
-
-        if self.audio_net.ds_ratio > 1:
-          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]
-        audio_lens = audio_masks.sum(-1).long()
-        # (batch size, max word num)
         word_lens = word_masks.sum(dim=(-1, -2)).long()
-        # (batch size,)
         word_nums = torch.where(word_lens > 0,
                                 torch.tensor(1, device=x.device),
                                 torch.tensor(0, device=x.device)).sum(-1)
+              
+        # (batch size, max word num, max word len, feat dim)
+        x = torch.matmul(word_masks, x.permute(0, 2, 1).unsqueeze(1))
+        # (batch size x max word num, feat dim, max word len)
+        if testset.use_segment:
+          x = x.view(-1, self.max_segment_num, x.size(-1)).permute(0, 2, 1)
+        else:
+          x = x.view(-1, self.max_word_len, x.size(-1)).permute(0, 2, 1)
 
-        sent_phone_logits,\
-        word_logits,\
-         _,\
-         embedding = self.audio_net(x,
-                                    masks=audio_masks,
-                                    return_feat=True)
-        
-        # (batch size, max word num, max word len, n phone class)
-        phone_logits = torch.matmul(word_masks, sent_phone_logits.unsqueeze(1))
-        # (batch size x max word num, max word len, n phone class)
-        phone_logits = phone_logits.view(-1, self.max_word_len, self.n_phone_class)
-                
-        # (batch size, max word num, max word len, n word class)
-        word_logits = torch.matmul(word_masks, word_logits.unsqueeze(1))
-        # (batch size, max word num, n word class)
-        word_logits = (word_logits * word_masks.sum(-1, keepdim=True)).sum(-2) # / (word_lens.unsqueeze(-1) + EPS) # Average over frames 
-        # (batch size x max word num, n word class)
-        word_logits_2d = word_logits.view(-1, self.n_visual_class)
+        if self.audio_net.ds_ratio > 1:
+          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
+          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio, ::self.audio_net.ds_ratio]
 
-        loss = F.cross_entropy(word_logits_2d,
+        if self.config.model_type in ['mlp', 'blstm']:
+          word_logits,\
+          embedding = self.audio_net(x,
+                                     masks=audio_masks,
+                                     return_feat=True)
+        else:
+          phone_logits,\
+          word_logits,\
+          _,\
+          embedding = self.audio_net(x,
+                                     masks=audio_masks,
+                                     return_feat=True)
+        loss = F.cross_entropy(word_logits,
                                word_labels.flatten(),
                                ignore_index=self.ignore_index)
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
         
+        word_logits = word_logits.view(word_labels.size(0), -1, self.n_visual_class)
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
-          pred_phone_label = sent_phone_logits[idx, :audio_lens[idx]].max(-1)[1]
-          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
-          pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
-          phone_f.write(f'{audio_id} {pred_phone_names}\n')
+          
+          if not self.config.model_type in ['blstm', 'mlp']:
+            phone_logits = phone_logits.squeeze(1)
+            if self.config.use_segment:
+              segments = testset.dataset[global_idx][3]
+              phone_logit_frame_level = testset.unsegment(phone_logits[idx], segments)
+              pred_phone_label = phone_logit_frame_level.max(-1)[1]
+            else:
+              pred_phone_label = phone_logits[idx, :word_lens[idx]].max(-1)[1] # TODO Make this more general to accept multi-word sentence
+            if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
+              us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
+              pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                                 .expand(-1, us_ratio).flatten()
+
+            pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+            pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
+            phone_f.write(f'{audio_id} {pred_phone_names}\n')
 
           if word_nums[idx] > 0:
             gold_word_label = word_labels[idx, :word_nums[idx]].cpu().detach().numpy().tolist()
             pred_word_label = word_logits[idx, :word_nums[idx]].max(-1)[1].cpu().detach().numpy().tolist() 
-         
             gold_word_labels.extend(gold_word_label)
             pred_word_labels.extend(pred_word_label)
             pred_word_names = preprocessor.to_word_text(pred_word_label)
@@ -337,15 +411,24 @@ class Solver(object):
       word_f1, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
                                                    np.asarray(pred_word_labels),
                                                    average='macro')
-      print(f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\tWord Loss: {avg_word_loss}\tPhone Loss: {avg_phone_loss}\n'
-            f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'
-            f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}') 
       token_f1,\
       token_prec,\
-      token_recall = compute_token_f1(phone_file,
-                                      gold_phone_file,
-                                      self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+      token_recall = 0, 0, 0 
+      if not self.config.model_type in ['blstm', 'mlp']:               
+        token_f1,\
+        token_prec,\
+        token_recall = compute_token_f1(phone_file,
+                                        gold_phone_file,
+                                        self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+      info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
+             f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
+             f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
+             f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
+      print(info) 
 
+      save_path = self.ckpt_dir.joinpath('results_file.txt')
+      with open(save_path, 'a') as file:
+        file.write(info)
 
       if self.history['word_acc'] < word_acc:
         self.history['token_f1'] = token_f1
