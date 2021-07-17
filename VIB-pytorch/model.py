@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.autograd import Variable
+import numpy as np
 from utils.utils import cuda
 
 class VQCPCEncoder(nn.Module):
@@ -303,6 +304,41 @@ class GumbelTDS(torch.nn.Module):
 
       return encoding
 
+class MLP(nn.Module):
+  def __init__(self,
+               embedding_dim,
+               n_layers=1,
+               n_class=65,
+               input_size=80,
+               max_seq_len=100,
+               context_width=5):
+    super(MLP, self).__init__()
+    self.K = embedding_dim
+    self.n_layers = n_layers
+    self.n_class = n_class
+    self.ds_ratio = 1
+    self.mlp = nn.Sequential(
+                 # nn.Linear(embedding_dim, embedding_dim),
+                 nn.Linear(input_size, embedding_dim),
+                 nn.ReLU(),
+                 nn.Linear(embedding_dim, embedding_dim),
+                 nn.ReLU(),
+               )
+    self.decode = nn.Linear(embedding_dim * round(max_seq_len // self.ds_ratio),
+                            self.n_class,
+                            bias=False)
+    
+  def forward(self, x,
+              masks=None,
+              return_feat=False):
+    B = x.size(0)
+    x = x.permute(0, 2, 1)
+    embed = self.mlp(x)
+    out = self.decode(embed.view(B, -1))
+    if return_feat:
+      return out, embed
+    else:
+      return out
  
 class GumbelMLP(nn.Module):
   def __init__(self,
@@ -310,59 +346,67 @@ class GumbelMLP(nn.Module):
                n_layers=1,
                n_class=65,
                n_gumbel_units=40,
-               input_size=80):
+               input_size=80,
+               max_seq_len=100,
+               context_width=5):
     super(GumbelMLP, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
-    self.ds_ratio = 4
+    self.ds_ratio = 1
     self.batchnorm1 = nn.BatchNorm2d(1)
-    self.conv1 = nn.Conv2d(1, 128,
-                          kernel_size=(input_size, 3),
+    self.conv1 = nn.Conv2d(1, embedding_dim,
+                          kernel_size=(input_size, context_width),
                           stride=(1, 1),
-                          padding=(0, 1)) # nn.Linear(input_size, embedding_dim),
-    self.conv2 = nn.Conv2d(128, embedding_dim,
-                           kernel_size=(1, 5), 
-                           stride=(1, 1), 
-                           padding=(0, 2))
-    self.pool = nn.MaxPool2d(kernel_size=(1, 3), stride=(1, 2), padding=(0, 1))
+                          padding=(0, int(context_width // 2)), bias=False) # nn.Linear(input_size, embedding_dim),
+    # self.conv2 = nn.Conv2d(128, embedding_dim,
+    #                        kernel_size=(1, 5), 
+    #                        stride=(1, 1), 
+    #                        padding=(0, 2))
+    # self.pool = nn.MaxPool2d(kernel_size=(1, 3), stride=(1, 2), padding=(0, 1))
 
     self.mlp = nn.Sequential(
-                 nn.Linear(embedding_dim, embedding_dim),
+                 # nn.Linear(embedding_dim, embedding_dim),
+                 nn.Linear(input_size, embedding_dim),
                  nn.ReLU(),
                  nn.Linear(embedding_dim, embedding_dim),
-                 nn.ReLU()
+                 nn.ReLU(),
                )
     self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
-    self.decode = nn.Linear(n_gumbel_units * round(input_size // self.ds_ratio), self.n_class)
+    # self.decode = nn.Linear(n_gumbel_units, self.n_class) # XXX 
+    self.decode = nn.Linear(n_gumbel_units * round(max_seq_len // self.ds_ratio), 
+                            self.n_class,
+                            bias=False)
 
   def forward(self, x, 
               num_sample=1,
               masks=None,
               temp=1.,
               return_feat=False):
-    x = x.unsqueeze(1))
-    x = self.batchnorm1(x)
-    x = F.relu(self.conv1(x))
-    x = self.pool(x)
-    x = F.relu(self.conv2(x))
-    x = self.pool(x).squeeze(2)
+    B = x.size(0)
+    # x = x.unsqueeze(1)
+    # x = self.batchnorm1(x)
+    # x = F.relu(self.conv1(x))
+    # x = self.pool(x)
+    # x = F.relu(self.conv2(x))
+    # x = self.pool(x).squeeze(2)
+    # x = x.squeeze(2).permute(0, 2, 1)
     x = x.permute(0, 2, 1)
     embed = self.mlp(x)
     logits = self.bottleneck(embed) 
-
-    if masks is not None:
-      logits = logits * masks.unsqueeze(2)
     encoding = self.reparametrize_n(logits, 
                                     n=num_sample, 
                                     temp=temp)
-    
+    if masks is not None:
+      encoding = encoding * masks.unsqueeze(-1)
+   
     if num_sample > 1:
       out = self.decode(encoding.view(num_sample, B, -1))
       out = out.mean(0)
     else:
+      # out = self.decode(encoding).sum(-2) # XXX
       out = self.decode(encoding.view(B, -1))
-        
+
     if return_feat:
       return logits, out, encoding, embed
     else:
@@ -392,7 +436,8 @@ class BLSTM(nn.Module):
                n_class=65,
                input_size=80, 
                ds_ratio=1,
-               bidirectional=True):
+               bidirectional=True,
+               decoder=None):
     super(BLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
@@ -404,8 +449,11 @@ class BLSTM(nn.Module):
                        num_layers=n_layers,
                        batch_first=True,
                        bidirectional=bidirectional)
-    self.decode = nn.Linear(2 * embedding_dim if bidirectional
-                            else embedding_dim, self.n_class)
+    if decoder is None:
+      self.decode = nn.Linear(2 * embedding_dim if bidirectional
+                              else embedding_dim, self.n_class)
+    else:
+      self.decode = decoder
 
   def forward(self, x, 
               return_feat=False):
@@ -514,7 +562,6 @@ class GaussianBLSTM(nn.Module):
 
         eps = Variable(cuda(std.data.new(std.size()).normal_(), std.is_cuda))
         return mu + eps * std
-
       
 
 class GumbelBLSTM(nn.Module):
@@ -525,7 +572,8 @@ class GumbelBLSTM(nn.Module):
                n_gumbel_units=49,
                input_size=80, 
                ds_ratio=1,
-               bidirectional=True):
+               bidirectional=True,
+               decoder=None):
     super(GumbelBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
@@ -539,7 +587,10 @@ class GumbelBLSTM(nn.Module):
                        bidirectional=bidirectional)
     self.bottleneck = nn.Linear(2*embedding_dim if bidirectional 
                                                 else embedding_dim, n_gumbel_units)
-    self.decode = nn.Linear(n_gumbel_units, self.n_class)
+    if decoder is None:
+      self.decode = nn.Linear(n_gumbel_units, self.n_class)
+    else:
+      self.decode = decoder
 
   def forward(self, x, 
               num_sample=1, 
@@ -744,6 +795,13 @@ class GumbelMarkovBLSTM(nn.Module):
   def weight_init(self):
       pass
         
+class Reshape(nn.Module):
+  def __init__(self, out_size):
+    super(Reshape, self).__init__()
+    self.out_size = out_size
+
+  def forward(self, x):
+    return x.contiguous().view(-1, *self.out_size)
 
 def xavier_init(ms):
     for m in ms :
