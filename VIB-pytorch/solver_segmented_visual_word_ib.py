@@ -293,7 +293,8 @@ class Solver(object):
           phone_f.write(f'{audio_id} {pred_phone_names}\n')
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
-          pred_word_label = word_logits[idx].sum().max(-1)[1].cpu().detach().numpy().tolist() 
+          pred_word_label = word_logits[idx].sum(0).max(-1)[1].cpu().detach().numpy().tolist() 
+          print('gold word label, pred word label: ', gold_word_label, pred_word_label) # XXX
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
           pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
