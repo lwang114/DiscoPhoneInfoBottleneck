@@ -74,7 +74,6 @@ class Solver(object):
     self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
-    print(f'Max normalized: {self.max_normalize}')
 
   def get_feature_config(self, config):
     if config.audio_feature == 'mfcc':
@@ -96,15 +95,16 @@ class Solver(object):
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
   def get_model_config(self, config):      
-    if config.model_type == 'gumbel_blstm':
+    if (config.model_type == 'gumbel_blstm') and (config.downsample_method == 'no-op'):
       self.audio_net = cuda(GumbelBLSTM(self.K,
                                         n_layers=self.n_layers,
                                         n_gumbel_units=self.n_phone_class,
                                         n_class=self.n_visual_class,
                                         input_size=self.input_size,
                                         ds_ratio=1,
-                                        bidirectional=True), self.cuda)
-    elif config.model_type == 'gumbel_mlp':
+                                        bidirectional=True,
+                                        max_len=self.max_segment_num), self.cuda)
+    elif (config.model_type == 'gumbel_mlp') and (config.downsample_method != 'no-op'):
       self.audio_net = cuda(GumbelMLP(self.K,
                                       n_layers=self.n_layers,
                                       n_gumbel_units=self.n_phone_class,
@@ -112,7 +112,7 @@ class Solver(object):
                                       input_size=self.input_size,
                                       max_len=self.max_segment_num), self.cuda)
     else:
-      raise ValueError(f'Invalid model type: {config.model_type}')
+      raise ValueError(f'Invalid model type: {config.model_type} for downsample method {config.downsample_method}')
 
   def get_optim_config(self, config):
     trainables = [p for p in self.audio_net.parameters()]
@@ -127,7 +127,6 @@ class Solver(object):
   def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
-    trainset = self.data_loader['train'].dataset
     total_loss = 0.
     total_step = 0.
     total_word_loss = 0.
@@ -142,31 +141,47 @@ class Solver(object):
         self.global_iter += 1
         
         audios = batch[0]
-        word_labels = batch[2]
+        word_labels = batch[2].squeeze(-1)
         audio_masks = batch[3]
-        word_masks = batch[5]
 
         # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
         x = cuda(audios, self.cuda)
         if self.audio_feature == "wav2vec2":
-          x = self.audio_feature_net.feature_extractor(x)
+          B = x.size(0)
+          T = x.size(1) 
+          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1))
+          x = x.permute(0, 2, 1)
+          x = x.view(B, T, x.size(-2), x.size(-1))
 
         # (batch size,)
         word_labels = cuda(word_labels, self.cuda)
         
         # (batch size, max segment num) or (batch size, max segment num, max segment len)
         audio_masks = cuda(audio_masks, self.cuda)
+        # (batch size, max segment num)
+        if audio_masks.dim() == 3:
+          segment_masks = torch.where(audio_masks.sum(-1) > 0,
+                                      torch.tensor(1., device=audio_masks.device),
+                                      torch.tensor(0., device=audio_masks.device))
+        else:
+          segment_masks = audio_masks.clone()
 
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio, ::self.audio_net.ds_ratio]
+          segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
 
         # (batch size, max segment num, n visual class)
         _, word_logits = self.audio_net(x, masks=audio_masks,
                                         return_feat=False)
-
-        loss = F.cross_entropy(word_logits,
-                               word_labels.unsqueeze(-1).expand(-1, trainset.max_segment_num),
+        # (batch size * max segment num, n visual class)
+        segment_word_logits = word_logits.view(-1, self.n_visual_class)
+        # (batch size, max segment num)
+        segment_word_labels = word_labels.unsqueeze(-1)\
+                                         .expand(-1, self.max_segment_num)
+        # (batch size * max segment num)
+        segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
+        loss = F.cross_entropy(segment_word_logits,
+                               segment_word_labels,
                                ignore_index=self.ignore_index)
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -211,7 +226,7 @@ class Solver(object):
       B = 0
       for b_idx, batch in enumerate(self.data_loader['test']):        
         audios = batch[0]
-        word_labels = batch[2]
+        word_labels = batch[2].squeeze(-1)
         audio_masks = batch[3]
         word_masks = batch[5]
         if b_idx > 2 and self.debug:
@@ -222,30 +237,39 @@ class Solver(object):
         # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
         x = cuda(audios, self.cuda)
         if self.audio_feature == "wav2vec2":
-          x = self.audio_feature_net.feature_extractor(x)  
+          B = x.size(0)
+          T = x.size(1) 
+          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1))
+          x = x.permute(0, 2, 1)
+          x = x.view(B, T, x.size(-2), x.size(-1))
 
         # (batch size,)
         word_labels = cuda(word_labels, self.cuda)
 
         # (batch size, max segment num) or (batch size, max segment num, max segment len)
         audio_masks = cuda(audio_masks, self.cuda)
-
-        word_masks = cuda(word_masks, self.cuda)
-        word_lens = word_masks.sum(dim=(-1, -2)).long()
-        word_nums = torch.where(word_lens > 0,
-                                torch.tensor(1, device=x.device),
-                                torch.tensor(0, device=x.device)).sum(-1)
-              
+        # (batch size, max segment num)
+        if audio_masks.dim() == 3: 
+          segment_masks = torch.where(audio_masks.sum(-1) > 0,
+                                      torch.tensor(1., device=audio_masks.device),
+                                      torch.tensor(0., device=audio_masks.device))
+        else:
+          segment_masks = audio_masks.clone()
+             
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          word_masks = word_masks[:, :, ::self.audio_net.ds_ratio, ::self.audio_net.ds_ratio]
-          
+          segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
+
         # (batch size, max segment num, n visual class)
         phone_logits, word_logits, _, embedding = self.audio_net(x, masks=audio_masks,
                                                                  return_feat=True)
 
-        loss = F.cross_entropy(word_logits,
-                               word_labels.unsqueeze(-1).expand(-1, trainset.max_segment_num),
+        segment_word_labels = word_labels.unsqueeze(-1)\
+                                         .expand(-1, self.max_segment_num)
+        segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
+        segment_word_logits = word_logits.view(-1, self.n_visual_class)
+        loss = F.cross_entropy(segment_word_logits,
+                               segment_word_labels,
                                ignore_index=self.ignore_index)
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -268,19 +292,15 @@ class Solver(object):
           pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
           phone_f.write(f'{audio_id} {pred_phone_names}\n')
           
-          gold_word_label = word_labels[idx].sum().cpu().detach().numpy().tolist()
+          gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = word_logits[idx].sum().max(-1)[1].cpu().detach().numpy().tolist() 
-          gold_word_labels.extend(gold_word_label)
-          pred_word_labels.extend(pred_word_label)
-          pred_word_names = preprocessor.to_word_text(pred_word_label)
-          gold_word_names = preprocessor.to_word_text(gold_word_label)
-            
-          for word_idx in range(word_nums[idx]):
-            pred_word_name = pred_word_names[word_idx]
-            gold_word_name = gold_word_names[word_idx]
-            word_readable_f.write(f'Utterance id: {audio_id}\n'
-                                  f'Gold word label: {gold_word_name}\n'
-                                  f'Pred word label: {pred_word_name}\n\n') 
+          gold_word_labels.append(gold_word_label)
+          pred_word_labels.append(pred_word_label)
+          pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
+          gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
+          word_readable_f.write(f'Utterance id: {audio_id}\n'
+                                f'Gold word label: {gold_word_name}\n'
+                                f'Pred word label: {pred_word_name}\n\n') 
       phone_f.close()
       word_readable_f.close()
       avg_loss = total_loss / total_step
