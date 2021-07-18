@@ -216,11 +216,11 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
   def __getitem__(self, idx):
     audio_file, image_file, label, phoneme_dicts, box, box_idx = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
+    audio_inputs = audio_inputs.t()
     if self.use_segment:
-      audio_inputs, input_mask = self.segment(audio_inputs.t(), 
+      audio_inputs, input_mask = self.segment(audio_inputs, 
                                               phoneme_dicts,
                                               method=self.ds_method)
-      audio_inputs = audio_inputs.t()
     phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     image_inputs = self.load_image(image_file, box, box_idx)
     word_labels = self.preprocessor.to_word_index([label])
