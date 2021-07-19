@@ -118,7 +118,9 @@ class Solver(object):
     trainables = [p for p in self.audio_net.parameters()]
     optim_type = config.get('optim', 'adam')
     if optim_type == 'sgd':
-      self.optim = optim.SGD(trainables, lr=self.lr)
+      self.optim = optim.SGD(trainables, 
+                             momentum=0.9,
+                             lr=self.lr)
     else:
       self.optim = optim.Adam(trainables,
                               lr=self.lr, betas=(0.5, 0.999))
@@ -294,7 +296,6 @@ class Solver(object):
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = word_logits[idx].sum(0).max(-1)[1].cpu().detach().numpy().tolist() 
-          print('gold word label, pred word label: ', gold_word_label, pred_word_label) # XXX
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
           pred_word_name = preprocessor.to_word_text([pred_word_label])[0]

@@ -13,9 +13,11 @@ import numpy as np
 import argparse
 from pyhocon import ConfigFactory
 from pathlib import Path
+from itertools import groupby
+from sklearn.cluster import KMeans
 from sklearn.metrics import precision_recall_fscore_support
 from utils.utils import cuda, str2bool
-from model import GumbelBLSTM, GumbelMLP, BLSTM, MLP, Reshape
+from model import BLSTM, MLP
 from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -173,29 +175,14 @@ class Solver(object):
                                     torch.tensor(1, device=x.device),
                                     torch.tensor(0, device=x.device))
         # images = cuda(images, self.cuda)
-
-        # (batch size, max word num, max word len, feat dim)
-        if trainset.ds_method == 'no-op':
-          x = x.permute(0, 1, 3, 2)
-          x_size = x.size()
-          # (batch size, max word num, max word len, max segment len x feat dim)
-          x = torch.matmul(word_masks, x.contiguous()
-                                        .view(*x_size[:-2], -1)
-                                        .unsqueeze(1))
-          # (batch size, max word num, max word len, max segment len, feat dim)
-          x = x.contiguous().view(*x.size()[:-1], *x_size[-2:])
-        else:
-          x = torch.matmul(word_masks, x.permute(0, 2, 1).unsqueeze(1))
+        x = torch.matmul(word_masks, x.unsqueeze(1))
 
         # (batch size x max word num, feat dim, max word len)
         if trainset.use_segment:
-          if trainset.ds_method == 'no-op':
-            x = x.view.permute(0, 1, 3, 2)
-            audio_masks = audio_masks.view(-1, audio_masks.size(-1))
-          else:
-            x = x.view(-1, self.max_segment_num, x.size(-1)).permute(0, 2, 1)
+          x = x.view(-1, self.max_segment_num, x.size(-1))
         else:
-          x = x.view(-1, self.max_word_len, x.size(-1)).permute(0, 2, 1)
+          x = x.view(-1, self.max_word_len, x.size(-1))
+        
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
           word_masks = word_masks[:, :, ::self.audio_net.ds_ratio, ::self.audio_net.ds_ratio]
@@ -271,12 +258,12 @@ class Solver(object):
                                 torch.tensor(0, device=x.device)).sum(-1)
               
         # (batch size, max word num, max word len, feat dim)
-        x = torch.matmul(word_masks, x.permute(0, 2, 1).unsqueeze(1))
+        x = torch.matmul(word_masks, x.unsqueeze(1))
         # (batch size x max word num, feat dim, max word len)
         if testset.use_segment:
-          x = x.view(-1, self.max_segment_num, x.size(-1)).permute(0, 2, 1)
+          x = x.view(-1, self.max_segment_num, x.size(-1))
         else:
-          x = x.view(-1, self.max_word_len, x.size(-1)).permute(0, 2, 1)
+          x = x.view(-1, self.max_word_len, x.size(-1))
 
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
@@ -341,7 +328,7 @@ class Solver(object):
       self.set_mode('train') 
 
   def cluster(self,
-              n_clusters=50,
+              n_clusters=44,
               out_prefix='quantized_outputs'):
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset 
@@ -350,37 +337,42 @@ class Solver(object):
     with torch.no_grad():
       B = 0
       utt_ids_dict = dict()
-      X_dict = dict()      
+      X_dict = dict()
+      segment_dict = dict()
       for split in self.data_loader:
-        X_dict[split] = dict()
-        utt_ids_dict[split] = dict()
-        for b_idx, batch in enumerate(data_loader[split]):
-          if b_idx > 2 and self.debug:
-            break
-          if b_idx == 0:
-            B = audios.size(0)
-          
+        X_dict[split] = []
+        utt_ids_dict[split] = []
+        segment_dict[split] = dict()
+        for b_idx, batch in enumerate(self.data_loader[split]):          
           audios = batch[0]
           audio_masks = batch[3]
           audios = cuda(audios, self.cuda)
           audio_masks = cuda(audio_masks, self.cuda)
           audio_lens = audio_masks.sum(-1)
+          if b_idx > 2 and self.debug:
+            break
+          if b_idx == 0:
+            B = audios.size(0)
+
           if self.audio_feature == 'wav2vec2':
             x = self.audio_feature_net.feature_extractor(audios)
           else:
             x = audios
           
           audio_lens = audio_masks.sum(-1).long()
-          _, embedding = self.audio_net(x,
-                                        masks=audio_masks,
-                                        return_feat=True)
+          # XXX _, embedding = self.audio_net(x,
+          #                               masks=audio_masks,
+          #                               return_feat=True)
+          embedding = x
           
           for idx in range(audios.size(0)): 
             global_idx = b_idx * B + idx
-            utt_id = os.path.splitext(os.path.basename(testset.dataset[global_idx][0]))[0]
+            utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0]
+
             embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
             X_dict[split].extend(embed.tolist())
             utt_ids_dict[split].extend([utt_id]*embed.shape[0])
+            segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][3]
         X_dict[split] = np.asarray(X_dict[split])
 
       X = np.concatenate([X_dict[split] for split in self.data_loader])
@@ -391,11 +383,14 @@ class Solver(object):
       
       ys = clusterer.predict(X_dict['test'])
       utt_ids = utt_ids_dict['test']
+      segments = segment_dict['test'] 
       filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
       out_f = open(filename, 'w')
       for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
-        y = ','.join([str(g[1]) for g in group for _ in range(us_ratio)])
-        out_f.write(f'{utt_id} {y}\n') 
+        y = torch.LongTensor([g[1] for g in group])
+        y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
+        y_str = ','.join([str(l) for l in y_unseg])
+        out_f.write(f'{utt_id} {y_str}\n') 
       out_f.close()
       gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
       token_f1, token_prec, token_recall = compute_token_f1(
