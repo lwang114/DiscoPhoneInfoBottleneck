@@ -21,7 +21,7 @@ from scipy import signal
 UNK = "###UNK###"
 NULL = "###NULL###"
 BLANK = "###BLANK###"
-IGNORED_TOKENS = ["SIL", "GARBAGE"]  
+IGNORED_TOKENS = ["SIL", "GARBAGE", "+BREATH+", "+LAUGH+", "+NOISE+"]  
 
 def log_normalize(x):
     x.add_(1e-6).log_()
@@ -61,9 +61,11 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       use_segment=False,
       audio_feature="mfcc",
       image_feature="image",
+      phone_label="multilingual",
       ds_method="average",
       sample_rate=16000,
-      min_class_size=50
+      min_class_size=50,
+      debug=False  
   ):
     self.preprocessor = preprocessor
     self.splits = splits[split]
@@ -74,7 +76,9 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.max_feat_len = 100
     self.max_word_len = 100
     self.max_phone_num = 50 
-    self.max_segment_num = 10
+    self.max_segment_num = 5 # XXX
+    self.max_segment_len = 10
+    self.debug = debug
     
     data = []
     for sp in self.splits:
@@ -82,7 +86,9 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       examples = load_data_split(data_path, sp,
                                  min_class_size=min_class_size,
                                  audio_feature=audio_feature,
-                                 image_feature=image_feature)
+                                 image_feature=image_feature,
+                                 phone_label=phone_label,
+                                 debug=debug)
       
       data.extend(examples)
       print("Number of {} audio files = {}".format(split, len(examples)))
@@ -164,7 +170,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       return region_feat
 
   def segment(self, feat, segments, 
-              method='average'):
+              method="average"):
     """ 
       Args:
         feat : (num. of frames, feature dim.)
@@ -176,18 +182,28 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     """
     feat = feat
     sfeats = []
-    word_begin = segments['begin']
-    for segment in segments["children"]:
+    if method == "no-op":
+      mask = torch.zeros((self.max_segment_num, self.max_segment_len))
+    else:
+      mask = torch.zeros(self.max_segment_num) 
+      mask[:len(segments)] = 1.
+
+    word_begin = segments[0]["begin"]
+    for i, segment in enumerate(segments):
       begin = int((segment["begin"]-word_begin)*100)
       end = int((segment["end"]-word_begin)*100)
-      if end >= self.max_feat_len:
+      dur = end - begin + 1
+      if (begin >= self.max_feat_len) or (i >= self.max_segment_num):
         break
-      segment_feat = embed(feat[begin:end+1], method=method)
+      if method == "no-op":
+        segment_feat = fix_embedding_length(feat[begin:end+1], self.max_segment_len)
+        mask[i, :dur] = 1. 
+      else:      
+        segment_feat = embed(feat[begin:end+1], method=method)
       sfeats.append(segment_feat)
+      
     sfeat = torch.stack(sfeats)
     sfeat = fix_embedding_length(sfeat, self.max_segment_num)
-    mask = torch.zeros(self.max_segment_num)
-    mask[:len(segments["children"])] = 1.
     return sfeat, mask
     
   def unsegment(self, sfeat, segments):
@@ -201,11 +217,11 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     """
     if sfeat.ndim == 1:
       sfeat = sfeat.unsqueeze(-1)
-    word_begin = segments['begin']
-    dur = segments["end"] - segments["begin"]
+    word_begin = segments[0]['begin']
+    dur = segments[-1]["end"] - segments[0]["begin"]
     nframes = int(dur * 100)
     feat = torch.zeros((nframes, *sfeat.size()[1:]))
-    for i, segment in enumerate(segments["children"]):
+    for i, segment in enumerate(segments):
       begin = int((segment["begin"]-word_begin)*100)
       end = int((segment["end"]-word_begin)*100)
       if i >= sfeat.size(0):
@@ -221,6 +237,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       audio_inputs, input_mask = self.segment(audio_inputs, 
                                               phoneme_dicts,
                                               method=self.ds_method)
+        
     phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     image_inputs = self.load_image(image_file, box, box_idx)
     word_labels = self.preprocessor.to_word_index([label])
@@ -229,8 +246,14 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
                                         self.max_phone_num,
                                         padding=self.preprocessor.ignore_index) 
 
-    word_mask = torch.zeros((1, self.max_feat_len, self.max_feat_len))
-    for t in range(input_mask.sum().long()):
+    if self.use_segment:
+      word_mask = torch.zeros((1, self.max_segment_num, self.max_segment_num))
+    else:
+      word_mask = torch.zeros((1, self.max_feat_len, self.max_feat_len))
+
+    for t in range(len(phoneme_dicts)):
+      if t >= self.max_segment_num:
+        break
       word_mask[0, t, t] = 1. 
     phone_mask = torch.zeros(self.max_phone_num,)
     phone_mask[:len(phonemes)] = 1.
@@ -240,7 +263,8 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
            word_labels,\
            input_mask,\
            phone_mask,\
-           word_mask
+           word_mask,\
+           image_inputs
 
   def __len__(self):
     return len(self.dataset)
@@ -287,13 +311,17 @@ class FlickrWordImagePreprocessor:
     prepend_wordsep=False,
     audio_feature="mfcc",
     image_feature="rcnn",
+    phone_label="multilingual",
     sample_rate=16000,
     min_class_size=50,
-    ignore_index=-100
+    ignore_index=-100,
+    use_blank=True,
+    debug=False,      
   ):
     self.num_features = num_features
     self.ignore_index = ignore_index
     self.min_class_size = min_class_size
+    self.use_blank = use_blank
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
 
@@ -305,7 +333,9 @@ class FlickrWordImagePreprocessor:
         data.extend(load_data_split(data_path, sp,
                                     audio_feature=audio_feature,
                                     image_feature=image_feature,
-                                    min_class_size=self.min_class_size)) 
+                                    phone_label=phone_label,
+                                    min_class_size=self.min_class_size,
+                                    debug=debug)) 
     visual_words = set()
     tokens = set()
     for ex in data:
@@ -315,6 +345,9 @@ class FlickrWordImagePreprocessor:
 
     self.tokens = sorted(tokens)
     self.visual_words = sorted(visual_words)
+    if self.use_blank:
+      self.tokens = [BLANK]+self.tokens
+      self.visual_words = [BLANK]+self.visual_words
     self.tokens_to_index = {t:i for i, t in enumerate(self.tokens)}
     self.words_to_index = {t:i for i, t in enumerate(self.visual_words)}
 
@@ -375,13 +408,15 @@ class FlickrWordImagePreprocessor:
       else:
         sent.append(path[i])
     return sent
- 
+
 
 def load_data_split(data_path, split,
                     audio_feature="mfcc",
                     image_feature="rcnn",
+                    phone_label="multilingual",
                     min_class_size=50,
-                    max_keep_size=400):
+                    max_keep_size=400,
+                    debug=False):
   """
   Returns:
       examples : a list of mappings of
@@ -404,7 +439,7 @@ def load_data_split(data_path, split,
                              f"flickr8k_word_{min_class_size}.json"), "r")
   label_counts = dict()
   for line in word_f:
-    # if len(examples) > 100: # XXX
+    # if debug and len(examples) >= 20: # XXX
     #   break
     word = json.loads(line.rstrip("\n"))
     label = word["label"]
@@ -419,6 +454,7 @@ def load_data_split(data_path, split,
       continue
     audio_id = word["audio_id"]
     word_id = int(word['word_id'])
+    audio_path = None
     if audio_feature == "mfcc":
       audio_file = f"{audio_id}_{word_id:04d}.wav"
       audio_path = os.path.join(data_path, split, audio_file)
@@ -431,16 +467,33 @@ def load_data_split(data_path, split,
     image_path = os.path.join(data_path, "Flicker8k_Dataset", image_id+".jpg") 
     box = word["box"]
     box_idx = word["box_id"]
-
+    phonemes = []
+    if phone_label == "groundtruth":
+        phonemes = word["phonemes"]["children"]
+        noisy = False
+        for phn in phonemes:
+          if phn["text"] in IGNORED_TOKENS or (phn["text"][0] == "+"):
+            noisy = True
+            break
+        if noisy:
+          continue
+    elif phone_label == "multilingual":
+        phonemes = [{"text": phn,
+                     "begin": 0.0,
+                     "end": 0.0} for phn in word["pseudo_phones"]]
+    else:
+        raise ValueError(f"Invalid phone label type: {phone_label}")
+        
     example = {"audio": audio_path,
                "image": image_path,
                "text": label,
-               "phonemes": word["phonemes"]["children"],
+               "phonemes": phonemes,
                "box": box,
                "box_idx": box_idx} 
     examples.append(example)
   word_f.close()
   return examples  
+
    
 if __name__ == "__main__":
     preproc = FlickrWordImagePreprocessor(num_features=80, data_path="/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/")
