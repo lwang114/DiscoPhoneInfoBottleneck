@@ -478,9 +478,7 @@ def load_data_split(data_path, split,
         if noisy:
           continue
     elif phone_label == "multilingual":
-        phonemes = [{"text": phn,
-                     "begin": 0.0,
-                     "end": 0.0} for phn in word["pseudo_phones"]]
+        phonemes = [phn for phn in word["multilingual_phones"]]
     else:
         raise ValueError(f"Invalid phone label type: {phone_label}")
         
