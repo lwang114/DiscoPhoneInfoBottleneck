@@ -34,7 +34,6 @@ class MLP(nn.Module):
               masks=None,
               return_feat=False):
     B = x.size(0)
-    x = x.permute(0, 2, 1)
     embed = self.mlp(x)
     out = self.decode(embed.view(B, -1))
     if return_feat:
@@ -49,13 +48,13 @@ class GumbelMLP(nn.Module):
                n_class=65,
                n_gumbel_units=40,
                input_size=80,
-               max_len=100):
+               max_len=100,
+               position_dependent=False):
     super(GumbelMLP, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
     self.ds_ratio = 1
-    self.batchnorm1 = nn.BatchNorm2d(1)
     self.mlp = nn.Sequential(
                  nn.Linear(input_size, embedding_dim),
                  nn.ReLU(),
@@ -65,11 +64,11 @@ class GumbelMLP(nn.Module):
                  nn.ReLU(),
                )
     self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
-    # self.decode = nn.Linear(n_gumbel_units, self.n_class) # XXX 
-    self.decode = [nn.Linear(n_gumbel_units, 
-                             self.n_class,
-                             bias=False) for _ in round(max_len // self.ds_ratio)]
-    self.Nd = len(self.decode)
+    self.decoders = nn.ModuleList([nn.Linear(n_gumbel_units, 
+                                             self.n_class) 
+                                  for _ in range(round(max_len // self.ds_ratio))])
+    self.position_dependent = position_dependent
+    self.Nd = len(self.decoders)
 
   def forward(self, x, 
               num_sample=1,
@@ -77,9 +76,10 @@ class GumbelMLP(nn.Module):
               temp=1.,
               return_feat=False):
     B = x.size(0)
-    logits, encoding = self.encode(x, 
-                                   masks=masks,
-                                   n=num_sample)
+    logits, encoding, embed = self.encode(x, 
+                                          masks=masks,
+                                          n=num_sample,
+                                          temp=temp)
     out = self.decode(encoding,
                       masks=masks,
                       n=num_sample)
@@ -88,34 +88,44 @@ class GumbelMLP(nn.Module):
     else:
       return logits, out
 
-  def encode(self, x, masks=None, n=1):
+  def encode(self, x, masks=None, n=1, temp=1):
+    device = x.device
     embed = self.mlp(x)
     logits = self.bottleneck(embed)  
-    if mask is not None:
+    if masks is not None:
       logits = logits * masks.unsqueeze(-1)
     encoding = self.reparametrize_n(logits,
                                     masks=masks,
                                     n=n, 
                                     temp=temp)
-    return logits, encoding
+    return logits, encoding, embed
 
   def decode(self, encoding, masks=None, n=1):
+    device = encoding.device
     if n > 1:
-      out = [self.decode[i](encoding[:, :, i]) for i in range(self.Nd)]
+      if self.position_dependent:
+        out = [self.decoders[i](encoding[:, :, i]) for i in range(self.Nd)]
+      else:
+        out = [self.decoders[0](encoding[:, :, i]) for i in range(self.Nd)]
+      
       # (n samples, batch size, max n segments, n word classes)
-      out = torch.cat(out, dim=2)
+      out = torch.stack(out, dim=2)
       # (batch size, max n segments, n word classes)
       out = out.mean(0)
     else:
-      out = [self.decode[i](encoding[:, i]) for i in range(self.Nd)]
+      if self.position_dependent:
+        out = [self.decoders[i](encoding[:, i]) for i in range(self.Nd)]
+      else:
+        out = [self.decoders[0](encoding[:, i]) for i in range(self.Nd)]
       # (batch size, max n segments, n word classes)
-      out = torch.cat(out, dim=1)
+      out = torch.stack(out, dim=1)
+    # out = F.log_softmax(out, dim=-1) # XXX
 
     if masks is not None:
       out = out * masks.unsqueeze(-1)
     return out
 
-  def reparametrize_n(self, x, mask=None, n=1, temp=1.):
+  def reparametrize_n(self, x, masks=None, n=1, temp=1.):
     # reference :
     # http://pytorch.org/docs/0.3.1/_modules/torch/distributions.html#Distribution.sample_n
     # param x: FloatTensor of size (batch size, num. frames, num. classes) 
@@ -165,11 +175,6 @@ class BLSTM(nn.Module):
               return_feat=False):
     device = x.device
     ds_ratio = self.ds_ratio
-    if x.dim() < 3:
-        x = x.unsqueeze(0)
-    elif x.dim() > 3:
-        x = x.squeeze(1)
-    x = x.permute(0, 2, 1)
     
     B = x.size(0)
     T = x.size(1)
@@ -199,7 +204,9 @@ class GumbelBLSTM(nn.Module):
                n_gumbel_units=49,
                input_size=80, 
                ds_ratio=1,
-               bidirectional=True):
+               bidirectional=True,
+               max_len=100,
+               position_dependent=False):
     super(GumbelBLSTM, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
@@ -211,12 +218,17 @@ class GumbelBLSTM(nn.Module):
                        num_layers=n_layers,
                        batch_first=True,
                        bidirectional=bidirectional)
-    self.bottleneck = nn.Linear(2*embedding_dim if bidirectional 
-                                                else embedding_dim, 
-                                n_gumbel_units)
-    self.decode = [nn.Linear(n_gumbel_units, 
-                             self.n_class) for _ in round(max_len // self.ds_ratio)]
-    self.Nd = len(self.decode)
+    self.bottleneck = nn.Sequential(nn.Linear(2*embedding_dim+input_size if bidirectional 
+                                              else embedding_dim+input_size, 
+                                              embedding_dim),
+                                    nn.ReLU(),
+                                    nn.Linear(embedding_dim,
+                                              n_gumbel_units))
+    self.decoders = nn.ModuleList([nn.Linear(n_gumbel_units, 
+                                             self.n_class)
+                                  for _ in range(round(max_len // self.ds_ratio))])
+    self.position_dependent = position_dependent
+    self.Nd = round(max_len // self.ds_ratio)
 
   def forward(self, x, 
               num_sample=1, 
@@ -224,29 +236,30 @@ class GumbelBLSTM(nn.Module):
               temp=1., 
               return_feat=False):
     ds_ratio = self.ds_ratio
-    logits, encoding = self.encode(x, 
-                                   masks=masks,
-                                   n=num_sample)
+    logits, encoding, embed = self.encode(x, 
+                                          masks=masks,
+                                          n=num_sample,
+                                          temp=temp)
     out = self.decode(encoding,
                       masks=masks,
                       n=num_sample)
 
     if return_feat:
-      return in_logit, logit, encoding, embedding
-    return in_logit, logit
+      return logits, out, encoding, embed
+    return logits, out
   
-  def encode(self, x, masks=None, n=1):
+  def encode(self, x, masks, n, temp):
     device = x.device
-    
+    EPS = 1e-10
     B = x.size(0)
     N = x.size(1) # Max. number of segments
     T = x.size(2) # Max. segment length
     if self.bidirectional:
-      h0 = torch.zeros((2 * self.n_layers, B, self.K))
-      c0 = torch.zeros((2 * self.n_layers, B, self.K))
+      h0 = torch.zeros((2 * self.n_layers, B * N, self.K))
+      c0 = torch.zeros((2 * self.n_layers, B * N, self.K))
     else:
-      h0 = torch.zeros((self.n_layers, B, self.K))
-      c0 = torch.zeros((self.n_layers, B, self.K))
+      h0 = torch.zeros((self.n_layers, B * N, self.K))
+      c0 = torch.zeros((self.n_layers, B * N, self.K))
 
     if torch.cuda.is_available():
       h0 = h0.cuda()
@@ -255,30 +268,43 @@ class GumbelBLSTM(nn.Module):
     embed_size = (B, N, T, self.K)
     embed, _ = self.rnn(x.view(B*N, T, -1), (h0, c0))
     embed = embed.view(B, N, T, -1)
+    embed = torch.cat([embed, x], dim=-1) # Highway connection
     if masks is not None:
       embed = embed * masks.unsqueeze(-1)
     # (B, N, K)
-    embed = embed.sum(-2)
-
+    embed = embed.sum(-2) / (masks.sum(-1, keepdim=True) + EPS)
+    
     logits = self.bottleneck(embed)
     if masks is not None:
       masks_1d = torch.where(masks.sum(-1) > 0,
                              torch.tensor(1., device=device),
                              torch.tensor(0., device=device))
       logits = logits * masks_1d.unsqueeze(-1)
-    encoding = self.reparametrize_n(logits, num_sample, temp)
-    return logits, encoding
+    encoding = self.reparametrize_n(logits, n, temp)
+    return logits, encoding, embed
 
-  def decode(self, encoding, masks=None, n=1):
+  def decode(self, encoding, masks, n):
+    device = encoding.device
     if n > 1:
-      out = [self.decode[i](encoding[:, :, i]) for i in range(self.Nd)]
-      out = torch.cat(out, dim=2).mean(0)
+      if self.position_dependent:
+        out = [self.decoders[i](encoding[:, :, i]) for i in range(self.Nd)]
+      else:
+        out = [self.decoders[0](encoding[:, :, i]) for i in range(self.Nd)]
+      out = torch.stack(out, dim=2).mean(0)
     else:
-      out = [self.decode[i](encoding[:, i]) for i in range(self.Nd)]
-      out = torch.cat(out, dim=1)
-    
+      if self.position_dependent:
+        out = [self.decoders[i](encoding[:, i]) for i in range(self.Nd)]
+      else:
+        out = [self.decoders[0](encoding[:, i]) for i in range(self.Nd)]
+      # (B, N, n word class)
+      out = torch.stack(out, dim=1)
+
     if masks is not None:
-      out = out * masks.unsqueeze(-1)
+      # (B, N)
+      masks_1d = torch.where(masks.sum(-1) > 0,
+                             torch.tensor(1., device=device),
+                             torch.tensor(0., device=device))
+
     return out
 
   def reparametrize_n(self, x, n=1, temp=1.):
