@@ -16,6 +16,7 @@ from pathlib import Path
 from sklearn.metrics import accuracy_score
 from sklearn.cluster import KMeans
 from model import GumbelBLSTM, GumbelMLP, GumbelTDS, VQMLP, BLSTM
+from criterion import MicroTokenFLoss
 from datasets.datasets import return_data 
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -156,6 +157,7 @@ class Solver(object):
 
     total_loss = 0.
     total_step = 0
+    criterion = MicroTokenFLoss(beta=0.1) 
     for e in range(self.epoch):
       self.global_epoch += 1
       pred_word_labels = []
@@ -176,7 +178,8 @@ class Solver(object):
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         phone_masks = cuda(phone_masks, self.cuda)
-        word_masks = cuda(word_masks, self.cuda)
+        word_masks = cuda(word_masks, self.cuda).sum(-2) # Use averaged frame embedding by default
+
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
           word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]
@@ -203,10 +206,17 @@ class Solver(object):
           quantized = out_logits[:, :, self.n_visual_class:]
 
         word_logits = torch.matmul(word_masks, word_logits)
+        
+        # XXX word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
+        #                            ignore_index=-100,
+        #                            ).div(math.log(2))
+        word_num_mask = torch.where(word_masks.sum(-1) > 0,
+                                    torch.tensor(1, dtype=torch.long, device=word_masks.device), 
+                                    torch.tensor(0, dtype=torch.long, device=word_masks.device))
+        word_loss = criterion(F.softmax(word_logits, dim=-1),
+                              F.one_hot(word_labels * word_num_mask, self.n_visual_class),
+                              word_num_mask) # XXX  
 
-        word_loss = F.cross_entropy(word_logits.permute(0, 2, 1), word_labels,\
-                                    ignore_index=-100,
-                                    ).div(math.log(2))
         phone_loss = F.ctc_loss(F.log_softmax(phone_logits, dim=-1)\
                                   .permute(1, 0, 2),
                                 phoneme_labels,
@@ -229,6 +239,7 @@ class Solver(object):
 
         self.optim.zero_grad()
         loss.backward()
+
         if self.max_grad_norm is not None:
           torch.nn.utils.clip_grad_norm_(
             self.audio_net.parameters(),
@@ -320,7 +331,7 @@ class Solver(object):
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         phone_masks = cuda(phone_masks, self.cuda)
-        word_masks = cuda(word_masks, self.cuda)
+        word_masks = cuda(word_masks, self.cuda).sum(-2) # Use averaged frame embedding by default
         if self.audio_net.ds_ratio > 1:
           audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
           word_masks = word_masks[:, :, ::self.audio_net.ds_ratio]

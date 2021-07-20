@@ -33,6 +33,7 @@ class Solver(object):
     self.n_layers = config.get('num_layers', 3)
     self.eps = 1e-9
     self.K = config.K
+    self.beta = config.beta # degree of compression
     self.global_iter = 0
     self.global_epoch = 0
     self.audio_feature = config.audio_feature
@@ -72,8 +73,10 @@ class Solver(object):
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
     self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
+    self.n_clusters = config.get("n_clusters", self.n_phone_class)
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
+    print(f'Number of clusters = {self.n_clusters}')
 
   def get_feature_config(self, config):
     if config.audio_feature == 'mfcc':
@@ -95,22 +98,29 @@ class Solver(object):
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
   def get_model_config(self, config):      
-    if (config.model_type == 'gumbel_blstm') and (config.downsample_method == 'no-op'):
+    if config.model_type.split('_')[0] == 'pd':
+      position_dependent = True
+    else:
+      position_dependent = False
+
+    if (config.model_type in ['gumbel_blstm', 'pd_gumbel_blstm']) and (config.downsample_method == 'no-op'):
       self.audio_net = cuda(GumbelBLSTM(self.K,
                                         n_layers=self.n_layers,
-                                        n_gumbel_units=self.n_phone_class,
+                                        n_gumbel_units=self.n_clusters,
                                         n_class=self.n_visual_class,
                                         input_size=self.input_size,
                                         ds_ratio=1,
                                         bidirectional=True,
-                                        max_len=self.max_segment_num), self.cuda)
-    elif (config.model_type == 'gumbel_mlp') and (config.downsample_method != 'no-op'):
+                                        max_len=self.max_segment_num,
+                                        position_dependent=position_dependent), self.cuda)
+    elif (config.model_type in ['gumbel_mlp', 'pd_gumbel_mlp']) and (config.downsample_method != 'no-op'):
       self.audio_net = cuda(GumbelMLP(self.K,
                                       n_layers=self.n_layers,
                                       n_gumbel_units=self.n_phone_class,
                                       n_class=self.n_visual_class,
                                       input_size=self.input_size,
-                                      max_len=self.max_segment_num), self.cuda)
+                                      max_len=self.max_segment_num,
+                                      position_dependent=position_dependent), self.cuda)
     else:
       raise ValueError(f'Invalid model type: {config.model_type} for downsample method {config.downsample_method}')
 
@@ -148,18 +158,23 @@ class Solver(object):
 
         # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
         x = cuda(audios, self.cuda)
-        if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1))
-          x = x.permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
 
         # (batch size,)
         word_labels = cuda(word_labels, self.cuda)
         
         # (batch size, max segment num) or (batch size, max segment num, max segment len)
         audio_masks = cuda(audio_masks, self.cuda)
+        
+        if self.audio_feature == "wav2vec2":
+          B = x.size(0)
+          T = x.size(1) 
+          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+          x = x.view(B, T, x.size(-2), x.size(-1))
+          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+          audio_masks = torch.where(audio_masks.sum(-1) > 0,
+                                    torch.tensor(1, device=x.device),
+                                    torch.tensor(0, device=x.device))
+          
         # (batch size, max segment num)
         if audio_masks.dim() == 3:
           segment_masks = torch.where(audio_masks.sum(-1) > 0,
@@ -173,29 +188,26 @@ class Solver(object):
           segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
 
         # (batch size, max segment num, n visual class)
-        _, word_logits = self.audio_net(x, masks=audio_masks,
+        phone_logits, word_logits = self.audio_net(x, masks=audio_masks,
                                         return_feat=False)
+
         # (batch size * max segment num, n visual class)
-        segment_word_logits = word_logits.view(-1, self.n_visual_class)
-        # (batch size, max segment num)
-        segment_word_labels = word_labels.unsqueeze(-1)\
-                                         .expand(-1, self.max_segment_num)
-        # (batch size * max segment num)
-        segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
+        segment_word_logits = word_logits.sum(-2)
+
         loss = F.cross_entropy(segment_word_logits,
-                               segment_word_labels,
+                               word_labels,
                                ignore_index=self.ignore_index)
+        loss = loss + self.beta * (F.softmax(phone_logits, dim=-1) * F.log_softmax(phone_logits, dim=-1)).sum((-1, -2)).mean()
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
-
+        
         if loss == 0:
           continue
         self.optim.zero_grad()
         loss.backward()        
-        # np.savetxt(f'decode_weight_grad_{self.config.model_type}_use_segment{self.config.use_segment}.txt', self.audio_net.decode.weight.grad.cpu().detach().numpy()) # XXX
         self.optim.step()
 
-        if self.global_iter % 1000 == 0:
+        if (self.global_iter-1) % 1000 == 0:
           avg_loss = total_loss / total_step
           print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})')
       
@@ -238,18 +250,23 @@ class Solver(object):
  
         # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
         x = cuda(audios, self.cuda)
-        if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1))
-          x = x.permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
 
         # (batch size,)
         word_labels = cuda(word_labels, self.cuda)
 
         # (batch size, max segment num) or (batch size, max segment num, max segment len)
         audio_masks = cuda(audio_masks, self.cuda)
+
+        if self.audio_feature == "wav2vec2":
+          B = x.size(0)
+          T = x.size(1) 
+          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+          x = x.view(B, T, x.size(-2), x.size(-1))
+          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+          audio_masks = torch.where(audio_masks.sum(-1) > 0,
+                                    torch.tensor(1, device=x.device),
+                                    torch.tensor(0, device=x.device))
+          
         # (batch size, max segment num)
         if audio_masks.dim() == 3: 
           segment_masks = torch.where(audio_masks.sum(-1) > 0,
@@ -266,12 +283,12 @@ class Solver(object):
         phone_logits, word_logits, _, embedding = self.audio_net(x, masks=audio_masks,
                                                                  return_feat=True)
 
-        segment_word_labels = word_labels.unsqueeze(-1)\
-                                         .expand(-1, self.max_segment_num)
-        segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
-        segment_word_logits = word_logits.view(-1, self.n_visual_class)
+        # segment_word_labels = word_labels.unsqueeze(-1)\
+        #                                  .expand(-1, self.max_segment_num)
+        # segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
+        segment_word_logits = word_logits.sum(-2) # XXX word_logits.view(-1, self.n_visual_class)
         loss = F.cross_entropy(segment_word_logits,
-                               segment_word_labels,
+                               word_labels,
                                ignore_index=self.ignore_index)
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
