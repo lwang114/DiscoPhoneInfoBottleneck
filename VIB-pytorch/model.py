@@ -6,6 +6,130 @@ from torch.autograd import Variable
 import numpy as np
 from utils.utils import cuda
 
+
+class InfoQuantizer(nn.Module):
+  def __init__(self, in_channels, channels, n_embeddings, z_dim):
+    super(InfoQuantizer, self).__init__()
+    self.conv = nn.Conv1d(in_channels, channels, 10, 1, 0, bias=False)
+    self.encoder = nn.Sequential(
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, z_dim),
+    )
+    self.codebook = IQEmbeddingEMA(n_embeddings, z_dim)
+
+  def encode(self, x, masks=None):
+    if x.dim() == 4:
+      size = x.size()
+      assert size[2] == 10
+      x = self.conv(x.view(-1, *size[2:]).permute(0, 2, 1))
+      x = x.squeeze(-1).view(*size[:2], -1)
+    z = self.encoder(x) 
+    p = F.log_softmax(z, dim=-1)
+    q, indices = self.codebook.encode(p, masks=masks)    
+    return z, q, indices
+
+  def forward(self, x, masks=None):
+    if x.dim() == 4:
+      size = x.size()
+      assert size[2] == 10
+      x = self.conv(x.view(-1, *size[2:]).permute(0, 2, 1))
+      x = x.squeeze(-1).view(*size[:2], -1)
+    z = self.encoder(x) 
+    p = F.log_softmax(z, dim=-1)
+    q, loss = self.codebook(p, masks=masks)
+    return z, q, loss
+
+class IQEmbeddingEMA(nn.Module):
+  def __init__(self, n_embeddings, 
+               embedding_dim, 
+               commitment_cost=0.25, 
+               decay=0.999, 
+               epsilon=1e-5,
+               div_type="kl"):
+    super(IQEmbeddingEMA, self).__init__()
+    self.commitment_cost = commitment_cost
+    self.decay = decay
+    self.epsilon = epsilon
+    self.div_type = div_type
+    if not self.div_type in ['kl', 'js']:
+      raise ValueError(f"Divergence type {self.div_type} not defined")
+
+    alpha = 10 ** np.linspace(-1.4, 1.4, n_embeddings)
+    embedding = torch.stack(
+                  [torch.Tensor(np.random.dirichlet([alpha[k]]*embedding_dim))
+                    for k in range(n_embeddings)]
+                ) # Sample a codebook of pmfs
+    self.register_buffer("embedding", embedding)
+    self.register_buffer("ema_count", torch.zeros(n_embeddings))
+    self.register_bugger("ema_weight", self.embedding.clone())
+
+  def encode(self, x, masks=None):
+    B = x.size(0)
+    M, D = self.embedding.size()
+    x_flat = x.detach().reshape(-1, D)
+
+    if self.div_type == "kl":
+      divergences = masked_kl_div(torch.self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2),
+                                  masks=masks)
+    elif self.div_type == 'js':
+      divergences = masked_js_div(torch.self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2),
+                                  masks=masks)
+
+    indices = torch.argmin(divergences.float(), -1)
+    quantized = F.embedding(indices, self.embedding)
+    quantized = quantized.view_as(x)
+    return quantized, indices.view(x.size(0), x.size(1))
+
+  def forward(self, x, masks=None):
+    M, D = self.embedding.size()
+    x_flat = x.detach().reshape(-1, D)
+
+    if self.div_type == "kl":
+      divergences = masked_kl_div(torch.self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2))
+    elif self.div_type == 'js':
+      divergences = masked_js_div(torch.self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2))
+
+    indices = torch.argmin(divergences.float(), -1)
+    encodings = F.one_hot(indices, M).float()
+    quantized = F.embedding(indices, self.embedding)
+    quantized = quantized.view_as(x)
+    
+    if self.training:
+      self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
+      n = torch.sum(self.ema_count)
+      self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
+      
+      dw = torch.matmul(encodings.t(), x_flat)
+      self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
+      
+      self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
+
+    e_latent_loss = F.kl_div(x, quantized.detach())
+    loss = self.commitment_cost * e_latent_loss
+
+    quantized = x + (quantized - x).detach()
+   
+    avg_probs = torch.mean(encodings, dim=0)
+    perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10))) 
+    return quantized, loss
+
 class MLP(nn.Module):
   def __init__(self,
                embedding_dim,
@@ -836,6 +960,28 @@ class GumbelTDS(torch.nn.Module):
 
       return encoding
 
+def masked_kl_div(input, target, mask,
+                  log_input=False):
+  # (B, *, D)
+  if log_input:
+    KL = F.exp(target, dim=-1) * (target - input)
+  else:
+    KL = F.exp(target, dim=-1) * (target - torch.log(input))
+  
+  if mask is not None:
+    loss = (KL.sum(-1) * mask).mean(0).sum()
+  else:
+    loss = KL.mean(0).sum()
+  return loss  
+
+def masked_js_div(input, target, mask,
+                  log_input=False):
+  if log_input:
+    m = (torch.exp(input) + torch.exp(target)) / 2.
+  else:
+    m = (input + torch.exp(target)) / 2.
+  loss = masked_kl_div(m, target) + masked_kl_div(m, input)
+  return loss
 
 def xavier_init(ms):
     for m in ms :
