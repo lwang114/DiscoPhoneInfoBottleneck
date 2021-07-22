@@ -15,7 +15,7 @@ from pyhocon import ConfigFactory
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
 from utils.utils import cuda, str2bool
-from model import GumbelBLSTM, GumbelMLP
+from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
 from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -97,12 +97,17 @@ class Solver(object):
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
+    if config.downsample_method == 'resample':
+      self.input_size *= 5
+
   def get_model_config(self, config):      
     self.audio_net = cuda(InfoQuantizer(in_channels=self.input_size,
                                         channels=self.K,
                                         n_embeddings=self.n_clusters,
                                         z_dim=self.n_visual_class
                                         ), self.cuda)
+    self.use_logsoftmax = config.get('use_logsoftmax', False)
+    print(f'Use log softmax: {self.use_logsoftmax}')
 
   def get_optim_config(self, config):
     trainables = [p for p in self.audio_net.parameters()]
@@ -122,6 +127,7 @@ class Solver(object):
     total_loss = 0.
     total_step = 0.
     total_word_loss = 0.
+    total_phone_loss = 0.
         
     for e in range(self.epoch):
       self.global_epoch += 1
@@ -168,17 +174,21 @@ class Solver(object):
           segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
 
         # (batch size, max segment num, n visual class)
-        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks,
-                                                            return_feat=False)
+        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
 
         # (batch size * max segment num, n visual class)
-        segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                              * segment_masks.unsqueeze(-1)).sum(-2)
+        if self.use_logsoftmax:
+          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
+                                * segment_masks.unsqueeze(-1)).sum(-2)
+        else:
+          segment_word_logits = (word_logits\
+                                * segment_masks.unsqueeze(-1)).sum(-2)
 
         word_loss = F.cross_entropy(segment_word_logits,
                                word_labels,
                                ignore_index=self.ignore_index)
         loss = phone_loss + word_loss # self.beta * (F.softmax(phone_logits, dim=-1) * F.log_softmax(phone_logits, dim=-1)).sum((-1, -2)).mean()
+        total_phone_loss += phone_loss.cpu().detach().numpy()
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
         
@@ -190,10 +200,12 @@ class Solver(object):
 
         if (self.global_iter-1) % 1000 == 0:
           avg_loss = total_loss / total_step
-          print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})')
+          avg_phone_loss = total_phone_loss / total_step
+          print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})\tAvg Phone Loss:{avg_phone_loss:.2f}')
       
       avg_loss = total_loss / total_step
-      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}')
+      avg_phone_loss = total_phone_loss / total_step
+      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}')
 
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
@@ -208,6 +220,7 @@ class Solver(object):
     total_step = 0.
 
     pred_word_labels = []
+    pred_word_labels_quantized = []
     gold_word_labels = []
     if not self.ckpt_dir.joinpath('outputs/phonetic/dev-clean').is_dir():
       os.makedirs(self.ckpt_dir.joinpath('outputs/phonetic/dev-clean'))
@@ -261,14 +274,18 @@ class Solver(object):
           segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
 
         # (batch size, max segment num, n visual class)
-        word_logits, _, phone_loss = self.audio_net(x, masks=audio_masks,
-                                          return_feat=True)
+        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
 
         # segment_word_labels = word_labels.unsqueeze(-1)\
         #                                  .expand(-1, self.max_segment_num)
         # segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
-        segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                              * segment_masks.unsqueeze(-1)).sum(-2)
+        if self.use_logsoftmax:
+          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
+                                * segment_masks.unsqueeze(-1)).sum(-2)
+        else:
+          segment_word_logits = (word_logits\
+                                * segment_masks.unsqueeze(-1)).sum(-2)
+
         word_loss = F.cross_entropy(segment_word_logits,
                                word_labels,
                                ignore_index=self.ignore_index)
@@ -281,7 +298,7 @@ class Solver(object):
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
           segments = testset.dataset[global_idx][3]
-          pred_phone_label = testset.unsegment(phone_indices[idx], segments)
+          pred_phone_label = testset.unsegment(phone_indices[idx], segments).long()
 
           if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
             us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
@@ -293,14 +310,19 @@ class Solver(object):
           phone_f.write(f'{audio_id} {pred_phone_names}\n')
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
-          pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist() 
+          pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
+          pred_word_label_quantized = quantized[idx].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
+           
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
+          pred_word_labels_quantized.append(pred_word_label_quantized)
           pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
+          pred_word_name_quantized = preprocessor.to_word_text([pred_word_label_quantized])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
-                                f'Pred word label: {pred_word_name}\n\n') 
+                                f'Pred word label: {pred_word_name}\n'
+                                f'Pred word label by quantizer: {pred_word_name_quantized}\n\n') 
       phone_f.close()
       word_readable_f.close()
       avg_loss = total_loss / total_step
@@ -312,6 +334,13 @@ class Solver(object):
       word_f1, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
                                                    np.asarray(pred_word_labels),
                                                    average='macro')
+
+      word_prec_quantized,\
+      word_rec_quantized,\
+      word_f1_quantized, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
+                                                             np.asarray(pred_word_labels_quantized),
+                                                             average='macro') 
+
       token_f1,\
       token_prec,\
       token_recall = compute_token_f1(phone_file,
@@ -320,6 +349,7 @@ class Solver(object):
       info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
              f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
              f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
+             f'(By Quantizer) Word Precision: {word_prec_quantized:.3f}\tWord Recall: {word_rec_quantized:.3f}\tWord F1: {word_f1_quantized:.3f}\n'\
              f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
       print(info) 
 

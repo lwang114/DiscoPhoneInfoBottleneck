@@ -10,11 +10,13 @@ from utils.utils import cuda
 class InfoQuantizer(nn.Module):
   def __init__(self, in_channels, channels, n_embeddings, z_dim):
     super(InfoQuantizer, self).__init__()
-    self.conv = nn.Conv1d(in_channels, channels, 10, 1, 0, bias=False)
+    self.conv = nn.Sequential(
+                  nn.Conv1d(in_channels, in_channels, 10, 1, 0, bias=False),
+                  nn.LayerNorm(in_channels),
+                  nn.ReLU(True)
+                )
     self.encoder = nn.Sequential(
-        nn.LayerNorm(channels),
-        nn.ReLU(True),
-        nn.Linear(channels, channels, bias=False),
+        nn.Linear(in_channels, channels, bias=False),
         nn.LayerNorm(channels),
         nn.ReLU(True),
         nn.Linear(channels, channels, bias=False),
@@ -29,6 +31,7 @@ class InfoQuantizer(nn.Module):
         nn.Linear(channels, z_dim),
     )
     self.codebook = IQEmbeddingEMA(n_embeddings, z_dim)
+    self.ds_ratio = False
 
   def encode(self, x, masks=None):
     if x.dim() == 4:
@@ -67,28 +70,30 @@ class IQEmbeddingEMA(nn.Module):
     if not self.div_type in ['kl', 'js']:
       raise ValueError(f"Divergence type {self.div_type} not defined")
 
-    alpha = 10 ** np.linspace(-1.4, 1.4, n_embeddings)
+    alpha = [100]*n_embeddings # 10 ** np.linspace(-1.4, 1.4, n_embeddings)
     embedding = torch.stack(
                   [torch.Tensor(np.random.dirichlet([alpha[k]]*embedding_dim))
                     for k in range(n_embeddings)]
                 ) # Sample a codebook of pmfs
     self.register_buffer("embedding", embedding)
-    self.register_buffer("ema_count", torch.zeros(n_embeddings))
-    self.register_bugger("ema_weight", self.embedding.clone())
+    self.register_buffer("ema_count", torch.ones(n_embeddings))
+    self.register_buffer("ema_weight", self.embedding.clone())
 
   def encode(self, x, masks=None):
-    B = x.size(0)
     M, D = self.embedding.size()
     x_flat = x.detach().reshape(-1, D)
+    mask_flat = masks.reshape(-1, 1)
 
     if self.div_type == "kl":
-      divergences = masked_kl_div(torch.self.embedding.unsqueeze(0),
+      divergences = masked_kl_div(self.embedding.unsqueeze(0),
                                   x_flat.unsqueeze(-2),
-                                  masks=masks)
+                                  mask=mask_flat,
+                                  reduction=None)
     elif self.div_type == 'js':
-      divergences = masked_js_div(torch.self.embedding.unsqueeze(0),
+      divergences = masked_js_div(self.embedding.unsqueeze(0),
                                   x_flat.unsqueeze(-2),
-                                  masks=masks)
+                                  mask=mask_flat,
+                                  reduction=None)
 
     indices = torch.argmin(divergences.float(), -1)
     quantized = F.embedding(indices, self.embedding)
@@ -98,16 +103,21 @@ class IQEmbeddingEMA(nn.Module):
   def forward(self, x, masks=None):
     M, D = self.embedding.size()
     x_flat = x.detach().reshape(-1, D)
+    mask_flat = masks.reshape(-1, 1)
 
     if self.div_type == "kl":
-      divergences = masked_kl_div(torch.self.embedding.unsqueeze(0),
-                                  x_flat.unsqueeze(-2))
-    elif self.div_type == 'js':
-      divergences = masked_js_div(torch.self.embedding.unsqueeze(0),
-                                  x_flat.unsqueeze(-2))
+      divergences = masked_kl_div(self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2),
+                                  mask=mask_flat,
+                                  reduction=None)
+    elif self.div_type == "js":
+      divergences = masked_js_div(self.embedding.unsqueeze(0),
+                                  x_flat.unsqueeze(-2),
+                                  mask=mask_flat,
+                                  reduction=None)
 
     indices = torch.argmin(divergences.float(), -1)
-    encodings = F.one_hot(indices, M).float()
+    encodings = F.one_hot(indices, M).float() * mask_flat
     quantized = F.embedding(indices, self.embedding)
     quantized = quantized.view_as(x)
     
@@ -115,13 +125,18 @@ class IQEmbeddingEMA(nn.Module):
       self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
       n = torch.sum(self.ema_count)
       self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
-      
-      dw = torch.matmul(encodings.t(), x_flat)
+
+      dw = torch.matmul(encodings.t(), torch.exp(x_flat))
+
       self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
-      
+
       self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
 
-    e_latent_loss = F.kl_div(x, quantized.detach())
+    if self.div_type == "kl":
+      e_latent_loss = masked_kl_div(quantized.detach(), x, mask=masks)
+    elif self.div_type == "js":
+      divergences = masked_js_div(quantized.detach(), x, mask=masks)
+
     loss = self.commitment_cost * e_latent_loss
 
     quantized = x + (quantized - x).detach()
@@ -129,6 +144,7 @@ class IQEmbeddingEMA(nn.Module):
     avg_probs = torch.mean(encodings, dim=0)
     perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10))) 
     return quantized, loss
+
 
 class MLP(nn.Module):
   def __init__(self,
@@ -961,26 +977,34 @@ class GumbelTDS(torch.nn.Module):
       return encoding
 
 def masked_kl_div(input, target, mask,
-                  log_input=False):
+                  log_input=False,
+                  reduction="mean"):
+  EPS = 1e-10
   # (B, *, D)
   if log_input:
-    KL = F.exp(target, dim=-1) * (target - input)
+    KL = torch.exp(target) * (target - input)
   else:
-    KL = F.exp(target, dim=-1) * (target - torch.log(input))
-  
+    KL = torch.exp(target) * (target - torch.log(input))
+
+  if not reduction:
+    return KL.sum(-1)
+
   if mask is not None:
     loss = (KL.sum(-1) * mask).mean(0).sum()
   else:
     loss = KL.mean(0).sum()
+
   return loss  
 
 def masked_js_div(input, target, mask,
-                  log_input=False):
+                  log_input=False,
+                  reduction="mean"):
   if log_input:
     m = (torch.exp(input) + torch.exp(target)) / 2.
   else:
     m = (input + torch.exp(target)) / 2.
-  loss = masked_kl_div(m, target) + masked_kl_div(m, input)
+  loss = masked_kl_div(m, target, mask, reduction=reduction)\
+         + masked_kl_div(m, input, mask, reduction=reduction)
   return loss
 
 def xavier_init(ms):
