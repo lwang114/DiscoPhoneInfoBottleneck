@@ -10,6 +10,7 @@ import os
 import json
 import time
 import numpy as np
+import random
 import argparse
 from pyhocon import ConfigFactory
 from pathlib import Path
@@ -621,6 +622,7 @@ def main(argv):
     config['seed'] = seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    random.seed(seed)
     np.random.seed(seed)
 
     np.set_printoptions(precision=4)
