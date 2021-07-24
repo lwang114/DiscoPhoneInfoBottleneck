@@ -10,14 +10,15 @@ import os
 import json
 import time
 import numpy as np
-import random
 import argparse
 from pyhocon import ConfigFactory
 from pathlib import Path
+from itertools import groupby
 from sklearn.cluster import KMeans
 from sklearn.metrics import precision_recall_fscore_support
 from utils.utils import cuda, str2bool
 from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
+from probabilistic_clustering import DIB
 from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -115,9 +116,9 @@ class Solver(object):
     
     self.clustering_method = config.clustering_method
     if self.clustering_method == 'kmeans':
-      self.clusterer = KMeans(n_clusters=n_clusters) 
+      self.clusterer = KMeans(n_clusters=self.n_clusters) 
     elif self.clustering_method == 'dib':
-      self.clusterer = DIB(n_clusters=n_clusters)
+      self.clusterer = DIB(n_clusters=self.n_clusters)
     else:
       raise ValueError('Unknown clustering method: {self.clustering_method}')
 
@@ -221,7 +222,7 @@ class Solver(object):
         self.scheduler.step()
 
       self.test(save_embedding=save_embedding)
-      if (self.global_epoch % 5) == 0:
+      if (self.global_epoch - 1) % 5 == 0:
         self.cluster()
         self.test_quantized()
 
@@ -240,8 +241,6 @@ class Solver(object):
 
     gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
     word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word.{self.global_epoch}.readable'), 'w') 
-    phone_file = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt')
-    phone_f = open(phone_file, 'w')
 
     with torch.no_grad():
       B = 0
@@ -309,26 +308,17 @@ class Solver(object):
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
-
-          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
-          pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
-          phone_f.write(f'{audio_id} {pred_phone_names}\n')
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
-          pred_word_label_quantized = quantized[idx].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
            
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
-          pred_word_labels_quantized.append(pred_word_label_quantized)
           pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
-          pred_word_name_quantized = preprocessor.to_word_text([pred_word_label_quantized])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
-                                f'Pred word label: {pred_word_name}\n'
-                                f'Pred word label by quantizer: {pred_word_name_quantized}\n\n') 
-      phone_f.close()
+                                f'Pred word label: {pred_word_name}\n\n') 
       word_readable_f.close()
       avg_loss = total_loss / total_step
 
@@ -343,12 +333,12 @@ class Solver(object):
 
       info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
              f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
-             f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
+             f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}'
       print(info) 
 
-      save_path = self.ckpt_dir.joinpath('results_file_{self.config.seed}.txt')
+      save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
       with open(save_path, 'a') as file:
-        file.write(info)
+        file.write(info+'\n')
 
       if self.history['word_acc'] < word_acc:
         self.history['word_acc'] = word_acc
@@ -399,16 +389,17 @@ class Solver(object):
             # (batch size, max segment num)
             if audio_masks.dim() == 3:
               segment_masks = torch.where(audio_masks.sum(-1) > 0,
-                                      torch.tensor(1., device=audio_masks.device),
-                                      torch.tensor(0., device=audio_masks.device))
+                                          torch.tensor(1., device=audio_masks.device),
+                                          torch.tensor(0., device=audio_masks.device))
             else:
               segment_masks = audio_masks.clone()
-            
+            audio_lens = segment_masks.sum(-1).long()
+
             if self.audio_net.ds_ratio > 1:
               audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
             # (batch size, max segment num, n visual class)
             word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
-            word_probs = word_logits.exp()
+            word_probs = F.softmax(word_logits, dim=-1)
 
             for idx in range(audios.size(0)):
               global_idx = b_idx * B + idx
@@ -423,10 +414,10 @@ class Solver(object):
         X = np.concatenate([X_dict[split] for split in self.data_loader])
         begin_time = time.time()
         self.clusterer.fit(X)
-        info =  f'Epoch {self.global_epoch}\tClustering Time: {time.time()-begin_time} s'
+        info =  f'Epoch {self.global_epoch}\tClustering Time: {time.time()-begin_time:.2f} s'
         print(info)
         with open(save_path, 'a') as file:
-          file.write(info)
+          file.write(info+'\n')
 
         ys = self.clusterer.predict(X_dict['test'])
         utt_ids = utt_ids_dict['test']
@@ -436,29 +427,29 @@ class Solver(object):
         for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
           y = torch.LongTensor([g[1] for g in group])
           y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
-        np.save(self.ckpt_dir.joinpath('cluster_means.npy'), self.clusterer.cluster_centers_)
-        out_f.write(f'{utt_id} {y_str}\n') 
-      out_f.close()
-
-      gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
-      token_f1, token_prec, token_recall = compute_token_f1(
-                                             filename,
-                                             gold_path,
-                                             self.ckpt_dir.joinpath(f'confusion.png'),
-                                           ) 
-      print('[CLUSTERING RESULT]')
-      info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
-      with open(save_path, 'a') as file:
-        file.write(info)
+          y_str = ','.join([str(l) for l in y_unseg]) 
+          out_f.write(f'{utt_id} {y_str}\n') 
+        out_f.close()
+        np.save(self.ckpt_dir.joinpath('cluster_means.npy'), self.clusterer.cluster_centers_) 
+        gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
+        print('[CLUSTERING RESULT]')
+        token_f1, token_prec, token_recall = compute_token_f1(
+                                               filename,
+                                               gold_path,
+                                               self.ckpt_dir.joinpath(f'confusion.png'),
+                                             ) 
+        info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}'
+        with open(save_path, 'a') as file:
+          file.write(info+'\n')
   
-      if self.history['token_f1'] < token_f1:
-        self.history['token_f1'] = token_f1:
-        self.history['best_cluster_epoch'] = self.global_epoch
-        self.history['best_cluster_iter'] = self.global_iter
-        self.save_checkpoint(f'best_token_f1_{self.config.seed}.tar')
-      self.set_mode('train')
+        if self.history['token_f1'] < token_f1:
+          self.history['token_f1'] = token_f1
+          self.history['best_cluster_epoch'] = self.global_epoch
+          self.history['best_cluster_iter'] = self.global_iter
+          self.save_checkpoint(f'best_token_f1_{self.config.seed}.tar')
+        self.set_mode('train')
 
-  def test_quantized(self): # Compute quantized word F1 
+  def test_quantized(self, out_prefix='predictions'): # Compute quantized word F1 
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset
     preprocessor = testset.preprocessor
@@ -469,7 +460,7 @@ class Solver(object):
     pred_word_labels = []
     gold_word_labels = []
  
-    word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word_by_{self.clustering_method}.{self.global_epoch}.readable'), 'w') # TODO add field 
+    word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word_by_{self.clustering_method}.{self.global_epoch}.readable'), 'w')
     with torch.no_grad():
       B = 0
       for b_idx, batch in enumerate(self.data_loader['test']):        
@@ -515,10 +506,12 @@ class Solver(object):
 
         # (batch size, max segment num, n visual class)
         word_logits, _, phone_loss = self.audio_net(x, masks=audio_masks)
-        centers = self.clusterer.cluster_centers_.squeeze()
-        cluster_labels = self.clusterer.predict(word_logits.exp().detach().cpu().numpy())
-        word_probs_quantized = np.choose(cluster_labels, centers)
-        word_logits_quantized = torch.log(torch.FloatTensor(word_probs_quantized))
+        word_probs = F.softmax(word_logits, dim=-1).detach().cpu().numpy().astype(np.float64)
+        cluster_labels = [self.clusterer.predict(word_probs[i]) for i in range(B)]
+        
+        word_probs_quantized = [torch.FloatTensor(self.clusterer.cluster_centers_[labels]) for labels in cluster_labels]
+        word_probs_quantized = torch.stack(word_probs_quantized).to(x.device)
+        word_logits_quantized = torch.log(word_probs_quantized)
   
         if self.use_logsoftmax:
           segment_word_logits = (F.log_softmax(word_logits_quantized, dim=-1)\
@@ -537,7 +530,6 @@ class Solver(object):
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
           pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
-          pred_word_name_quantized = preprocessor.to_word_text([pred_word_label_quantized])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
@@ -548,13 +540,14 @@ class Solver(object):
     word_f1, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
                                                  np.asarray(pred_word_labels),
                                                  average='macro')
-
-    info = f'Epoch {self.global_epoch}\tClustering Method: {self.clustering_method}'
+    print('[TEST RESULTS AFTER CLUSTERING]')
+    info = f'Epoch {self.global_epoch}\tClustering Method: {self.clustering_method}\n'\
            f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
-           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
+           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}'
     print(info)
+    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
     with open(save_path, 'a') as file:
-      file.write(info)
+      file.write(info+'\n')
     self.set_mode('train')
 
   def set_mode(self, mode='train'): 
@@ -622,7 +615,6 @@ def main(argv):
     config['seed'] = seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    random.seed(seed)
     np.random.seed(seed)
 
     np.set_printoptions(precision=4)
