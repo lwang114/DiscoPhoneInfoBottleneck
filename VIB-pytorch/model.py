@@ -145,6 +145,33 @@ class IQEmbeddingEMA(nn.Module):
     perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10))) 
     return quantized, loss
 
+class ClassAttender(nn.Module):
+  def __init__(self, 
+               input_dim,
+               hidden_dim,
+               n_class):
+    super(ClassAttender, self).__init__()
+    self.attention = nn.Linear(input_dim, n_class, bias=False)
+
+  def forward(self, x, mask):
+    """
+    Args :
+        x : FloatTensor of size (batch size, seq length, input size)
+        mask : FloatTensor of size (batch size, seq length)
+    """
+    attn_weights = self.attention(x).permute(0, 2, 1)
+    attn_weights = attn_weights * mask.unsqueeze(-2)
+    attn_weights = torch.where(attn_weights != 0,
+                               attn_weights,
+                               torch.tensor(-1e10, device=x.device))
+    
+    # (batch size, n class, seq length)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    # (batch size, n class, input size)
+    attn_applied = torch.bmm(attn_weights, x)
+
+    return attn_applied, attn_weights
+
 
 class MLP(nn.Module):
   def __init__(self,

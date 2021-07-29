@@ -241,6 +241,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     image_inputs = self.load_image(image_file, box, box_idx)
     word_labels = self.preprocessor.to_word_index([label])
+
     phone_labels = self.preprocessor.to_index(phonemes)
     phone_labels = fix_embedding_length(phone_labels,
                                         self.max_phone_num,
@@ -478,7 +479,11 @@ def load_data_split(data_path, split,
         if noisy:
           continue
     elif phone_label == "multilingual":
-        phonemes = [phn for phn in word["multilingual_phones"]]
+        phonemes = [{'text': BLANK,
+                     'begin': phone_info["begin"],
+                     'end': phone_info["end"]} for phone_info in word["phonemes"]["children"]]
+        for phn_idx, phn in enumerate(word["multilingual_phones"]):
+          phonemes[phn_idx]['text'] = phn 
     else:
         raise ValueError(f"Invalid phone label type: {phone_label}")
         
