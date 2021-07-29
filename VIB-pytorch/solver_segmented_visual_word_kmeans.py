@@ -202,7 +202,7 @@ class Solver(object):
           continue
         self.optim.zero_grad()
         loss.backward()        
-        np.savetxt(f'decode_weight_grad_{self.config.model_type}_use_segment{self.config.use_segment}.txt', self.audio_net.decode.weight.grad.cpu().detach().numpy()) # XXX
+        # np.savetxt(f'decode_weight_grad_{self.config.model_type}_use_segment{self.config.use_segment}.txt', self.audio_net.decode.weight.grad.cpu().detach().numpy()) # XXX
         self.optim.step()
 
         if self.global_iter % 1000 == 0:

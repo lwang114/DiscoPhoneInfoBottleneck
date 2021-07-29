@@ -13,13 +13,14 @@ class DIB:
     self.cluster_centers_ = None
 
   def fit(self, X,
-          max_iters=100,
+          max_iters=50,
           tol=1e-2):
     EPS = 1e-10
     centers, _ = self.dib_plusplus_(X) 
     encodings = np.zeros((X.shape[0], self.n_clusters))
     for i in range(max_iters):
-      divs = kl_divergence(X[:, np.newaxis], centers[np.newaxis])
+      # divs = kl_divergence(X[:, np.newaxis], centers[np.newaxis])
+      divs = np.stack([kl_divergence(X, centers[c]) for c in range(self.n_clusters)], axis=-1)
       assignments = np.argmin(divs, axis=-1)
       prev_encodings = deepcopy(encodings)
       es = np.eye(self.n_clusters)
@@ -31,13 +32,15 @@ class DIB:
       new_centers[empty_clusters] = 1. / X.shape[-1] # Keep the empty clusters alive by giving it a uniform weight  
       
       centers = deepcopy(new_centers)
-      if ((i+1) % 20) == 0:
+      if (i % 20) == 0:
         n_updates = (encodings != prev_encodings).astype(int).sum()
         info = f'Iteration {i}\tNumber of assignment updates:{n_updates}' 
         time_info = datetime.strftime(datetime.now(), '%m/%d/%Y %H:%M:%S') 
         with open('checkpoints/dib_updates.log', 'a') as f:
           f.write(f'{time_info} {info}\n')
         print(info)
+        if n_updates == 0:
+          break
     self.cluster_centers_ = deepcopy(centers) 
 
   def predict(self, X):

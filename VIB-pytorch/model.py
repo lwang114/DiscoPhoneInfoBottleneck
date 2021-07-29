@@ -123,14 +123,14 @@ class IQEmbeddingEMA(nn.Module):
     
     if self.training:
       self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
+      # XXX
       n = torch.sum(self.ema_count)
       self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
-
       dw = torch.matmul(encodings.t(), torch.exp(x_flat))
 
       self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
-
       self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
+      # XXX self.embedding = (self.ema_weight + self.epsilon / M) / (self.ema_count.unsqueeze(-1) + self.epsilon)
 
     if self.div_type == "kl":
       e_latent_loss = masked_kl_div(quantized.detach(), x, mask=masks)

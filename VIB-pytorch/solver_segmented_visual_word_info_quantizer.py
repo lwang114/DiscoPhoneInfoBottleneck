@@ -358,7 +358,7 @@ class Solver(object):
         file.write(info)
 
       if self.history['word_acc'] < word_acc:
-        self.history['token_f1'] = token_f1
+        self.history['token_result'] = [token_prec, token_recall, token_f1]
         self.history['word_acc'] = word_acc
         self.history['loss'] = avg_loss
         self.history['iter'] = self.global_iter

@@ -15,7 +15,7 @@ from pyhocon import ConfigFactory
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
 from utils.utils import cuda, str2bool
-from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
+from model import InfoQuantizer
 from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -63,7 +63,8 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
-    self.ignore_index = config.get('ignore_index', -100)
+    self.ignore_index = config.get('ignore_index', 0)
+    assert self.ignore_index == 0
 
     self.n_visual_class = self.data_loader['train']\
                           .dataset.preprocessor.num_visual_words
@@ -174,24 +175,18 @@ class Solver(object):
           segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
 
         # (batch size, max segment num, max segment num * n visual class)
-        word_logits_all_pos, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
-        word_logits = torch.stack(
-                        [word_logits_all_pos[:, p, p*self.n_visual_class:(p+1)*self.n_visual_class]
-                        for p in range(self.max_segment_num)],
-                      dim=1)
-
-        # (batch size * max segment num, n visual class)
-        if self.use_logsoftmax:
-          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-        else:
-          segment_word_logits = (word_logits\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-
-        word_loss = F.cross_entropy(segment_word_logits,
-                                    word_labels,
+        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
+  
+        # Map labels ranging from {0, ..., n_visual_class-1} to 
+        # {0, ..., max_segment_num x n_visual_class - 1}
+        pos_word_labels = word_labels * self.max_segment_num
+        pos_word_labels = pos_word_labels.unsqueeze(1).expand(-1, self.max_segment_num)\
+                          + torch.arange(self.max_segment_num, device=x.device) 
+        
+        word_loss = F.cross_entropy(word_logits.reshape(-1, word_logits.size(-1)),
+                                    pos_word_labels.flatten(),
                                     ignore_index=self.ignore_index)
-        loss = phone_loss + word_loss # self.beta * (F.softmax(phone_logits, dim=-1) * F.log_softmax(phone_logits, dim=-1)).sum((-1, -2)).mean()
+        loss = phone_loss + word_loss
         total_phone_loss += phone_loss.cpu().detach().numpy()
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -279,20 +274,16 @@ class Solver(object):
 
         # (batch size, max segment num, n visual class)
         word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
+        pos_word_labels = word_labels * self.max_segment_num
+        pos_word_labels = pos_word_labels.unsqueeze(1).expand(-1, self.max_segment_num)\
+                          + torch.arange(self.max_segment_num, device=x.device) 
 
         # segment_word_labels = word_labels.unsqueeze(-1)\
         #                                  .expand(-1, self.max_segment_num)
         # segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
-        if self.use_logsoftmax:
-          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-        else:
-          segment_word_logits = (word_logits\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-
-        word_loss = F.cross_entropy(segment_word_logits,
-                               word_labels,
-                               ignore_index=self.ignore_index)
+        word_loss = F.cross_entropy(word_logits.reshape(-1, word_logits.size(-1)),
+                                    pos_word_labels.flatten(),
+                                    ignore_index=self.ignore_index)
         loss = phone_loss + word_loss
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -302,6 +293,7 @@ class Solver(object):
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
           segments = testset.dataset[global_idx][3]
+          segment_num = min(len(segments), self.max_segment_num)
           pred_phone_label = testset.unsegment(phone_indices[idx], segments).long()
 
           if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
@@ -314,8 +306,13 @@ class Solver(object):
           phone_f.write(f'{audio_id} {pred_phone_names}\n')
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
-          pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
-          pred_word_label_quantized = quantized[idx].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
+          segment_word_logits = torch.stack([word_logits[idx, p, p::self.max_segment_num] 
+                                            for p in range(segment_num)])
+          segment_word_prob = torch.softmax(segment_word_logits, dim=-1).prod(-2)
+          pred_word_label = segment_word_prob.max(-1)[1].cpu().detach().numpy().tolist()
+          quantized_word_prob = torch.stack([quantized[idx, p, p::self.max_segment_num] 
+                                             for p in range(segment_num)]).prod(-2)
+          pred_word_label_quantized = quantized_word_prob.max(-1)[1].cpu().detach().numpy().tolist()
            
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
