@@ -14,7 +14,8 @@ from tqdm import tqdm
 from itertools import combinations
 from copy import deepcopy
 from PIL import Image
-from scipy import signal 
+from scipy import signal
+from kaldiio import ReadHelper 
 # dep_parser = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/biaffine-dependency-parser-ptb-2020.04.06.tar.gz")
 # dep_parser._model = dep_parser._model.cuda()
 # lemmatizer = WordNetLemmatizer()
@@ -65,7 +66,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
       ds_method="average",
       sample_rate=16000,
       min_class_size=50,
-      debug=False  
+      debug=False
   ):
     self.preprocessor = preprocessor
     self.splits = splits[split]
@@ -144,7 +145,13 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
         inputs = self.audio_transforms(audio)
         inputs = inputs.squeeze(0)
     elif self.audio_feature_type == "cpc":
-      audio = np.loadtxt(audio_file)
+      if os.path.exists(audio_file):
+        audio = np.loadtxt(audio_file)
+      else:
+        with ReadHelper(f"ark: gunzip -c {audio_file} |") as ark_f:
+          for k, audio in ark_f:
+            continue
+        print(audio.size()) # XXX
       inputs = torch.FloatTensor(audio).t()
     else: Exception(f"Audio feature type {self.audio_feature_type} not supported")
 
@@ -462,6 +469,8 @@ def load_data_split(data_path, split,
     elif audio_feature == "cpc":
       audio_file = f"{audio_id}_{word_id:04d}.txt"
       audio_path = os.path.join(data_path, f"../flickr8k_word_{min_class_size}_cpc", audio_file)
+      if not os.path.exists(audio_path):
+        audio_path = os.path.join(data_path, f"../flickr8k_word_{min_class_size}_cpc/{audio_id}.ark.gz")
     else: Exception(f"Audio feature type {audio_feature} not supported")
 
     image_id = "_".join(audio_id.split("_")[:-1])

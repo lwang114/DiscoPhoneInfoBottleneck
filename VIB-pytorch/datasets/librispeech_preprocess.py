@@ -6,9 +6,11 @@ import argparse
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
+from scipy.io import wavfile
 
 stop_words = stopwords.words("english")
-IGNORE_TOKENS = ["ʰ", "ʼ", "ˈ"] 
+IGNORE_TOKENS = ["ʰ", "ʼ", "ˈ"]
+SIL = "SIL" 
 def extract_visual_words(data_path, split, visual_word_file):
   """
   Args :
@@ -97,6 +99,83 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
   out_f.close()
   print(tokens)
   print(f"Pseudo-phone set size: {len(tokens)}")
+
+def extract_word_dataset(data_path, debug=False):
+  """
+  Create a spoken word dataset organized as:
+      root/
+          librispeech_word.json
+          train-clean-100/
+              {audio_id}_{word_id}.wav
+              ...
+              train-clean-100.item
+          train-clean-360/
+              ...
+              train-clean-360.item
+          val-clean/
+              ...
+              val-clean.item
+          test-clean/
+              ...
+              test-clean.item
+  """
+  dataset_name = "librispeech_word"
+  sent_info_file = os.path.join(data_path, split, f"{split}.json") 
+  word_info_file = os.path.join(data_path, dataset_name, "{dataset_name}.json")
+  sent_f = open(sent_info_file, 'r')
+  word_f = open(word_info_file, 'w')
+
+  for split in ["train-clean-100", "val-clean", "test-clean"]:
+    dataset = os.path.join(data_path, dataset_name, split)
+    if not os.path.exists(dataset):
+      os.makedirs(dataset)
+
+    abx_f = open(os.path.join(data_path, dataset_name, split, split+".item"), "w")
+    abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+
+    for line in sent_f:
+      sent_dict = json.loads(line.rstrip("\n"))
+      audio_id = sent_dict["audio_id"]
+      audio_path = os.path.join(data_path, split, f"{audio_id}.wav")
+      fs, audio = wavfile.read(audio_path) 
+      spk = audio_id.split("_")[0]
+
+      visual_word_idxs = sent_dict["visual_words"]
+      words = sent_dict["words"]
+      for word_idx in visual_word_idxs:
+        word = words[word_idx]
+        word_id = f"{audio_id}_{word_idx}"
+        word_audio_path = os.path.join(data_path, dataset_name, split, f"{word_id}.wav")
+        begin_sec = word["phonemes"][0]["begin"] 
+        end_sec = word["phonemes"][-1]["end"] 
+        begin = int(begin_sec * 16000) 
+        end = int(end_sec * 16000)
+        word_audio = audio[begin:end]
+        wavfile.write(word_audio_path, fs, word_audio)
+
+        word_info = {"audio_id": audio_id,
+                     "word_id": str(word_idx),
+                     "label": word["text"],
+                     "begin": begin_sec,
+                     "end": end_sec,
+                     "spk": spk,
+                     "split": split,
+                     "phonemes": word["phonemes"]}
+        word_f.write(json.dumps(word_info)+"\n")
+        
+        # Extract ABX file
+        for phn_idx, phn in enumerate(word["phonemes"]):
+          prev_phn = SIL
+          next_phn = SIL
+          if phn_idx > 0:
+            prev_phn = word["phonemes"][phn_idx-1]["text"]
+          if phn_idx < len(word["phonemes"]) - 1:
+            next_phn = word["phonemes"][phn_idx+1]["text"]
+          abx_f.write("{audio_id}_{word_id} {phn['begin']} {phn['end']} {phn['text']} {prev_phn} {next_phn} {spk}\n") 
+    abx_f.close()
+  sent_f.close()
+  word_f.close()
+  
    
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
