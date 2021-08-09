@@ -100,6 +100,8 @@ class Solver(object):
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
+    self.cluster_layer = config.get('cluster_layer', 'last')
+
   def get_model_config(self, config):
     if config.model_type == 'blstm':
       self.audio_net = cuda(BLSTM(self.K,
@@ -215,6 +217,8 @@ class Solver(object):
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
       self.test(save_embedding=save_embedding)
+      if (self.global_epoch - 1) % 5 == 0:
+        self.cluster(n_clusters=self.n_phone_class)
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -360,19 +364,21 @@ class Solver(object):
             x = audios
           
           audio_lens = audio_masks.sum(-1).long()
-          # XXX _, embedding = self.audio_net(x,
-          #                               masks=audio_masks,
-          #                               return_feat=True)
-          embedding = x
+          if self.cluster_layer == 'last':
+            _, embedding = self.audio_net(x,
+                                          masks=audio_masks,
+                                          return_feat=True)
+          else:
+            embedding = x
           
           for idx in range(audios.size(0)): 
             global_idx = b_idx * B + idx
-            utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0]
+            utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0].split('.')[0]
 
             embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
             X_dict[split].extend(embed.tolist())
             utt_ids_dict[split].extend([utt_id]*embed.shape[0])
-            segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][3]
+            segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
         X_dict[split] = np.asarray(X_dict[split])
 
       X = np.concatenate([X_dict[split] for split in self.data_loader])

@@ -307,7 +307,7 @@ class Solver(object):
         
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
@@ -403,12 +403,12 @@ class Solver(object):
 
             for idx in range(audios.size(0)):
               global_idx = b_idx * B + idx
-              utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0]
+              utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0].split('.')[0]
               
               embed = word_probs[idx, :audio_lens[idx]].cpu().detach().numpy()
               X_dict[split].extend(embed.tolist())
               utt_ids_dict[split].extend([utt_id]*embed.shape[0])
-              segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][3]
+              segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
           X_dict[split] = np.asarray(X_dict[split])
         
         X = np.concatenate([X_dict[split] for split in self.data_loader])

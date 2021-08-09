@@ -8,7 +8,7 @@ from utils.utils import cuda
 
 
 class InfoQuantizer(nn.Module):
-  def __init__(self, in_channels, channels, n_embeddings, z_dim):
+  def __init__(self, in_channels, channels, n_embeddings, z_dim, init_embedding=None):
     super(InfoQuantizer, self).__init__()
     self.conv = nn.Sequential(
                   nn.Conv1d(in_channels, in_channels, 10, 1, 0, bias=False),
@@ -30,7 +30,7 @@ class InfoQuantizer(nn.Module):
         nn.ReLU(True),
         nn.Linear(channels, z_dim),
     )
-    self.codebook = IQEmbeddingEMA(n_embeddings, z_dim)
+    self.codebook = IQEmbeddingEMA(n_embeddings, z_dim, init_embedding=init_embedding)
     self.ds_ratio = False
 
   def encode(self, x, masks=None):
@@ -61,7 +61,8 @@ class IQEmbeddingEMA(nn.Module):
                commitment_cost=0.25, 
                decay=0.999, 
                epsilon=1e-5,
-               div_type="kl"):
+               div_type="kl",
+               init_embedding=None):
     super(IQEmbeddingEMA, self).__init__()
     self.commitment_cost = commitment_cost
     self.decay = decay
@@ -70,11 +71,14 @@ class IQEmbeddingEMA(nn.Module):
     if not self.div_type in ['kl', 'js']:
       raise ValueError(f"Divergence type {self.div_type} not defined")
 
-    alpha = [100]*n_embeddings # 10 ** np.linspace(-1.4, 1.4, n_embeddings)
-    embedding = torch.stack(
-                  [torch.Tensor(np.random.dirichlet([alpha[k]]*embedding_dim))
+    if init_embedding is None:
+      alpha = [100]*n_embeddings # 10 ** np.linspace(-1.4, 1.4, n_embeddings)
+      embedding = torch.stack(
+                    [torch.Tensor(np.random.dirichlet([alpha[k]]*embedding_dim))
                     for k in range(n_embeddings)]
-                ) # Sample a codebook of pmfs
+                  ) # Sample a codebook of pmfs
+    else:
+      embedding = init_embedding
     self.register_buffer("embedding", embedding)
     self.register_buffer("ema_count", torch.ones(n_embeddings))
     self.register_buffer("ema_weight", self.embedding.clone())
@@ -124,13 +128,13 @@ class IQEmbeddingEMA(nn.Module):
     if self.training:
       self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
       # XXX
-      n = torch.sum(self.ema_count)
-      self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
+      # n = torch.sum(self.ema_count)
+      # self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
       dw = torch.matmul(encodings.t(), torch.exp(x_flat))
 
       self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
-      self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
-      # XXX self.embedding = (self.ema_weight + self.epsilon / M) / (self.ema_count.unsqueeze(-1) + self.epsilon)
+      # self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
+      self.embedding = (self.ema_weight + self.epsilon / M) / (self.ema_count.unsqueeze(-1) + self.epsilon)
 
     if self.div_type == "kl":
       e_latent_loss = masked_kl_div(quantized.detach(), x, mask=masks)
@@ -163,7 +167,7 @@ class ClassAttender(nn.Module):
     attn_weights = attn_weights * mask.unsqueeze(-2)
     attn_weights = torch.where(attn_weights != 0,
                                attn_weights,
-                               torch.tensor(-1e10, device=x.device))
+                               torch.tensor(-1e10, device=x.device).float())
     
     # (batch size, n class, seq length)
     attn_weights = F.softmax(attn_weights, dim=-1)
@@ -186,6 +190,25 @@ class MLP(nn.Module):
     self.n_layers = n_layers
     self.n_class = n_class
     self.ds_ratio = 1
+    in_channels = input_size
+    channels = embedding_dim
+
+    self.mlp = nn.Sequential(
+        nn.Linear(in_channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True)
+    )
+
+    '''
     self.mlp = nn.Sequential(
                  # nn.Linear(embedding_dim, embedding_dim),
                  nn.Linear(input_size, embedding_dim),
@@ -193,6 +216,7 @@ class MLP(nn.Module):
                  nn.Linear(embedding_dim, embedding_dim),
                  nn.ReLU(),
                )
+    '''
     self.decode = nn.Linear(embedding_dim * round(max_seq_len // self.ds_ratio),
                             self.n_class,
                             bias=False)
@@ -222,6 +246,26 @@ class GumbelMLP(nn.Module):
     self.n_layers = n_layers
     self.n_class = n_class
     self.ds_ratio = 1
+    in_channels = input_size
+    channels = embedding_dim
+
+    '''
+    self.mlp = nn.Sequential(
+        nn.Linear(in_channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True),
+        nn.Linear(channels, channels, bias=False),
+        nn.LayerNorm(channels),
+        nn.ReLU(True)
+    )
+    '''
+     
     self.mlp = nn.Sequential(
                  nn.Linear(input_size, embedding_dim),
                  nn.ReLU(),
@@ -230,6 +274,7 @@ class GumbelMLP(nn.Module):
                  nn.Linear(embedding_dim, embedding_dim),
                  nn.ReLU(),
                )
+    
     self.bottleneck = nn.Linear(embedding_dim, n_gumbel_units)
     self.decoders = nn.ModuleList([nn.Linear(n_gumbel_units, 
                                              self.n_class) 

@@ -295,10 +295,10 @@ class Solver(object):
         
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
           
           phone_logits = phone_logits.squeeze(1)
-          segments = testset.dataset[global_idx][3]
+          segments = testset.dataset[global_idx][-1]
           phone_logit_frame_level = testset.unsegment(phone_logits[idx], segments)
           pred_phone_label = phone_logit_frame_level.max(-1)[1]
 

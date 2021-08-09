@@ -55,7 +55,7 @@ class Solver(object):
     
     # History
     self.history = dict()
-    self.history['token_f1']=0.
+    self.history['token_result']=[0., 0., 0.]
     self.history['word_acc']=0. 
     self.history['loss']=0.
     self.history['epoch']=0
@@ -222,12 +222,16 @@ class Solver(object):
     pred_word_labels = []
     pred_word_labels_quantized = []
     gold_word_labels = []
+    embeds = dict()
+    embed_labels = dict()
     if not self.ckpt_dir.joinpath('outputs/phonetic/dev-clean').is_dir():
       os.makedirs(self.ckpt_dir.joinpath('outputs/phonetic/dev-clean'))
 
     gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
     word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word.{self.global_epoch}.readable'), 'w') 
     phone_file = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{out_prefix}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{out_prefix}_embedding_labels.json')
     phone_f = open(phone_file, 'w')
 
     with torch.no_grad():
@@ -296,9 +300,14 @@ class Solver(object):
         _, _, phone_indices = self.audio_net.encode(x, masks=audio_masks)
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
-          segments = testset.dataset[global_idx][3]
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
+          segments = testset.dataset[global_idx][-1]
           pred_phone_label = testset.unsegment(phone_indices[idx], segments).long()
+          if save_embedding:
+            embed_id = f'{audio_id}_{global_idx}'
+            embeds[embed_id] = F.softmax(word_logits[idx, :len(segments)], dim=-1).detach().cpu().numpy()
+            embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
+                                      'word_text': [word_labels[idx].detach().cpu().numpy().tolist()]*len(segments)}
 
           if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
             us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
@@ -308,7 +317,7 @@ class Solver(object):
           pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
           pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
           phone_f.write(f'{audio_id} {pred_phone_names}\n')
-          
+           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
           pred_word_label_quantized = quantized[idx].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
@@ -325,6 +334,10 @@ class Solver(object):
                                 f'Pred word label by quantizer: {pred_word_name_quantized}\n\n') 
       phone_f.close()
       word_readable_f.close()
+      if save_embedding:
+        np.savez(embed_file, **embeds)
+        json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
+
       avg_loss = total_loss / total_step
       # Compute word accuracy and word token F1
       print('[TEST RESULT]')
@@ -357,7 +370,7 @@ class Solver(object):
       with open(save_path, 'a') as file:
         file.write(info)
 
-      if self.history['word_acc'] < word_acc:
+      if self.history['token_result'][-1] < token_f1:
         self.history['token_result'] = [token_prec, token_recall, token_f1]
         self.history['word_acc'] = word_acc
         self.history['loss'] = avg_loss
@@ -424,8 +437,10 @@ def main(argv):
   if not config.dset_dir:
     config.dset_dir = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic" 
   
-  avg_word_acc = []
-  avg_token_f1 = []
+  word_accs = []
+  token_precs = []
+  token_recs = []
+  token_f1s = []
   for seed in config.get('seeds', [config.seed]):
     config.seed = seed
     config['seed'] = seed
@@ -449,14 +464,24 @@ def main(argv):
       net.test(save_embedding=save_embedding) 
     else:
       return 0
-    avg_word_acc.append(net.history['word_acc'])
-    avg_token_f1.append(net.history['token_f1'])
+    word_accs.append(net.history['word_acc'])
+    token_precs.append(net.history['token_result'][0])
+    token_recs.append(net.history['token_result'][1])
+    token_f1s.append(net.history['token_result'][2])
 
-  avg_word_acc = np.asarray(avg_word_acc)
-  avg_token_f1 = np.asarray(avg_token_f1)
-  print(f'Average Word Acc.: {np.mean(avg_word_acc)}+/-{np.std(avg_word_acc)}\n'
-        f'Average Token F1: {np.mean(avg_token_f1)}+/-{np.std(avg_token_f1)}') 
+  word_accs = np.asarray(word_accs)
+  token_precs = np.asarray(token_precs)
+  token_recs = np.asarray(token_recs)
+  token_f1s = np.asarray(token_f1s)
 
+  mean_word_acc, std_word_acc = np.mean(word_accs), np.std(word_accs)
+  mean_token_prec, std_token_prec = np.mean(token_precs), np.std(token_precs)
+  mean_token_rec, std_token_rec = np.mean(token_recs), np.std(token_recs)
+  mean_token_f1, std_token_f1 = np.mean(token_f1s), np.std(token_f1s) 
+  print(f'Average Word Acc.: {mean_word_acc:.4f}+/-{std_word_acc:.4f}\n'
+        f'Average Token Precision: {mean_token_prec:.4f}+/-{std_token_prec:.4f}\t'
+        f'Recall: {mean_token_rec:.4f}+/-{std_token_rec:.4f}\t'
+        f'F1: {mean_token_f1:.4f}+/-{std_token_f1:.4f}') 
 
 if __name__ == '__main__':
   argv = sys.argv[1:]
