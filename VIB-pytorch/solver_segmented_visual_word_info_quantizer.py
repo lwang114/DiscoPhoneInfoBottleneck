@@ -21,6 +21,8 @@ from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
 EPS = 1e-10
+NULL = "###NULL###"
+
 class Solver(object):
 
   def __init__(self, config):
@@ -63,6 +65,7 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
+    self.dataset_name = config.dataset
     self.ignore_index = config.get('ignore_index', -100)
 
     self.n_visual_class = self.data_loader['train']\
@@ -120,6 +123,15 @@ class Solver(object):
       self.optim = optim.Adam(trainables,
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
+  
+  def extract_wav2vec2(self, x, mask):
+    B = x.size(0)
+    T = x.size(1)
+    out = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+    out = out.view(B, T, out.size(-2), out.size(-1))
+    out = (out * mask.unsqueeze(-1)).sum(-2) / (mask.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+    out_mask = (mask.sum(-1) > 0).float()
+    return out, out_mask 
 
   def train(self, save_embedding=False):
     self.set_mode('train')
@@ -152,14 +164,7 @@ class Solver(object):
         audio_masks = cuda(audio_masks, self.cuda)
         
         if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
-          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
-          audio_masks = torch.where(audio_masks.sum(-1) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
           
         # (batch size, max segment num)
         if audio_masks.dim() == 3:
@@ -256,14 +261,7 @@ class Solver(object):
         audio_masks = cuda(audio_masks, self.cuda)
 
         if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
-          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
-          audio_masks = torch.where(audio_masks.sum(-1) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
           
         # (batch size, max segment num)
         if audio_masks.dim() == 3: 
@@ -366,7 +364,7 @@ class Solver(object):
              f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
       print(info) 
 
-      save_path = self.ckpt_dir.joinpath('results_file.txt')
+      save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
       with open(save_path, 'a') as file:
         file.write(info)
 
@@ -378,6 +376,71 @@ class Solver(object):
         self.history['epoch'] = self.global_epoch
         self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
       self.set_mode('train') 
+ 
+  def test_out_of_sample(self, save_embedding=False):
+    self.set_mode('test')
+    test_loader = self.data_loader['test']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+
+    phone_f = open(phone_file, 'w')
+    with torch.no_grad():
+      for b_idx, batch in enumerate(test_loader):
+        audios = batch[0]
+        input_mask = batch[3]
+        if self.audio_feature == 'wav2vec2':
+          x = self.extract_wav2vec2(audios)
+        else:
+          x = cuda(audios, self.cuda)
+
+        word_logits, _, phone_indices = self.audio_net.encode(x) 
+        B = phone_indices.size(0)
+        for idx in range(B):
+          global_idx = b_idx * batch_size + idx
+          audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
+          audio_id = os.path.splitext(os.path.basename(audio_path))[0]
+          if save_embedding:
+            embed_id = f'{audio_id}_{global_idx}'
+            embeds[embed_id] = F.softmax(word_logits[idx, :len(phonemes)], dim=-1).detach().cpu().numpy()
+            embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
+                                      'word_text': [NULL]*len(phonemes)}
+
+          pred_phone_label = testset.unsegment(phone_indices, phonemes).long()
+          us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
+          if us_ratio > 1:
+            pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                               .expand(-1, us_ratio).flatten()
+             
+          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+          pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
+          phone_f.write(f'{audio_id} {pred_phone_names}\n')
+      phone_f.close()
+
+      # Save embeddings
+      if save_embedding:
+        np.savez(embed_file, **embeds)
+        json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
+
+    # Evaluation with token F1
+    gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
+    token_prec, token_recall, token_f1 = compute_token_f1(phone_file,
+        gold_phone_file,
+        self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+    print('[TEST RESULT]')
+    info = f'Token Precision: {token_prec:.4f}\tToken Recall: {token_rec:.4f}\tToken F1: {token_f1:.4f}\n'
+
+    save_path = os.path.join(self.ckpt_dir, f'results_file_{self.config.seed}.txt')
+    with open(save_path, 'a') as f:
+      f.write(info)
+    print(info)
+     
+    if self.history['token_result'][-1] < token_f1:
+      self.history['token_result'] = [token_prec, token_recall, token_f1]
+    self.set_mode('train') 
 
   def set_mode(self, mode='train'): 
     if mode == 'train':
@@ -424,9 +487,10 @@ class Solver(object):
     file_path = self.ckpt_dir.joinpath(filename)
     torch.save(states, file_path.open('wb+'))
     print('=> saved checkpoint "{}" (iter {}, epoch {})'.format(file_path, self.global_iter, self.global_epoch)) 
+ 
 
 def main(argv):
-  parser = argparse.ArgumentParser(description='Visual macro token F1 maximizer')
+  parser = argparse.ArgumentParser(description='Visual word information quantizer')
   parser.add_argument('CONFIG', type=str)
   args = parser.parse_args(argv)
 
