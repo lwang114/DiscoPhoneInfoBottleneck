@@ -7,7 +7,7 @@ import numpy as np
 import re
 import os
 import json
-
+from kaldiio import ReadHelper
 
 UNK = "###UNK###"
 NULL = "###NULL###"
@@ -53,6 +53,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     self.splits = splits[split]
     self.data_path = data_path
     self.phone_label = phone_label
+    self.max_segment_len = 10
+    self.max_segment_num = 100
    
     data = [] 
     for sp in self.splits:
@@ -106,6 +108,54 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     self.max_word_num = 10
     self.max_word_len = 100
 
+  def segment(self, feat, segments,
+              method="average"):
+    sfeats = []
+    if method == "no-op":
+      mask = torch.zeros((self.max_segment_num, self.max_segment_len))
+    else:
+      mask = torch.zeros(self.max_segment_num)
+      mask[:len(segments)] = 1.
+
+    for i, s in enumerate(segments):
+      begin_sec = s["begin"]
+      end_sec = s["end"]
+      if self.audio_feature in ["cpc", "mfcc"]:
+        begin = int(begin_sec * 100) 
+        end = int(end_sec * 100)
+        sfeat = feat[begin:end+1]
+        if method == "average":
+          sfeat = sfeat.mean(0, keepdim=True)
+        elif method == "no-op":
+          sfeat = fix_embedding_length(sfeat, self.max_segment_len)
+        sfeats.append(sfeat)
+      elif self.audio_feature == "wav2vec2":
+        sample_rate = 16000
+        begin = int(begin_sec * sample_rate)
+        end = int(end_sec * sample_rate)
+        sfeat = fix_embedding_length(feat[begin:end+1], self.max_segment_len * 160)
+        mask[i, begin:end+1] = 1.
+        sfeats.append(sfeat)
+      else:
+        raise ValueError(f"Unknown feature type: {self.audio_feature}") 
+    sfeat = torch.stack(sfeats)
+    sfeat = fix_embedding_length(sfeat, self.max_segment_num)
+    return sfeat, mask
+
+  def unsegment(self, sfeat, segments):
+    if sfeat.ndim == 1:
+      sfeat = sfeat.unsqueeze(-1)
+    
+    nframes = int(segments[-1]["end"] * 100)
+    feat = torch.zeros((nframes, *sfeat.size()[1:]))
+    for i, segment in enumerate(segments):
+      begin = int(segment["begin"] * 100)
+      end = int(segment["end"] * 100)
+      if i >= sfeat.size(0):
+        break 
+      feat[begin:end] = sfeat[i]
+    return feat.squeeze(-1)
+
   def load_audio(self, audio_file):
     audio, _ = torchaudio.load(audio_file)
     if self.audio_feature == "mfcc":
@@ -117,6 +167,14 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       nframes = int(audio.size(-1) // 320)
       inputs = fix_embedding_length(audio.t(), (self.max_feat_len+1)*320).t()
       inputs = inputs.squeeze(0)
+    elif self.audio_feature == "cpc":
+      with ReadHelper(f'ark: gunzip -c {audio_file} |') as reader:
+        for _, inputs in reader:
+          continue
+      inputs = torch.FloatTensor(inputs)
+      nframes = inputs.size(0)
+      inputs = fix_embedding_length(inputs, self.max_feat_len)
+      inputs = inputs.t()
 
     input_mask = torch.zeros(self.max_feat_len)
     input_mask[:nframes] = 1.
@@ -125,6 +183,10 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
   def __getitem__(self, idx): 
     audio_file, visual_words, phonemes = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
+    audio_inputs = audio_inputs.t()
+    if self.use_segment:
+      audio_inputs, input_mask = self.segment(audio_inputs, phonemes)
+
     sent = [phn["text"] for phn in phonemes]
     visual_sent = [w["text"] for w in visual_words]
     phoneme_labels = self.preprocessor.to_index(sent)
