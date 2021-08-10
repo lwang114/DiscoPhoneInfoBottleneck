@@ -54,7 +54,7 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'test_oov', 'cluster']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
@@ -67,6 +67,7 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
+    self.dataset_name = config.dataset
     self.ignore_index = config.get('ignore_index', -100)
 
     self.n_visual_class = self.data_loader['train']\
@@ -133,6 +134,15 @@ class Solver(object):
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
 
+  def extract_wav2vec2(self, x, mask):
+    B = x.size(0)
+    T = x.size(1)
+    out = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+    out = out.view(B, T, out.size(-2), out.size(-1))
+    out = (out * mask.unsqueeze(-1)).sum(-2) / (mask.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+    out_mask = (mask.sum(-1) > 0).float()
+    return out, out_mask 
+
   def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
@@ -158,7 +168,7 @@ class Solver(object):
 
         x = cuda(audios, self.cuda)
         if self.audio_feature == "wav2vec2":
-          x = self.audio_feature_net.feature_extractor(x)
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         # (batch size, max word num, max word len, max audio len)
@@ -250,7 +260,8 @@ class Solver(object):
         
         x = cuda(audios, self.cuda)
         if self.audio_feature == "wav2vec2":
-          x = self.audio_feature_net.feature_extractor(x)  
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
+
         word_labels = cuda(word_labels, self.cuda)
         audio_masks = cuda(audio_masks, self.cuda)
         # (batch size, max word num, max word len, max audio len)
@@ -331,6 +342,86 @@ class Solver(object):
         self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
       self.set_mode('train') 
 
+  def test_out_of_sample(self, n_clusters=44, save_embedding=False):
+    self.set_mode('eval')
+    out_prefix = self.dataset_name
+    test_loader = self.data_loader['test']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+
+    phone_f = open(phone_file, 'w')
+    split = 'test'
+    with torch.no_grad():
+      B = 0
+      utt_ids_dict = dict()
+      X_dict = dict()
+      segment_dict = dict()
+      X_dict[split] = []
+      utt_ids_dict[split] = []
+      segment_dict[split] = dict()
+      for b_idx, batch in enumerate(test_loader):
+        audios = batch[0]
+        input_mask = batch[3]
+        audio_lens = input_mask.sum(-1).long()
+
+        if self.audio_feature == 'wav2vec2':
+          x = self.extract_wav2vec2(audios)
+        else:
+          x = cuda(audios, self.cuda)
+
+        if self.cluster_layer == 'last':
+          word_logits,\
+          _, embedding = self.audio_net(x,
+                                       masks=input_mask,
+                                       return_feat=True)
+        else:
+          embedding = x
+
+        for idx in range(audios.size(0)):
+          global_idx = b_idx * B + idx
+          utt_id = os.path.basename(testset.dataset[global_idx][0]).split('.')[0]
+          
+          embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+          X_dict[split].extend(embed.tolist())
+          utt_ids_dict[split].extend([utt_id]*embed.shape[0])
+          segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
+      X_dict[split] = np.asarray(X_dict[split])
+   
+    X = X_dict[split]
+    begin_time = time.time()
+    clusterer = KMeans(n_clusters=n_clusters).fit(X)
+    print(f'KMeans take {time.time()-begin_time} s to finish')
+    np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
+      
+    ys = clusterer.predict(X_dict['test'])
+    utt_ids = utt_ids_dict['test']
+    segments = segment_dict['test'] 
+    filename = self.ckpt_dir.joinpath(out_prefix+'_quantized_outputs.txt')
+    out_f = open(filename, 'w')
+    for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
+      y = torch.LongTensor([g[1] for g in group])
+      y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
+      y_str = ','.join([str(l) for l in y_unseg])
+      out_f.write(f'{utt_id} {y_str}\n') 
+    out_f.close()
+    gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
+    token_f1, token_prec, token_recall = compute_token_f1(
+                                             filename,
+                                             gold_path,
+                                             self.ckpt_dir.joinpath(f'confusion.png'),
+                                           ) 
+    info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
+    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+    with open(save_path, 'a') as file:
+      file.write(info)
+
+      if self.history['token_f1'] < token_f1:
+        self.history['token_f1'] = token_f1 
+
   def cluster(self,
               n_clusters=44,
               out_prefix='quantized_outputs'):
@@ -359,7 +450,7 @@ class Solver(object):
             B = audios.size(0)
 
           if self.audio_feature == 'wav2vec2':
-            x = self.audio_feature_net.feature_extractor(audios)
+            x, audio_masks = self.extract_wav2vec2(audios, audio_masks)
           else:
             x = audios
           
@@ -373,7 +464,7 @@ class Solver(object):
           
           for idx in range(audios.size(0)): 
             global_idx = b_idx * B + idx
-            utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0].split('.')[0]
+            utt_id = os.path.basename(testset.dataset[global_idx][0]).split('.')[0]
 
             embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
             X_dict[split].extend(embed.tolist())
@@ -408,6 +499,7 @@ class Solver(object):
       save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
       with open(save_path, 'a') as file:
         file.write(info)
+      print(info)
 
       if self.history['token_f1'] < token_f1:
         self.history['token_f1'] = token_f1
@@ -496,8 +588,11 @@ def main(argv):
       net.train(save_embedding=save_embedding)
     elif config.mode == 'test':
       net.test(save_embedding=save_embedding)
+    elif config.mode == 'test_oos':
+      net.test_out_of_sample(n_clusters=config['n_clusters'], 
+                             save_embedding=save_embedding)
     elif config.mode == 'cluster':
-      net.cluster() 
+      net.cluster(n_clusters=config['n_clusters']) 
     else:
       return 0
     avg_word_acc.append(net.history['word_acc'])

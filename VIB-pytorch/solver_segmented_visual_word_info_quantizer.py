@@ -52,7 +52,7 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
@@ -68,8 +68,11 @@ class Solver(object):
     self.dataset_name = config.dataset
     self.ignore_index = config.get('ignore_index', -100)
 
-    self.n_visual_class = self.data_loader['train']\
-                          .dataset.preprocessor.num_visual_words
+    self.n_visual_class = config.get('n_visual_class', None)
+    if not self.n_visual_class:
+      self.n_visual_class = self.data_loader['train']\
+                            .dataset.preprocessor.num_visual_words
+
     self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
@@ -242,12 +245,12 @@ class Solver(object):
     with torch.no_grad():
       B = 0
       for b_idx, batch in enumerate(self.data_loader['test']):        
+        if b_idx > 2 and self.debug:
+          break
         audios = batch[0]
         word_labels = batch[2].squeeze(-1)
         audio_masks = batch[3]
         word_masks = batch[5]
-        if b_idx > 2 and self.debug:
-          break
         if b_idx == 0: 
           B = audios.size(0)
  
@@ -378,7 +381,7 @@ class Solver(object):
       self.set_mode('train') 
  
   def test_out_of_sample(self, save_embedding=False):
-    self.set_mode('test')
+    self.set_mode('eval')
     test_loader = self.data_loader['test']
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
@@ -397,19 +400,19 @@ class Solver(object):
         else:
           x = cuda(audios, self.cuda)
 
-        word_logits, _, phone_indices = self.audio_net.encode(x) 
+        word_logits, _, phone_indices = self.audio_net.encode(x, masks=input_mask) 
         B = phone_indices.size(0)
         for idx in range(B):
           global_idx = b_idx * batch_size + idx
           audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
-          audio_id = os.path.splitext(os.path.basename(audio_path))[0]
+          audio_id = os.path.basename(audio_path).split('.')[0]
           if save_embedding:
             embed_id = f'{audio_id}_{global_idx}'
             embeds[embed_id] = F.softmax(word_logits[idx, :len(phonemes)], dim=-1).detach().cpu().numpy()
             embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
                                       'word_text': [NULL]*len(phonemes)}
 
-          pred_phone_label = testset.unsegment(phone_indices, phonemes).long()
+          pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
           us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
           if us_ratio > 1:
             pred_phone_label = pred_phone_label.unsqueeze(-1)\
@@ -427,11 +430,13 @@ class Solver(object):
 
     # Evaluation with token F1
     gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
-    token_prec, token_recall, token_f1 = compute_token_f1(phone_file,
-        gold_phone_file,
-        self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+    token_f1,\
+    token_prec,\
+    token_recall = compute_token_f1(phone_file,
+                                    gold_phone_file,
+                                    self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
     print('[TEST RESULT]')
-    info = f'Token Precision: {token_prec:.4f}\tToken Recall: {token_rec:.4f}\tToken F1: {token_f1:.4f}\n'
+    info = f'Token Precision: {token_prec:.4f}\tToken Recall: {token_recall:.4f}\tToken F1: {token_f1:.4f}\n'
 
     save_path = os.path.join(self.ckpt_dir, f'results_file_{self.config.seed}.txt')
     with open(save_path, 'a') as f:
@@ -526,6 +531,8 @@ def main(argv):
       net.train(save_embedding=save_embedding)
     elif config.mode == 'test':
       net.test(save_embedding=save_embedding) 
+    elif config.mode == 'test_oos':
+      net.test_out_of_sample(save_embedding=save_embedding)
     else:
       return 0
     word_accs.append(net.history['word_acc'])
