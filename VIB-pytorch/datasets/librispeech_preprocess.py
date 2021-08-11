@@ -122,9 +122,9 @@ def extract_word_dataset(data_path, debug=False):
   if not os.path.exists(dataset_path):
     os.makedirs(dataset_path)
   word_info_file = os.path.join(dataset_path, f"{dataset_name}.json")
-  # XXX word_f = open(word_info_file, 'w')
+  word_f = open(word_info_file, 'w')
 
-  for split in ["dev-clean"]: # XXX , "train-clean-100", "train-clean-360"]: 
+  for split in ["dev-clean", "train-clean-100", "train-clean-360"]: 
     sent_info_file = os.path.join(data_path, split, f"{split}.json") 
     sent_f = open(sent_info_file, 'r')
     dataset = os.path.join(dataset_path, split)
@@ -159,7 +159,7 @@ def extract_word_dataset(data_path, debug=False):
         begin = int(begin_sec * 16000) 
         end = int(end_sec * 16000)
         word_audio = audio[begin:end]
-        """
+      
         wavfile.write(word_audio_path, fs, word_audio)
         
         word_info = {"audio_id": audio_id,
@@ -171,7 +171,6 @@ def extract_word_dataset(data_path, debug=False):
                      "split": split,
                      "phonemes": word["phonemes"]}
         word_f.write(json.dumps(word_info)+"\n")
-        """
 
         # Extract ABX file
         for phn_idx, phn in enumerate(word["phonemes"]):
@@ -192,10 +191,109 @@ def extract_word_dataset(data_path, debug=False):
     abx_f.close()
     sent_f.close()
     print(f"Number of words in {split}: {global_idx+1}")
-  # word_f.close()
+  word_f.close()
 
-  
-   
+def extract_noun(data_path, out_file):
+  lemmatizer = WordNetLemmatizer()
+ 
+  nouns = dict()
+  for split in ["train-clean-100", "train-clean-360", "dev-clean"]:
+    sent_info_file = os.path.join(data_path, f"{split}/{split}.json")
+    sent_f = open(sent_info_file, "w")
+    for line in sent_f:
+      sent_info = json.loads(line.rstrip("\n"))
+      sent = [word["text"] for word in sent_info["word"]]
+      # POS Tagging
+      sent_nouns = [lemmatizer.lemmatize(tagged[0]) for tagged in nltk.pos_tag(sent) if tagged[1][0] == "N"]
+      for w in sent_nouns:
+        if not w in nouns:
+          nouns[w] = 1
+        else:
+          nouns[w] += 1
+  json.dump(nouns, open(out_file, "w"), indent=2)
+
+def extract_top_noun_dataset(data_path, order=[0, 99], debug=False):
+  """
+  Create a spoken word dataset with the top order[0]-order[1] nouns from LibriSpeech 
+  """
+  lemmatizer = WordNetLemmatizer()
+
+  dataset_name = f"librispeech_word_top{order[0]}-{order[1]}"
+  dataset_path = os.path.join(data_path, dataset_name)
+  if not os.path.exists(dataset_path):
+    os.makedirs(dataset_path)
+  word_info_file = os.path.join(dataset_path, f"{dataset_name}.json")
+  word_f = open(word_info_file, "w")
+
+  vocab_path = os.path.join(data_path, "librispeech_nouns.json")
+  if not os.path.exists(vocab_path):
+    extract_noun(data_path, vocab_path)
+  vocab = json.load(open(vocab_path))
+  top_words = sorted(vocab, key=lambda x:vocab[x], reverse=True)[order[0]:order[1]+1]
+
+  for split in ["train-clean-100", "train-clean-360", "dev-clean"]:
+    split_path = os.path.join(dataset_path, f"{split}_top{order[0]}-{order[1]}")
+    if not os.path.exists(split_path):
+      os.makedirs(split_path)
+
+    abx_f = open(os.path.join(dataset, f"{split}_top{order[0]}-{order[1]}_nonoverlap.item"), "w")
+    abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+
+    sent_info_file = os.path.join(data_path, f"{split}/{split}.json")
+    sent_f = open(sent_info_file, "r")
+    global_idx = 0
+    for line in sent_f:
+      if debug and global_idx > 20:
+        break
+      global_idx += 1
+
+      sent_info = json.loads(line.rstrip("\n"))
+      audio_id = sent_info["utterance_id"]
+      spk = audio_id.split("-")[0]
+      audio_path = os.path.join(data_path, split, audio_id+".wav")
+      fs, audio = wavfile.read(audio_path)
+      
+      for word_id, word in enumerate(sent_info["words"]):
+        lemma = lemmatizer.lemmatize(word["text"])  
+        if word_id in sent_info["visual_words"]:
+          continue
+
+        if lemma in top_words:
+          # Save meta info
+          word_info = {"audio_id": audio_id,
+                       "word_id": str(word_id),
+                       "label": word["text"],
+                       "begin": word["begin"],
+                       "end": word["end"],
+                       "spk": spk,
+                       "split": split,
+                       "phonemes": word["phonemes"]}
+          word_f.write(json.dumps(word_info)+"\n")
+        
+          # Save ABX info
+          for phn_idx, phn in enumerate(word["phonemes"]):
+            prev_phn = SIL
+            next_phn = SIL
+            if phn_idx > 0:
+              prev_phn = word["phonemes"][phn_idx-1]["text"]
+              prev_phn = re.sub(r"[0-9]", "", prev_phn)
+            if phn_idx < len(word["phonemes"]) - 1:
+              next_phn = word["phonemes"][phn_idx+1]["text"]
+              next_phn = re.sub(r"[0-9]", "", next_phn)
+            phn_label = re.sub(r"[0-9]", "", phn["text"])
+            
+            begin_phn = round(phn["begin"] - begin_sec, 3) 
+            end_phn = round(phn["end"] - begin_sec, 3)
+            abx_f.write(f"{word_id} {begin_phn} {end_phn} {phn_label} {prev_phn} {next_phn} {spk}\n") 
+
+          # Copy wav file
+          word_audio = audio[int(word["begin"]*fs):int(word["end"]*fs)]
+          word_audio_path = os.path.join(split_path, f"{audio_id}_{word_id}.wav")
+          wavfile.write(word_audio_path, fs, word_audio)
+    abx_f.close()
+    sent_f.close()
+  word_f.close()
+
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)
@@ -220,6 +318,8 @@ def main(argv):
     extract_pseudo_phones(data_path, args.split, pseudo_phone_file)
   elif args.TASK == 3:
     extract_word_dataset(data_path, debug=config["debug"])
+  elif args.TASK == 4:
+    extract_top_noun_dataset(data_path, order=[0, 200], debug=config["debug"])
 
 if __name__ == "__main__":
   args = sys.argv[1:]
