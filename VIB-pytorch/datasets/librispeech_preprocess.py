@@ -7,6 +7,7 @@ import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 from scipy.io import wavfile
+import re
 
 stop_words = stopwords.words("english")
 IGNORE_TOKENS = ["ʰ", "ʼ", "ˈ"]
@@ -112,47 +113,55 @@ def extract_word_dataset(data_path, debug=False):
           train-clean-360/
               ...
               train-clean-360.item
-          val-clean/
+          dev-clean/
               ...
-              val-clean.item
-          test-clean/
-              ...
-              test-clean.item
+              dev-clean.item
   """
   dataset_name = "librispeech_word"
-  sent_info_file = os.path.join(data_path, split, f"{split}.json") 
-  word_info_file = os.path.join(data_path, dataset_name, "{dataset_name}.json")
-  sent_f = open(sent_info_file, 'r')
-  word_f = open(word_info_file, 'w')
+  dataset_path = os.path.join(data_path, dataset_name)
+  if not os.path.exists(dataset_path):
+    os.makedirs(dataset_path)
+  word_info_file = os.path.join(dataset_path, f"{dataset_name}.json")
+  # XXX word_f = open(word_info_file, 'w')
 
-  for split in ["train-clean-100", "val-clean", "test-clean"]:
-    dataset = os.path.join(data_path, dataset_name, split)
+  for split in ["dev-clean"]: # XXX , "train-clean-100", "train-clean-360"]: 
+    sent_info_file = os.path.join(data_path, split, f"{split}.json") 
+    sent_f = open(sent_info_file, 'r')
+    dataset = os.path.join(dataset_path, split)
     if not os.path.exists(dataset):
       os.makedirs(dataset)
 
-    abx_f = open(os.path.join(data_path, dataset_name, split, split+".item"), "w")
+    abx_f = open(os.path.join(dataset, split+".item"), "w")
     abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
 
+    global_idx = 0
     for line in sent_f:
+      if debug and global_idx > 20:
+        break
       sent_dict = json.loads(line.rstrip("\n"))
-      audio_id = sent_dict["audio_id"]
+      audio_id = sent_dict["utterance_id"]
       audio_path = os.path.join(data_path, split, f"{audio_id}.wav")
-      fs, audio = wavfile.read(audio_path) 
-      spk = audio_id.split("_")[0]
+      if not os.path.exists(audio_path):
+        continue
+      fs, audio = wavfile.read(audio_path)
+      spk = audio_id.split("-")[0]
 
       visual_word_idxs = sent_dict["visual_words"]
+      global_idx += len(visual_word_idxs)
       words = sent_dict["words"]
+      print(split, audio_id)
       for word_idx in visual_word_idxs:
         word = words[word_idx]
         word_id = f"{audio_id}_{word_idx}"
-        word_audio_path = os.path.join(data_path, dataset_name, split, f"{word_id}.wav")
-        begin_sec = word["phonemes"][0]["begin"] 
+        word_audio_path = os.path.join(dataset, f"{word_id}.wav")
+        begin_sec = word["phonemes"][0]["begin"]
         end_sec = word["phonemes"][-1]["end"] 
         begin = int(begin_sec * 16000) 
         end = int(end_sec * 16000)
         word_audio = audio[begin:end]
+        """
         wavfile.write(word_audio_path, fs, word_audio)
-
+        
         word_info = {"audio_id": audio_id,
                      "word_id": str(word_idx),
                      "label": word["text"],
@@ -162,39 +171,55 @@ def extract_word_dataset(data_path, debug=False):
                      "split": split,
                      "phonemes": word["phonemes"]}
         word_f.write(json.dumps(word_info)+"\n")
-        
+        """
+
         # Extract ABX file
         for phn_idx, phn in enumerate(word["phonemes"]):
           prev_phn = SIL
           next_phn = SIL
           if phn_idx > 0:
             prev_phn = word["phonemes"][phn_idx-1]["text"]
+            prev_phn = re.sub(r"[0-9]", "", prev_phn)
           if phn_idx < len(word["phonemes"]) - 1:
             next_phn = word["phonemes"][phn_idx+1]["text"]
-          abx_f.write("{audio_id}_{word_id} {phn['begin']} {phn['end']} {phn['text']} {prev_phn} {next_phn} {spk}\n") 
+            next_phn = re.sub(r"[0-9]", "", next_phn)
+          phn_label = re.sub(r"[0-9]", "", phn["text"])
+          
+          begin_phn = round(phn["begin"] - begin_sec, 3) 
+          end_phn = round(phn["end"] - begin_sec, 3)
+          abx_f.write(f"{word_id} {begin_phn} {end_phn} {phn_label} {prev_phn} {next_phn} {spk}\n") 
+
     abx_f.close()
-  sent_f.close()
-  word_f.close()
+    sent_f.close()
+    print(f"Number of words in {split}: {global_idx+1}")
+  # word_f.close()
+
   
    
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("TASK", type=int)
-  parser.add_argument("--data_path", default="/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic")
+  # parser.add_argument("--data_path", default="/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic")
+  parser.add_argument("--config", default="../configs/librispeech_word_segment_cpc_info_quantizer.json")
   parser.add_argument("--split", default="train-clean-100")
 
   args = parser.parse_args(argv)
+  config = json.load(open(args.config))
+  data_path = config["data_path"]
+
   if args.TASK == 0:
     visual_word_file = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k/phrase_classes.json"
-    extract_visual_words(args.data_path, args.split, visual_word_file)
+    extract_visual_words(data_path, args.split, visual_word_file)
   elif args.TASK == 1:
     split = re.sub("-", "_", args.split)
     pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_librispeech/{split}_decode_li10/data.json"
-    extract_pseudo_phones(args.data_path, args.split, pseudo_phone_file)
+    extract_pseudo_phones(data_path, args.split, pseudo_phone_file)
   elif args.TASK == 2:
     split = re.sub("-", "_", args.split)
     pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_flickr/{split}_decode_li10/data.json"
-    extract_pseudo_phones(args.data_path, args.split, pseudo_phone_file)
+    extract_pseudo_phones(data_path, args.split, pseudo_phone_file)
+  elif args.TASK == 3:
+    extract_word_dataset(data_path, debug=config["debug"])
 
 if __name__ == "__main__":
   args = sys.argv[1:]
