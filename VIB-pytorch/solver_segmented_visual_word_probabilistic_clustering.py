@@ -68,6 +68,15 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
+    self.oos_dataset_name = config.get('oos_dataset', None) 
+    if self.oos_dataset_name:
+      oos_config = deepcopy(config)
+      oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
+                              'test': oos_config['splits']['test_oos']} 
+      oos_data_loader = return_data(oos_config)
+      self.data_loader['test_oos'] = oos_data_loader['test']
+
     self.ignore_index = config.get('ignore_index', -100)
 
     self.n_visual_class = self.data_loader['train']\
@@ -224,7 +233,11 @@ class Solver(object):
       self.test(save_embedding=save_embedding)
       if (self.global_epoch - 1) % 5 == 0:
         self.cluster()
-        self.test_quantized()
+        if self.oos_dataset_name:
+          self.test_out_of_sample(save_embedding=save_embedding)
+
+        # self.test_quantized()
+
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -362,7 +375,7 @@ class Solver(object):
         utt_ids_dict = dict()
         X_dict = dict()
         segment_dict = dict()
-        for split in self.data_loader:
+        for split in ['train',]:
           X_dict[split] = []
           utt_ids_dict[split] = []
           segment_dict[split] = dict()
@@ -522,7 +535,7 @@ class Solver(object):
 
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
           
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
@@ -533,7 +546,8 @@ class Solver(object):
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
-                                f'Pred word label: {pred_word_name}\n')
+                                f'Pred word label: {pred_word_name}\n\n')
+    word_readable_f.close()
     word_acc = compute_accuracy(gold_word_labels, pred_word_labels)
     word_prec,\
     word_rec,\
@@ -543,12 +557,112 @@ class Solver(object):
     print('[TEST RESULTS AFTER CLUSTERING]')
     info = f'Epoch {self.global_epoch}\tClustering Method: {self.clustering_method}\n'\
            f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
-           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}'
+           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {ord_f1:.3f}'
     print(info)
     save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
     with open(save_path, 'a') as file:
       file.write(info+'\n')
     self.set_mode('train')
+
+  def test_out_of_sample(self, save_embedding=False):
+    self.set_mode('eval')
+    testset = self.data_loader['test_oos'].dataset
+    preprocessor = testset.preprocessor
+    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+
+    us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
+    with torch.no_grad():
+      B = 0
+      utt_ids_dict = dict()
+      X_dict = dict()
+      segment_dict = dict()
+      for split in ['test_oos',]:
+        X_dict[split] = []
+        utt_ids_dict[split] = []
+        segment_dict[split] = dict()
+        for b_idx, batch in enumerate(self.data_loader[split]):
+          audios = batch[0]
+          audio_masks = batch[3]
+          if b_idx > 2 and self.debug:
+            break
+          if b_idx == 0:
+            B = audios.size(0)
+
+          x = cuda(audios, self.cuda)
+          audio_masks = cuda(audio_masks, self.cuda)
+          if self.audio_feature == 'wav2vec2':
+            B = x.size(0)
+            T = x.size(1)
+            x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+            x = x.view(B, T, x.size(-2), x.size(-1))
+            x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+            audio_masks = torch.where(audio_masks.sum(-1) > 0,
+                                      torch.tensor(1, device=x.device),
+                                      torch.tensor(0, device=x.device))
+
+          # (batch size, max segment num)
+          if audio_masks.dim() == 3:
+            segment_masks = torch.where(audio_masks.sum(-1) > 0,
+                                        torch.tensor(1., device=audio_masks.device),
+                                        torch.tensor(0., device=audio_masks.device))
+          else:
+            segment_masks = audio_masks.clone()
+          audio_lens = segment_masks.sum(-1).long()
+
+          if self.audio_net.ds_ratio > 1:
+            audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
+          # (batch size, max segment num, n visual class)
+          word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
+          word_probs = F.softmax(word_logits, dim=-1)
+
+          for idx in range(audios.size(0)):
+            global_idx = b_idx * B + idx
+            utt_id = os.path.splitext(os.path.split(self.data_loader[split].dataset.dataset[global_idx][0])[1])[0].split('.')[0]
+            
+            embed = word_probs[idx, :audio_lens[idx]].cpu().detach().numpy()
+            X_dict[split].extend(embed.tolist())
+            utt_ids_dict[split].extend([utt_id]*embed.shape[0])
+            segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
+        X_dict[split] = np.asarray(X_dict[split])
+      
+      X = np.concatenate([X_dict[split] for split in self.data_loader])
+      begin_time = time.time()
+      self.clusterer.fit(X)
+      info =  f'Epoch {self.global_epoch}\tClustering Time: {time.time()-begin_time:.2f} s'
+      print(info)
+      with open(save_path, 'a') as file:
+        file.write(info+'\n')
+
+      ys = self.clusterer.predict(X_dict['test_oos'])
+      utt_ids = utt_ids_dict['test_oos']
+      segments = segment_dict['test_oos']
+      filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
+      out_f = open(filename, 'w')
+      for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
+        y = torch.LongTensor([g[1] for g in group])
+        y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
+        y_str = ','.join([str(l) for l in y_unseg]) 
+        out_f.write(f'{utt_id} {y_str}\n') 
+      out_f.close()
+      np.save(self.ckpt_dir.joinpath('cluster_means.npy'), self.clusterer.cluster_centers_) 
+      gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
+      print('[CLUSTERING RESULT]')
+      token_f1, token_prec, token_recall = compute_token_f1(
+                                             filename,
+                                             gold_path,
+                                             self.ckpt_dir.joinpath(f'confusion.png'),
+                                           ) 
+      info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}'
+      with open(save_path, 'a') as file:
+        file.write(info+'\n')
+
+      if self.history['token_f1'] < token_f1:
+        self.history['token_f1'] = token_f1
+        self.history['best_cluster_epoch'] = self.global_epoch
+        self.history['best_cluster_iter'] = self.global_iter
+        self.save_checkpoint(f'best_token_f1_{self.config.seed}.tar')
+      self.set_mode('train')
+
 
   def set_mode(self, mode='train'): 
     if mode == 'train':

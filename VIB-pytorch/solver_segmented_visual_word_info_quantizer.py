@@ -11,6 +11,7 @@ import json
 import time
 import numpy as np
 import argparse
+from copy import deepcopy
 from pyhocon import ConfigFactory
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
@@ -65,6 +66,14 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
+    self.oos_dataset_name = config.get('oos_dataset', None) 
+    if self.oos_dataset_name:
+      oos_config = deepcopy(config)
+      oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
+                              'test': oos_config['splits']['test_oos']} 
+      oos_data_loader = return_data(oos_config)
+      self.data_loader['test_oos'] = oos_data_loader['test']
     self.dataset_name = config.dataset
     self.ignore_index = config.get('ignore_index', -100)
 
@@ -218,6 +227,8 @@ class Solver(object):
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
       self.test(save_embedding=save_embedding)
+      if self.oos_dataset_name:
+        self.test_out_of_sample(save_embedding=save_embedding)
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -382,7 +393,7 @@ class Solver(object):
  
   def test_out_of_sample(self, save_embedding=False):
     self.set_mode('eval')
-    test_loader = self.data_loader['test']
+    test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
 
@@ -435,8 +446,9 @@ class Solver(object):
     token_recall = compute_token_f1(phone_file,
                                     gold_phone_file,
                                     self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
-    print('[TEST RESULT]')
-    info = f'Token Precision: {token_prec:.4f}\tToken Recall: {token_recall:.4f}\tToken F1: {token_f1:.4f}\n'
+    print('[OOS TEST RESULT]')
+    info = f'Out-of-Sample Dataset: {self.oos_dataset_name}\n'\
+           f'Token Precision: {token_prec:.4f}\tToken Recall: {token_recall:.4f}\tToken F1: {token_f1:.4f}\n'
 
     save_path = os.path.join(self.ckpt_dir, f'results_file_{self.config.seed}.txt')
     with open(save_path, 'a') as f:
