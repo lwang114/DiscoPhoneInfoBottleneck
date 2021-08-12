@@ -8,6 +8,7 @@ from datasets.speechcoco_segment import SpeechCOCOSegmentDataset, SpeechCOCOSegm
 from datasets.flickr8k import FlickrSegmentDataset, FlickrSegmentPreprocessor
 from datasets.flickr8k_word_image import FlickrWordImageDataset, FlickrWordImagePreprocessor
 from datasets.librispeech import LibriSpeechDataset, LibriSpeechPreprocessor
+from datasets.spoken_word_dataset import SpokenWordDataset, SpokenWordPreprocessor
 
 class UnknownDatasetError(Exception):
     def __str__(self):
@@ -55,24 +56,31 @@ def return_data(args):
         preprocessor = FlickrWordImagePreprocessor(dset_dir, 80,
                                                    audio_feature=args.audio_feature, 
                                                    image_feature=args.image_feature,
+                                                   phone_label=args.phone_label,
                                                    min_class_size=args.min_class_size,
-                                                   ignore_index=args.ignore_index)
+                                                   ignore_index=args.ignore_index,
+                                                   use_blank=args.use_blank,
+                                                   debug=args.debug)
         train_data = FlickrWordImageDataset(dset_dir,
                                             preprocessor, 
                                             'train',
                                             audio_feature=args.audio_feature,  
                                             image_feature=args.image_feature,
+                                            phone_label=args.phone_label,
                                             min_class_size=args.min_class_size,
                                             use_segment=args.use_segment,
-                                            ds_method=args.downsample_method)
+                                            ds_method=args.downsample_method,
+                                            debug=args.debug)
         test_data = FlickrWordImageDataset(dset_dir,
                                            preprocessor, 
                                            'test',
                                            audio_feature=args.audio_feature,
                                            image_feature=args.image_feature,
+                                           phone_label=args.phone_label,
                                            min_class_size=args.min_class_size,
                                            use_segment=args.use_segment,
-                                           ds_method=args.downsample_method) 
+                                           ds_method=args.downsample_method,
+                                           debug=args.debug) 
     elif args.dataset == 'librispeech':
       if args.audio_feature == 'mfcc':
         wav2vec_path = None
@@ -83,7 +91,8 @@ def return_data(args):
                        splits=args.splits,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,
-                       ignore_index=args.ignore_index)
+                       ignore_index=args.ignore_index,
+                       debug=args.debug)
       train_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
@@ -92,7 +101,9 @@ def return_data(args):
                        augment=True,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,
-                       wav2vec_path=wav2vec_path) 
+                       wav2vec_path=wav2vec_path,
+                       use_segment=args.use_segment,
+                       debug=args.debug) 
       test_data = LibriSpeechDataset(
                        dset_dir, 
                        preprocessor,
@@ -101,7 +112,36 @@ def return_data(args):
                        augment=True,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,
-                       wav2vec_path=wav2vec_path) 
+                       wav2vec_path=wav2vec_path,
+                       use_segment=args.use_segment,
+                       debug=args.debug) 
+    elif args.dataset == 'librispeech_word':
+      preprocessor = SpokenWordPreprocessor(
+                       args.dataset, 
+                       dset_dir, 80,
+                       audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
+                       ignore_index=args.ignore_index,
+                       use_blank=args.use_blank,
+                       debug=args.debug)
+      train_data = SpokenWordDataset(
+                       dset_dir,
+                       preprocessor,
+                       'train',
+                       use_segment=args.use_segment,
+                       audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
+                       ds_method=args.downsample_method,
+                       debug=args.debug)
+      test_data = SpokenWordDataset(
+                       dset_dir,
+                       preprocessor,
+                       'test',
+                       use_segment=args.use_segment,
+                       audio_feature=args.audio_feature,
+                       phone_label=args.phone_label,
+                       ds_method=args.downsample_method,
+                       debug=args.debug)
     else : raise UnknownDatasetError()
 
 

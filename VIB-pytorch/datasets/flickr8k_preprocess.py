@@ -363,41 +363,25 @@ def extract_visual_words(sentence_info_path,
     "bboxes" : a list of tuple of (left, upper, right, lower)
   """
   lemmatizer = WordNetLemmatizer()
-  visual_classes = json.load(open(visual_class_path)) # TODO  
+  visual_classes = json.load(open(visual_class_path))
   word_f = open(phrase_info_path, "r")
   in_f = open(sentence_info_path, "r")
   out_f = open(out_path, "w")
-
   visual_words = dict()
-  for line in word_f:
-    phrase = json.loads(line.rstrip("\n"))
-    label = phrase["label"]
-    if visual_classes[label] < min_class_size:
-      continue 
-    
-    audio_id = phrase["utterance_id"]
-    if not audio_id in visual_words:
-      visual_words[audio_id] = dict()
-
-    for word in phrase["children"]:
-      visual_words[audio_id][(word["begin"], word["end"])] = {"text": word["text"],
-                                                              "bbox": phrase["bbox"]}
-
+      
   for line in in_f:
     sent = json.loads(line.rstrip("\n"))
     sent["visual_words"] = []
     sent["bboxes"] = []
     audio_id = sent["utterance_id"].split("/")[-1]
-    if not audio_id in visual_words:
-      out_f.write(json.dumps(sent)+"\n")
-      continue
     print(audio_id)
     for w_idx, word in enumerate(sent["words"]):
-      interval = (word["begin"], word["end"])
-      # print(interval, visual_words[audio_id].keys()) # XXX
-      if interval in visual_words[audio_id]:
-        sent["visual_words"].append(w_idx)
-        sent["bboxes"].append(visual_words[audio_id][interval]["bbox"])
+      label = lemmatizer.lemmatize(word['text'].lower())
+      if label in visual_classes:
+        if visual_classes[label] >= min_class_size:
+          print(word['text'], label)
+          sent["visual_words"].append(w_idx)
+          sent["bboxes"].append([])
     out_f.write(json.dumps(sent)+"\n")
   word_f.close()
   in_f.close()
@@ -464,6 +448,14 @@ def extract_pseudo_phones(data_path, split, pseudo_phone_file):
   print(tokens)
   print(f"Pseudo-phone set size: {len(tokens)}")
  
+def copy_subset(subset_file, trg_dir):
+  subset_f = open(subset_file, "r")
+  for line in subset_f:
+    src_info = json.loads(line.rstrip("\n"))
+    src_file = src_info["utterance_id"] + ".wav"
+    trg_file = os.path.join(trg_dir, os.path.basename(src_file))
+    shutil.copyfile(src_file, trg_file)
+  subset_f.close()
 
 def main(argv):
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -502,7 +494,10 @@ def main(argv):
                            visual_class_path,
                            out_path, 50)
   elif args.TASK == 4:
-    new_data_root = os.path.join(config["data_path"], "../")
+    old_data_root = "/ws/ifp-53_2/hasegawa/lwang114/data/flickr30k" 
+    new_data_root = os.path.join(config["data_path"], "../zerospeech2021-dataset/phonetic")
+    visual_class_path = os.path.join(old_data_root, "phrase_classes.json")
+    phrase_info_path = os.path.join(old_data_root, "flickr8k_phrases.json")
     for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
       sentence_info_path = os.path.join(new_data_root, f"{split}/{split}.json")
       out_path = os.path.join(new_data_root, f"{split}/{split}_with_visual_words.json")
@@ -526,6 +521,10 @@ def main(argv):
     for split in ["train_flickr_audio", "val_flickr_audio", "test_flickr_audio"]:
       pseudo_phone_file = f"/ws/ifp-53_1/hasegawa/tools/espnet/egs/discophone/ifp_lwang114/exp/train_pytorch_train_li10/decode_flickr/{split}_decode_li10/data.json"
       extract_pseudo_phones(new_data_root, split, pseudo_phone_file)
+  elif args.TASK == 8:
+    subset_file = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/test_flickr_audio/test_flickr_audio.json"
+    trg_dir = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/test_flickr_audio"
+    copy_subset(subset_file, trg_dir)
 
 if __name__ == "__main__":
   argv = sys.argv[1:]

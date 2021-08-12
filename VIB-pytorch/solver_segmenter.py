@@ -7,6 +7,9 @@ import numpy as np
 import time
 from scipy.signal import find_peaks
 from tqdm import tqdm
+import json
+import os
+from pyhocon import ConfigFactory
 import argparse
 from datasets.datasets import return_data
 
@@ -177,23 +180,29 @@ class CPCSegmenter:
     self.prominence = config.get("prominence", 0.1) 
     self.width = config.get("width", None)
     self.distance = config.get("distance", None)
-    self.validate = config.get("validate", False)
-    self.val_ratio = 0.1
+    self.do_val = config.get("validate", False)
+    self.debug = config.get("debug", False)
+    self.val_ratio = config.get("val_ratio", 0.1)
     self.frames_per_sec = 100
     self.result_dir = config.ckpt_dir
+    if not os.path.exists(self.result_dir):
+      os.makedirs(self.result_dir)
 
   def score(self, u, v):
     return F.cosine_similarity(u, v, dim=-1)
 
-  def validate(self): # TODO Select the best parameter on validation set 
+  def validate(self):
     timer = Timer("Boundary detection on validation set") 
     val_loader = self.data_loader["train"]
     valset = val_loader.dataset
     batch_size = val_loader.batch_size
     n_batches = round(len(val_loader) * self.val_ratio)
-    
-    for b_idx, batch in val_loader:
+
+    audio_ids = []
+    for b_idx, batch in enumerate(val_loader):
       if b_idx > 2 and self.debug:
+        break
+      if b_idx >= n_batches:
         break
       x = batch[0]
       input_mask = batch[3] 
@@ -217,12 +226,12 @@ class CPCSegmenter:
         seg = [int(sec*self.frames_per_sec) for sec in seg_sec]
         segs.append(seg)
         
-      self.metric.update((segs, pos_preds, lengths)) 
+      self.metric.update(segs, pos_preds, lengths) 
     
     # Evaluation using boundary F1 and Rval
     (precision, recall, f1, rval), best_params, _ = self.metric.get_stats()
-    info = "Validation Boundary Precision: {precision:.4f}\tBoundary Recall: {recall:.4f}\tBoundary F1: {f1:.4f}\tR value: {rval:.4f}"
-    with open(os.path.join(result_dir, "result_file.txt", "a") as f:
+    info = f"Validation Boundary Precision: {precision:.4f}\tBoundary Recall: {recall:.4f}\tBoundary F1: {f1:.4f}\tR value: {rval:.4f}"
+    with open(os.path.join(self.result_dir, "result_file.txt"), "a") as f:
       f.write(info+"\n")
     print(info)
 
@@ -238,7 +247,7 @@ class CPCSegmenter:
                 "end": float, segment end time in sec
                 "text": str, NULL
     """
-    if validate:
+    if self.do_val:
       self.width, self.prominence, self.distance = self.validate()
     timer = Timer("Boundary detection on test set")      
     boundary_dict = dict()
@@ -247,7 +256,7 @@ class CPCSegmenter:
     batch_size = test_loader.batch_size
 
     audio_ids = []
-    for b_idx, batch in test_loader: 
+    for b_idx, batch in enumerate(test_loader): 
       if b_idx > 2 and self.debug:
         break
       x = batch[0]
@@ -272,14 +281,14 @@ class CPCSegmenter:
         seg = [int(sec*self.frames_per_sec) for sec in seg_sec]
         segs.append(seg)
         
-      self.metric.update((segs, pos_preds, lengths)) 
+      self.metric.update(segs, pos_preds, lengths) 
 
     # Evaluation using boundary F1 and Rval
     (precision, recall, f1, rval), _, peaks = self.metric.get_stats(prominence=self.prominence,
                                                       width=self.width, 
                                                       distance=self.distance)
-    info = "Test Boundary Precision: {precision:.4f}\tBoundary Recall: {recall:.4f}\tBoundary F1: {f1:.4f}\tR value: {rval:.4f}"
-    with open(os.path.join(result_dir, "result_file.txt", "a") as f:
+    info = f"Test Boundary Precision: {precision:.4f}\tBoundary Recall: {recall:.4f}\tBoundary F1: {f1:.4f}\tR value: {rval:.4f}"
+    with open(os.path.join(self.result_dir, "result_file.txt"), "a") as f:
       f.write(info+"\n")
     print(info)
 
@@ -301,7 +310,7 @@ def main():
   parser.add_argument("CONFIG", type=str)
   args = parser.parse_args()
 
-  config = json.load(open(args.CONFIG))
+  config = ConfigFactory.parse_file(args.CONFIG)
   solver = CPCSegmenter(config)
   solver.predict()
   

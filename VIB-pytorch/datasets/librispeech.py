@@ -43,16 +43,19 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
         "test": ["dev-clean"]
       },
       augment=False,
+      use_segment=False,
       audio_feature="mfcc",
       image_feature="image",
       phone_label="multilingual",
       sample_rate=16000,
-      wav2vec_path=None
+      wav2vec_path=None,
+      debug=False
   ):
     self.preprocessor = preprocessor
     self.splits = splits[split]
     self.data_path = data_path
     self.phone_label = phone_label
+    self.use_segment = use_segment
     self.max_segment_len = 10
     self.max_segment_num = 100
    
@@ -62,7 +65,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       examples = load_data_split(data_path, sp,
                                  audio_feature=audio_feature,
                                  image_feature=image_feature,
-                                 phone_label=self.phone_label)
+                                 phone_label=self.phone_label,
+                                 debug=debug)
       data.extend(examples)
     print(f"Number of {split} audio files = {len(data)}")
 
@@ -88,6 +92,9 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
           self.audio_transforms.extend(augmentation)
       self.audio_transforms = torchvision.transforms.Compose(self.audio_transforms) 
       self.hop_length = 10
+    elif audio_feature == "cpc":
+      self.audio_transforms = None
+      self.hop_length = 10
     elif audio_feature == "wav2vec2":
       self.audio_transforms = None
       self.hop_length = 20
@@ -100,7 +107,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     phonemes = [example["phonemes"] for example in data]
     self.dataset = list(zip(audio, visual_words, phonemes))
     self.audio_feature_type = audio_feature
-    if audio_feature == "mfcc":
+    if audio_feature in ["mfcc", "cpc"]:
       self.max_feat_len = 2048
     else:
       self.max_feat_len = 1024
@@ -125,7 +132,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
         end = int(end_sec * 100)
         sfeat = feat[begin:end+1]
         if method == "average":
-          sfeat = sfeat.mean(0, keepdim=True)
+          sfeat = sfeat.mean(0)
         elif method == "no-op":
           sfeat = fix_embedding_length(sfeat, self.max_segment_len)
         sfeats.append(sfeat)
@@ -157,13 +164,14 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     return feat.squeeze(-1)
 
   def load_audio(self, audio_file):
-    audio, _ = torchaudio.load(audio_file)
     if self.audio_feature == "mfcc":
+      audio, _ = torchaudio.load(audio_file)
       inputs = self.audio_transforms(audio).squeeze(0) 
       nframes = inputs.size(-1)
       inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()      
 
     elif self.audio_feature == "wav2vec2":
+      audio, _ = torchaudio.load(audio_file)
       nframes = int(audio.size(-1) // 320)
       inputs = fix_embedding_length(audio.t(), (self.max_feat_len+1)*320).t()
       inputs = inputs.squeeze(0)
@@ -238,7 +246,8 @@ class LibriSpeechPreprocessor:
     image_feature="rcnn",
     phone_label="multilingual",
     sample_rate=16000,
-    ignore_index=-100
+    ignore_index=-100,
+    debug=False
   ):
     self.num_features = num_features 
     self.ignore_index = ignore_index
@@ -249,7 +258,8 @@ class LibriSpeechPreprocessor:
         data.extend(load_data_split(data_path, sp,
                                     audio_feature=audio_feature,
                                     image_feature=image_feature,
-                                    phone_label=phone_label))
+                                    phone_label=phone_label,
+                                    debug=debug))
     tokens = set()
     visual_words = set()
     for ex in data:
@@ -319,7 +329,8 @@ class LibriSpeechPreprocessor:
 def load_data_split(data_path, sp,
                     audio_feature="mfcc",
                     image_feature="rcnn",
-                    phone_label="multilingual"):
+                    phone_label="multilingual",
+                    debug=False):
   """
   Returns: 
       examples : a list of mappings of
@@ -338,8 +349,8 @@ def load_data_split(data_path, sp,
   examples = []
   absent_utt_ids = []
   for idx, line in enumerate(label_f):
-    # if idx > 100: # XXX
-    #   break
+    if debug and idx > 20: # XXX
+      break
     label_dict = json.loads(line.rstrip("\n"))
     if "utterance_id" in label_dict:
       utt_id = label_dict["utterance_id"] 
@@ -363,17 +374,23 @@ def load_data_split(data_path, sp,
     else:
       raise ValueError(f"Invalid phone label type: {phone_label}")
 
-    if len(utt_id.split("/")) > 1:
-      audio_path = f"{utt_id}.wav"
-    else:
-      audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
+    if audio_feature in ["mfcc", "wav2vec2"]:
+      if len(utt_id.split("/")) > 1:
+        audio_path = f"{utt_id}.wav"
+      else:
+        audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
+    elif audio_feature == "cpc":
+      utt_id = os.path.basename(utt_id)
+      audio_file = f"{utt_id}.ark.gz"
+      audio_path = os.path.join(data_path, f"{sp}_cpc", audio_file)
+
     if os.path.exists(audio_path):
       example = {"audio": audio_path,
                  "visual_words": visual_words,
                  "phonemes": phonemes}
+      examples.append(example)
     else:
       absent_utt_ids.append(utt_id)
-    examples.append(example)
   
   if len(absent_utt_ids) > 0:
     print(f'Ignore the following utterance that does not exist: {absent_utt_ids}')
