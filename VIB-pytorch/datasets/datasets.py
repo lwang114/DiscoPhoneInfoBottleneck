@@ -81,7 +81,7 @@ def return_data(args):
                                            use_segment=args.use_segment,
                                            ds_method=args.downsample_method,
                                            debug=args.debug) 
-    elif args.dataset == 'librispeech':
+    elif args.dataset in ['librispeech', 'mboshi']:
       if args.audio_feature == 'mfcc':
         wav2vec_path = None
       else:
@@ -115,10 +115,11 @@ def return_data(args):
                        wav2vec_path=wav2vec_path,
                        use_segment=args.use_segment,
                        debug=args.debug) 
-    elif args.dataset == 'librispeech_word':
+    elif args.dataset in ['librispeech_word', 'mboshi_word']:
       preprocessor = SpokenWordPreprocessor(
                        args.dataset, 
                        dset_dir, 80,
+                       splits=args.splits,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,
                        ignore_index=args.ignore_index,
@@ -128,6 +129,7 @@ def return_data(args):
                        dset_dir,
                        preprocessor,
                        'train',
+                       splits=args.splits,
                        use_segment=args.use_segment,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,
@@ -137,6 +139,7 @@ def return_data(args):
                        dset_dir,
                        preprocessor,
                        'test',
+                       splits=args.splits,
                        use_segment=args.use_segment,
                        audio_feature=args.audio_feature,
                        phone_label=args.phone_label,

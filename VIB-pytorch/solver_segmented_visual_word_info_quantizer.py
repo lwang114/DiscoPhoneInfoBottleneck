@@ -70,6 +70,7 @@ class Solver(object):
     if self.oos_dataset_name:
       oos_config = deepcopy(config)
       oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['dset_dir'] = oos_config['oos_dset_dir']
       oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
                               'test': oos_config['splits']['test_oos']} 
       oos_data_loader = return_data(oos_config)
@@ -154,6 +155,8 @@ class Solver(object):
     total_phone_loss = 0.
         
     for e in range(self.epoch):
+      if e > 0 and self.debug:
+        break
       self.global_epoch += 1
       pred_phone_labels = []
       gold_phone_labels = []
@@ -397,19 +400,22 @@ class Solver(object):
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
 
-    phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized.txt')
-    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
-    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+    phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embedding_labels.json')
+    embeds = dict()
+    embed_labels = dict()
 
     phone_f = open(phone_file, 'w')
     with torch.no_grad():
       for b_idx, batch in enumerate(test_loader):
         audios = batch[0]
         input_mask = batch[3]
+        
+        x = cuda(audios, self.cuda)
+        input_mask = cuda(input_mask, self.cuda)
         if self.audio_feature == 'wav2vec2':
-          x = self.extract_wav2vec2(audios)
-        else:
-          x = cuda(audios, self.cuda)
+          x, input_mask = self.extract_wav2vec2(audios, input_mask)
 
         word_logits, _, phone_indices = self.audio_net.encode(x, masks=input_mask) 
         B = phone_indices.size(0)

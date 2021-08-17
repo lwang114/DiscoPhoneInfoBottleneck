@@ -392,7 +392,7 @@ def load_data_split(data_path, sp,
     else:
       absent_utt_ids.append(utt_id)
   
-  if len(absent_utt_ids) > 0:
-    print(f'Ignore the following utterance that does not exist: {absent_utt_ids}')
+  # if len(absent_utt_ids) > 0:
+  #   print(f'Ignore the following utterance that does not exist: {absent_utt_ids}')
   label_f.close()
   return examples
