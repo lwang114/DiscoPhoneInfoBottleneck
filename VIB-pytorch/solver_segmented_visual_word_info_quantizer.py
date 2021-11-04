@@ -7,17 +7,19 @@ import fairseq
 import argparse
 import sys
 import os
+import shutil
 import json
 import time
 import numpy as np
 import argparse
+from kaldiio import WriteHelper
 from copy import deepcopy
 from pyhocon import ConfigFactory
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
+from tqdm import tqdm
 from utils.utils import cuda, str2bool
 from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
-from criterion import MacroTokenFLoss
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
@@ -53,12 +55,13 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster', 'test_zerospeech']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
     self.history = dict()
     self.history['token_result']=[0., 0., 0.]
+    self.history['oos_token_result']=[0., 0., 0.]
     self.history['word_acc']=0. 
     self.history['loss']=0.
     self.history['epoch']=0
@@ -110,20 +113,34 @@ class Solver(object):
       self.audio_feature_net = None
       self.input_size = 256
       self.hop_len_ms = 10
+    elif config.audio_feature == 'bnf':
+      self.audio_feature_net = None
+      self.input_size = 40
+      self.hop_len_ms = 10
+    elif config.audio_feature == 'bnf+cpc':
+      self.audio_feature_net = None
+      self.input_size = 296
+      self.hop_len_ms = 10
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
     if config.downsample_method == 'resample':
       self.input_size *= 5
+    self.embed_type = self.config.get('embed_type', 'proba')
+    print(f'Embedding type: {self.embed_type}') # XXX
 
-  def get_model_config(self, config):      
+  def get_model_config(self, config):
+    self.use_segment = config.get('use_segment', False)
+    self.use_conv = config.get('use_conv', False) 
+    self.conv_width = config.get('conv_width', 5)
+    self.use_logsoftmax = config.get('use_logsoftmax', False)
+    print(f'Use log softmax: {self.use_logsoftmax}')
     self.audio_net = cuda(InfoQuantizer(in_channels=self.input_size,
                                         channels=self.K,
                                         n_embeddings=self.n_clusters,
-                                        z_dim=self.n_visual_class
-                                        ), self.cuda)
-    self.use_logsoftmax = config.get('use_logsoftmax', False)
-    print(f'Use log softmax: {self.use_logsoftmax}')
+                                        z_dim=self.n_visual_class,
+                                        use_conv=self.use_conv,
+                                        conv_width=self.conv_width), self.cuda)
 
   def get_optim_config(self, config):
     trainables = [p for p in self.audio_net.parameters()]
@@ -198,8 +215,11 @@ class Solver(object):
 
         # (batch size * max segment num, n visual class)
         if self.use_logsoftmax:
-          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
+          segment_word_logits = word_logits.reshape(-1, self.n_visual_class) 
+          word_labels = word_labels.unsqueeze(-1).expand(-1, self.max_segment_num).flatten() * segment_masks.flatten()
+          word_labels = word_labels.long()
+          # (F.log_softmax(word_logits, dim=-1)\
+          # * segment_masks.unsqueeze(-1)).sum(-2)
         else:
           segment_word_logits = (word_logits\
                                 * segment_masks.unsqueeze(-1)).sum(-2)
@@ -246,10 +266,9 @@ class Solver(object):
     gold_word_labels = []
     embeds = dict()
     embed_labels = dict()
-    if not self.ckpt_dir.joinpath('outputs/phonetic/dev-clean').is_dir():
-      os.makedirs(self.ckpt_dir.joinpath('outputs/phonetic/dev-clean'))
 
     gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
+    print('gold_phone_file: ', gold_phone_file)
     word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word.{self.global_epoch}.readable'), 'w') 
     phone_file = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt')
     embed_file = self.ckpt_dir.joinpath(f'{out_prefix}_embeddings.npz')
@@ -313,12 +332,15 @@ class Solver(object):
         total_step += 1.
         
         _, _, phone_indices = self.audio_net.encode(x, masks=audio_masks)
+
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
           audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
           segments = testset.dataset[global_idx][-1]
-          pred_phone_label = testset.unsegment(phone_indices[idx], segments).long()
-          if save_embedding:
+          pred_phone_label = phone_indices[idx]
+          if self.use_segment:
+            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, segments).long()
+          if save_embedding and global_idx < 1000:
             embed_id = f'{audio_id}_{global_idx}'
             embeds[embed_id] = F.softmax(word_logits[idx, :len(segments)], dim=-1).detach().cpu().numpy()
             embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
@@ -335,7 +357,7 @@ class Solver(object):
            
           gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
           pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
-          pred_word_label_quantized = quantized[idx].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
+          pred_word_label_quantized = quantized[idx, :len(segments)].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
            
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
@@ -392,6 +414,9 @@ class Solver(object):
         self.history['iter'] = self.global_iter
         self.history['epoch'] = self.global_epoch
         self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
+        best_phone_file = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
+        shutil.copyfile(phone_file, best_phone_file)
+
       self.set_mode('train') 
  
   def test_out_of_sample(self, save_embedding=False):
@@ -400,9 +425,16 @@ class Solver(object):
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
 
-    phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized.txt')
-    embed_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embeddings.npz')
-    embed_label_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embedding_labels.json')
+    splits = '_'.join(testset.splits)
+    phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_{splits}_outputs_quantized_{self.config.seed}.{self.global_epoch}.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_{splits}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_{splits}_embedding_labels.json')
+    split = testset.splits[0]
+    embed_zrc_dir = self.ckpt_dir.joinpath(f'outputs_{self.oos_dataset_name}_{self.embed_type}/phonetic/{splits}')
+    if not os.path.exists(embed_zrc_dir):
+      print(f'Create directory for embeddings: {embed_zrc_dir}')
+      os.makedirs(embed_zrc_dir)
+    
     embeds = dict()
     embed_labels = dict()
 
@@ -417,7 +449,7 @@ class Solver(object):
         if self.audio_feature == 'wav2vec2':
           x, input_mask = self.extract_wav2vec2(audios, input_mask)
 
-        word_logits, _, phone_indices = self.audio_net.encode(x, masks=input_mask) 
+        word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=input_mask) 
         B = phone_indices.size(0)
         for idx in range(B):
           global_idx = b_idx * batch_size + idx
@@ -425,11 +457,27 @@ class Solver(object):
           audio_id = os.path.basename(audio_path).split('.')[0]
           if save_embedding:
             embed_id = f'{audio_id}_{global_idx}'
-            embeds[embed_id] = F.softmax(word_logits[idx, :len(phonemes)], dim=-1).detach().cpu().numpy()
+            if self.embed_type == 'proba': 
+              embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
+            elif self.embed_type == 'quantized_proba':
+              embedding = quantized_word_proba[idx, :len(phonemes)]
+            elif self.embed_type == 'continuous':
+              embedding = word_logits[idx, :len(phonemes)]
+            elif self.embed_type == 'continuous_cpc':
+              embedding = torch.cat([x[idx], word_logits[idx]], dim=-1)
+
+            embeds[embed_id] = embedding.detach().cpu().numpy()
             embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
                                       'word_text': [NULL]*len(phonemes)}
+            embedding_frame = testset.unsegment(embedding, phonemes)
+            embed_path = embed_zrc_dir.joinpath(f'{audio_id}.ark.gz')
+            with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
+              writer('arr_0', embedding_frame.detach().cpu().numpy())
 
-          pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
+          pred_phone_label = phone_indices[idx]
+          if self.use_segment:
+            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
+
           us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
           if us_ratio > 1:
             pred_phone_label = pred_phone_label.unsqueeze(-1)\
@@ -442,15 +490,15 @@ class Solver(object):
 
       # Save embeddings
       if save_embedding:
-        np.savez(embed_file, **embeds)
+        # XXX np.savez(embed_file, **embeds)
         json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
 
     # Evaluation with token F1
-    gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
+    gold_phone_files = [os.path.join(testset.data_path, f'{split}/{split}_nonoverlap.item') for split in testset.splits]
     token_f1,\
     token_prec,\
     token_recall = compute_token_f1(phone_file,
-                                    gold_phone_file,
+                                    gold_phone_files,
                                     self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
     print('[OOS TEST RESULT]')
     info = f'Out-of-Sample Dataset: {self.oos_dataset_name}\n'\
@@ -461,8 +509,79 @@ class Solver(object):
       f.write(info)
     print(info)
      
-    if self.history['token_result'][-1] < token_f1:
-      self.history['token_result'] = [token_prec, token_recall, token_f1]
+    if self.history['oos_token_result'][-1] < token_f1:
+      best_phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized_{self.config.seed}.txt')
+      shutil.copyfile(phone_file, best_phone_file)
+      self.history['oos_token_result'] = [token_prec, token_recall, token_f1]
+      self.save_checkpoint(f'best_acc_oos_{self.config.seed}.tar')
+    self.set_mode('train')
+
+  def test_zerospeech(self, save_embedding=False):
+    self.set_mode('eval')
+    test_loader = self.data_loader['test_oos']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    zrc_dir = Path(self.ckpt_dir / f'outputs_zerospeech2021_{self.embed_type}')
+    splits = '_'.join(testset.splits)
+    task = self.config['oos_dset_dir'].split('/')[-1]
+    print(f'{splits} for zerospeech task {task}')
+
+    phone_file = zrc_dir / f'{task}/{splits}/quantized_outputs.txt'
+    print(phone_file) # XXX
+    split = testset.splits[0]
+   
+    if not zrc_dir.exists():
+      os.makedirs(zrc_dir)
+     
+    if not (zrc_dir / f'{task}/{splits}').exists():
+      os.makedirs(zrc_dir / f'{task}/{splits}')
+
+    phone_f = open(phone_file, 'w')
+    with torch.no_grad():
+      for b_idx, batch in tqdm(enumerate(test_loader)):
+        audios = batch[0]
+        input_mask = batch[3]
+        
+        x = cuda(audios, self.cuda)
+        input_mask = cuda(input_mask, self.cuda)
+
+        word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=input_mask) 
+        B = phone_indices.size(0)
+        for idx in range(B):
+          global_idx = b_idx * batch_size + idx
+          audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
+          audio_id = os.path.basename(audio_path).split('.')[0]
+          if save_embedding:
+            embed_id = f'{audio_id}_{global_idx}'
+            if self.embed_type == 'proba': 
+              embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
+            elif self.embed_type == 'quantized_proba':
+              embedding = quantized_word_proba[idx, :len(phonemes)]
+            elif self.embed_type == 'continuous':
+              embedding = word_logits[idx, :len(phonemes)]
+            elif self.embed_type == 'continuous_cpc':
+              embedding = torch.cat([x[idx], word_logits[idx]], dim=-1)
+
+            embedding_frame = testset.unsegment(embedding, phonemes)
+            embed_path = zrc_dir / f'{task}/{splits}/{audio_id}.ark.gz'
+
+            with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
+              writer('arr_0', embedding_frame.detach().cpu().numpy())
+
+          pred_phone_label = phone_indices[idx]
+          if self.use_segment:
+            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
+
+          us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
+          if us_ratio > 1:
+            pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                               .expand(-1, us_ratio).flatten()
+             
+          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+          pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
+          phone_f.write(f'{audio_id}\t{pred_phone_names}\n')
+      phone_f.close()
     self.set_mode('train') 
 
   def set_mode(self, mode='train'): 
@@ -478,7 +597,10 @@ class Solver(object):
       raise('mode error. It should be either train or eval')
 
   def load_checkpoint(self, filename='best_acc.tar'):
-    filename = f'best_acc_{self.config.seed}.tar' 
+    if self.config.mode == 'test':
+      filename = f'best_acc_{self.config.seed}.tar' 
+    else:
+      filename = f'best_acc_oos_{self.config.seed}.tar'
     file_path = self.ckpt_dir.joinpath(filename)
     if file_path.is_file():
       print('=> loading checkpoint "{}"'.format(file_path))
@@ -486,7 +608,7 @@ class Solver(object):
       self.global_epoch = checkpoint['epoch']
       self.global_iter = checkpoint['iter']
       self.history = checkpoint['history']
-      self.audio_net.load_state_dict(checkpoint['model_states']['audio_net'])
+      self.audio_net.load_state_dict(checkpoint['model_states']['audio_net'], strict=False)
       print('=> loaded checkpoint "{} (iter {}, epoch {})"'.format(
                 file_path, self.global_iter, self.global_epoch))
     else:
@@ -513,6 +635,7 @@ class Solver(object):
  
 
 def main(argv):
+  print(f'I am process {os.getpid()}')
   parser = argparse.ArgumentParser(description='Visual word information quantizer')
   parser.add_argument('CONFIG', type=str)
   args = parser.parse_args(argv)
@@ -551,6 +674,8 @@ def main(argv):
       net.test(save_embedding=save_embedding) 
     elif config.mode == 'test_oos':
       net.test_out_of_sample(save_embedding=save_embedding)
+    elif config.mode == 'test_zerospeech':
+      net.test_zerospeech(save_embedding=save_embedding)
     else:
       return 0
     word_accs.append(net.history['word_acc'])
