@@ -46,17 +46,17 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
     mkdir -p $lm_root
     mkdir -p $lm_root/iq
     mkdir -p $lm_root/cpc
-    cp -r ${iq_root}/quantized_zerospeech2021_proba/LibriSpeech ${lm_root}/iq/LibriSpeech
-    cp -r ${cpc_root}/quantized_zerospeech2021_proba/LibriSpeech ${lm_root}/cpc/LibriSpeech
+    cp -r ${iq_root}/quantized_zerospeech2021_proba/LibriSpeech ${lm_root}/LibriSpeech/iq
+    cp -r ${cpc_root}/quantized_zerospeech2021_proba/LibriSpeech ${lm_root}/LibriSpeech/cpc
   fi
 
   # Preprocess the data
   for model in iq cpc; do
     fairseq-preprocess --only-source \
-      --trainpref $lm_root/${model}/LibriSpeech/fairseq_train-clean.txt \
-      --validpref $lm_root/${model}/LibriSpeech/fairseq_dev-clean.txt \
-      --testpref $lm_root/${model}/LibriSpeech/fairseq_dev-lexical.txt \
-      --destdir $lm_root/${model}/fairseq-bin-data \
+      --trainpref $lm_root/LibriSpeech/${model}/fairseq_train-clean.txt \
+      --validpref $lm_root/LibriSpeech/${model}/fairseq_dev-clean.txt \
+      --testpref $lm_root/LibriSpeech/${model}/fairseq_dev-lexical.txt \
+      --destdir $lm_root/fairseq-bin-data/LibriSpeech/${model} \
       --workers 20
   done
 fi
@@ -70,7 +70,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   echo $model_root
 
   conda activate zerospeech2021_baseline
-  fairseq-train --fp16 ${model_root} \
+  fairseq-train --fp16 ${model_root}/fairseq-bin-data/LibriSpeech \
       --task combined_language_modeling \
       --save-dir ${model_root}/checkpoints/LSTM \
       --keep-last-epochs 2 \
