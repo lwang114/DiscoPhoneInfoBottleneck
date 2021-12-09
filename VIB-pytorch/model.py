@@ -8,50 +8,153 @@ from utils.utils import cuda
 
 
 class InfoQuantizer(nn.Module):
-  def __init__(self, in_channels, channels, n_embeddings, z_dim, init_embedding=None):
+  def __init__(self, 
+               in_channels, 
+               channels, 
+               n_embeddings, 
+               z_dim, 
+               init_embedding=None, 
+               use_conv=False, 
+               conv_width=5):
     super(InfoQuantizer, self).__init__()
-    self.conv = nn.Sequential(
-                  nn.Conv1d(in_channels, in_channels, 10, 1, 0, bias=False),
-                  nn.LayerNorm(in_channels),
-                  nn.ReLU(True)
-                )
-    self.encoder = nn.Sequential(
-        nn.Linear(in_channels, channels, bias=False),
-        nn.LayerNorm(channels),
-        nn.ReLU(True),
-        nn.Linear(channels, channels, bias=False),
-        nn.LayerNorm(channels),
-        nn.ReLU(True),
-        nn.Linear(channels, channels, bias=False),
-        nn.LayerNorm(channels),
-        nn.ReLU(True),
-        nn.Linear(channels, channels, bias=False),
-        nn.LayerNorm(channels),
-        nn.ReLU(True),
-        nn.Linear(channels, z_dim),
-    )
+    self.use_conv = use_conv
+    self.conv = nn.Conv1d(in_channels, channels, conv_width, 1, int(conv_width // 2))
+    if self.use_conv:
+      print('Use convolutional input layer')
+      self.encoder = nn.Sequential(
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, z_dim),
+      )
+    else:
+      self.encoder = nn.Sequential(
+          nn.Linear(in_channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          nn.Linear(channels, z_dim),
+      )
     self.codebook = IQEmbeddingEMA(n_embeddings, z_dim, init_embedding=init_embedding)
     self.ds_ratio = False
 
   def encode(self, x, masks=None):
-    if x.dim() == 4:
-      size = x.size()
-      assert size[2] == 10
-      x = self.conv(x.view(-1, *size[2:]).permute(0, 2, 1))
-      x = x.squeeze(-1).view(*size[:2], -1)
+    if self.use_conv:
+      x = self.conv(x.permute(0, 2, 1))
+      x = x.permute(0, 2, 1)
     z = self.encoder(x) 
     p = F.log_softmax(z, dim=-1)
     q, indices = self.codebook.encode(p, masks=masks)    
     return z, q, indices
 
   def forward(self, x, masks=None):
-    if x.dim() == 4:
-      size = x.size()
-      assert size[2] == 10
-      x = self.conv(x.view(-1, *size[2:]).permute(0, 2, 1))
-      x = x.squeeze(-1).view(*size[:2], -1)
-    z = self.encoder(x) 
+    if self.use_conv:
+      x = self.conv(x.permute(0, 2, 1))
+      x = x.permute(0, 2, 1)
+    z = self.encoder(x)
     p = F.log_softmax(z, dim=-1)
+    q, loss = self.codebook(p, masks=masks)
+    return z, q, loss
+
+
+class MultiHeadInfoQuantizer(nn.Module):
+  def __init__(self, 
+               in_channels, 
+               channels, 
+               n_embeddings, 
+               z_dims, 
+               decay=0.999,
+               use_rnn=False):
+    super(MultiHeadInfoQuantizer, self).__init__()
+    self.in_channels = in_channels
+    self.use_rnn = use_rnn
+    if use_rnn:
+      self.encoder = nn.LSTM(input_size=in_channels,
+                             hidden_size=channels,
+                             num_layers=1,
+                             batch_first=True,
+                             bidirectional=False)
+    else:
+      self.encoder = nn.Sequential(
+          nn.Linear(in_channels, channels, bias=False),
+          nn.LayerNorm(channels),
+          nn.ReLU(True),
+          #nn.Linear(channels, channels, bias=False),
+          #nn.LayerNorm(channels),
+          #nn.ReLU(True),
+          #nn.Linear(channels, channels, bias=False),
+          #nn.LayerNorm(channels),
+          #nn.ReLU(True),
+          #nn.Linear(channels, channels, bias=False),
+          #nn.LayerNorm(channels),
+          #nn.ReLU(True),
+          nn.Linear(channels, sum(z_dims)),
+      )
+    self.z_dims = z_dims
+    
+    init_embedding = []
+    for z_dim in z_dims:
+        alpha = [100] * z_dim
+        init_embedding.append(torch.Tensor(np.random.dirichlet(alpha, size=(n_embeddings,))))
+    init_embedding = torch.cat(init_embedding, dim=-1)
+    init_embedding = torch.FloatTensor(init_embedding)
+    self.codebook = IQEmbeddingEMA(n_embeddings, sum(z_dims), 
+                                   init_embedding=init_embedding, 
+                                   decay=decay)
+    # XXX self.codebook = IQEmbeddingEMA(n_embeddings, z_dims[0], 
+    #                               decay=decay)
+    self.ds_ratio = False
+
+  def encode(self, x, masks=None):
+    device = x.device
+    batch_size = x.size(0)
+    if self.use_rnn:
+      h0 = torch.zeros((1, batch_size, self.in_channels), device=device)
+      c0 = torch.zeros((1, batch_size, self.in_channels), device=device)
+      z, _ = self.encoder(x, (h0, c0))    
+    else:
+      z = self.encoder(x) 
+    p = []
+    start_idx = 0
+    
+    for z_dim in self.z_dims: # [self.z_dims[0]]: XXX
+        p.append(F.log_softmax(z[:, :, start_idx:start_idx+z_dim], dim=-1))
+        start_idx += z_dim
+    p = torch.cat(p, dim=-1)
+    q, indices = self.codebook.encode(p, masks=masks)    
+    return z, q, indices
+
+  def forward(self, x, masks=None):
+    device = x.device
+    batch_size = x.size(0)
+    if self.use_rnn:
+      h0 = torch.zeros((1, batch_size, self.in_channels), device=device)
+      c0 = torch.zeros((1, batch_size, self.in_channels), device=device)
+      z, _ = self.encoder(x, (h0, c0))    
+    else:
+      z = self.encoder(x) 
+    p = []
+    start_idx = 0
+    for z_dim in self.z_dims: # [self.z_dims[0]]: XXX
+        p.append(F.log_softmax(z[:, :, start_idx:start_idx+z_dim], dim=-1))
+        start_idx += z_dim
+    p = torch.cat(p, dim=-1)
     q, loss = self.codebook(p, masks=masks)
     return z, q, loss
 
@@ -127,13 +230,9 @@ class IQEmbeddingEMA(nn.Module):
     
     if self.training:
       self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)
-      # XXX
-      # n = torch.sum(self.ema_count)
-      # self.ema_count = (self.ema_count + self.epsilon) / (n + M * self.epsilon) * n
       dw = torch.matmul(encodings.t(), torch.exp(x_flat))
 
       self.ema_weight = self.decay * self.ema_weight + (1 - self.decay) * dw
-      # self.embedding = self.ema_weight / self.ema_count.unsqueeze(-1)
       self.embedding = (self.ema_weight + self.epsilon / M) / (self.ema_count.unsqueeze(-1) + self.epsilon)
 
     if self.div_type == "kl":
@@ -184,11 +283,13 @@ class MLP(nn.Module):
                n_class=65,
                input_size=80,
                max_seq_len=100,
-               context_width=5):
+               context_width=5,
+               position_dependent=False):
     super(MLP, self).__init__()
     self.K = embedding_dim
     self.n_layers = n_layers
     self.n_class = n_class
+    self.position_dependent = position_dependent
     self.ds_ratio = 1
     in_channels = input_size
     channels = embedding_dim
@@ -217,16 +318,26 @@ class MLP(nn.Module):
                  nn.ReLU(),
                )
     '''
-    self.decode = nn.Linear(embedding_dim * round(max_seq_len // self.ds_ratio),
-                            self.n_class,
-                            bias=False)
+    if position_dependent:
+      self.decode = nn.Linear(embedding_dim * round(max_seq_len // self.ds_ratio),
+                              self.n_class,
+                              bias=False)
+    else:
+      self.decode = nn.Linear(embedding_dim,
+                              self.n_class,
+                              bias=False)
+
     
   def forward(self, x,
               masks=None,
               return_feat=False):
     B = x.size(0)
     embed = self.mlp(x)
-    out = self.decode(embed.view(B, -1))
+    if self.position_dependent:
+      out = self.decode(embed.view(B, -1))
+    else:
+      out = self.decode(embed).sum(-2)
+
     if return_feat:
       return out, embed
     else:
@@ -327,10 +438,10 @@ class GumbelMLP(nn.Module):
     else:
       if self.position_dependent:
         out = [self.decoders[i](encoding[:, i]) for i in range(self.Nd)]
+        out = torch.stack(out, dim=1)
       else:
-        out = [self.decoders[0](encoding[:, i]) for i in range(self.Nd)]
+        out = self.decoders[0](encoding)
       # (batch size, max n segments, n word classes)
-      out = torch.stack(out, dim=1)
     # out = F.log_softmax(out, dim=-1) # XXX
 
     if masks is not None:
