@@ -92,14 +92,15 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   done
 fi
 
+# Phoneme-level language model
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   cwd=$(pwd)
   cd $iq_root
 
   conda activate zerospeech2021_baseline
   config_file=$root/configs/librispeech_phoneme_lm.json
-  model_root=$(find_model_root ${config_file} ${re_lm})
-  echo $model_root
+  lm_root=$(find_model_root ${config_file} ${re_lm})
+  echo $lm_root
 
   fairseq-train --fp16 ${model_root}/fairseq-bin-data/LibriSpeech \
       --task combined_language_modeling \
@@ -119,4 +120,67 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
       --max-epoch 20 || error "fairseq-train failed"
   conda deactivate
   cd $cwd
+fi
+
+if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
+  config_file=$root/configs/librispeech_word_lm.json
+  lm_root=$(find_model_root ${config_file} ${re_lm})
+  iq_root=$(find_model_root ${config_file} ${re_iq})
+  cpc_root=$(find_model_root ${config_file} ${re_cpc})
+  echo ${lm_root}
+  echo ${iq_root}
+  echo ${cpc_root}
+  train_paths="${iq_root}/outputs_zerospeech2021_proba/phonetic/train-clean-360/quantized_outputs_segment.txt"
+  val_paths="${iq_root}/outputs_zerospeech2021_proba/phonetic/dev-clean/quantized_outputs_segment.txt"
+  test_paths=${val_paths}
+  
+  if [ ! -f $lm_root/LibriSpeech_IQ_segment/fairseq_train-clean.txt ]; then 
+      echo "python utils/convert_to_fairseq_format.py --in_paths $train_paths"
+      echo "  --out_paths $lm_root/LibriSpeech_IQ_segment/fairseq_train-clean.txt"
+      echo "python utils/convert_to_fairseq_format.py --in_paths $val_paths"
+      echo "  --out_paths $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt"
+      python $root/utils/convert_to_fairseq_format.py --in_paths $train_paths \
+             --out_paths $lm_root/LibriSpeech_IQ_segment/fairseq_train-clean.txt || error "convert to fairseq failed (train)"
+      python $root/utils/convert_to_fairseq_format.py --in_paths $val_paths \
+             --out_paths $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt || error "convert to fairseq failed (dev)"
+  fi
+  
+  # Preprocess the data
+  if [ ! -d $lm_root/fairseq-bin-data/LibriSpeech_IQ_segment/${model} ]; then  
+      echo "fairseq-preprocess --only-source"
+	    echo "	--trainpref $lm_root/LibriSpeech_IQ_segment/fairseq_train-clean.txt"
+	    echo "	--validpref $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt"
+	    echo "	--testpref $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt"
+	    echo "  --destdir $lm_root/fairseq-bin-data/LibriSpeech_IQ_segment"
+	    echo "  --workers 20"
+	    fairseq-preprocess --only-source \
+			    --trainpref $lm_root/LibriSpeech_IQ_segment/fairseq_train-clean.txt \
+			    --validpref $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt \
+			    --testpref $lm_root/LibriSpeech_IQ_segment/fairseq_dev-clean.txt \
+			    --destdir $lm_root/fairseq-bin-data/LibriSpeech_IQ_segment \
+			    --workers 20 || error "fairseq-preprocess failed (segment level)" \					 
+  fi
+fi
+
+# Word-level language model with fixed-length spans 
+if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
+  conda activate zerospeech2021_baseline
+  config_file=$root/configs/librispeech_phoneme_lm.json
+  lm_root=$(find_model_root ${config_file} ${re_lm})
+  
+  fairseq-train --fp16 $lm_root/fairseq-bin-data/LibriSpeech_IQ_segment \
+    --task masked_lm --criterion masked_lm \
+    --save-dir checkpoints/BERT_segment \
+    --keep-last-epochs 1 \
+    --train-subset train \
+    --num-workers 4 \
+    --arch roberta_base \
+    --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-06 --clip-norm 0.0 \
+    --lr-scheduler polynomial_decay --lr 0.0005 --total-num-update 250000 --warmup-updates 10000 \
+    --dropout 0.1 --attention-dropout 0.1 --weight-decay 0.01 \
+    --mask-multiple-length 7 --mask-prob 0.5 --mask-stdev 10 \
+    --sample-break-mode eos --tokens-per-sample 3072 --max-positions 6144 \
+    --max-tokens 1024 --update-freq 1 --max-update 250000 \
+    --seed 5 --log-format simple --log-interval 10 --skip-invalid-size-inputs-valid-test
+  conda deactivate
 fi
