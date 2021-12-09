@@ -4,13 +4,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+from copy import deepcopy
 import torch
 from fairseq import utils
 from fairseq.data import (
-    AppendTokenDataset,
     Dictionary,
     IdDataset,
-    CombinedMonolingualDataset, # TODO
     LMContextWindowDataset,
     NestedDictionaryDataset,
     NumelDataset,
@@ -18,9 +17,11 @@ from fairseq.data import (
     PrependTokenDataset,
     StripTokenDataset,
     TokenBlockDataset,
+    TransformEosDataset,
     TruncatedDictionary,
     data_utils,
 )
+from fairseq.data.combined_monolingual_dataset import CombinedMonolingualDataset
 from fairseq.data.indexed_dataset import get_available_dataset_impl
 from fairseq.data.shorten_dataset import maybe_shorten_dataset
 from fairseq.dataclass import ChoiceEnum, FairseqDataclass
@@ -28,13 +29,20 @@ from fairseq.tasks import LegacyFairseqTask, register_task
 from omegaconf import II
 
 
+SAMPLE_BREAK_MODE_CHOICES = ChoiceEnum(["none", "complete", "complete_doc", "eos"])
+SHORTEN_METHOD_CHOICES = ChoiceEnum(["none", "truncate", "random_crop"])
+logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class CombinedLanguageModelingConfig(FairseqDataclass):
-    n_sequence_type: int = field(
-        default=2, metadata={"help": "number of sequence types"}
-    )
     data: Optional[str] = field(
         default=None, metadata={"help": "path to data directory"}
+    )
+    n_sequence_type: int = field(
+        default=2,
+        metadata={"help": "number of sequence types"}
     )
     sample_break_mode: SAMPLE_BREAK_MODE_CHOICES = field(
         default="none",
@@ -78,12 +86,10 @@ class CombinedLanguageModelingConfig(FairseqDataclass):
         },
     )
     pad_to_fixed_length: Optional[bool] = field(
-        default=False,
-        metadata={"help": "pad to fixed length"},
+        default=False, metadata={"help": "pad to fixed length"},
     )
     pad_to_fixed_bsz: Optional[bool] = field(
-        default=False,
-        metadata={"help": "boolean to pad to fixed batch size"},
+        default=False, metadata={"help": "boolean to pad to fixed batch size"},
     )
 
     # TODO common vars below add to parent
@@ -99,19 +105,40 @@ class CombinedLanguageModelingConfig(FairseqDataclass):
     plasma_path: str = II("common.plasma_path")
 
 
-@register_task('combined_language_modeling', dataclass=CombinedLanguageModelingConfig)
+@register_task("combined_language_modeling", dataclass=CombinedLanguageModelingConfig)
 class CombinedLanguageModelingTask(LegacyFairseqTask):
     """
-    Train a language model
+    Train a language model with multiple sequences.
 
     Args:
-        dictionary ()
+        dictionary (~fairseq.data.Dictionary): the dictionary for the input of
+            the language model
+        output_dictionary (~fairseq.data.Dictionary): the dictionary for the
+            output of the language model. In most cases it will be the same as
+            *dictionary*, but could possibly be a more limited version of the
+            dictionary (if ``--output-dictionary-size`` is used).
+        targets (List[str]): list of the target types that the language model
+            should predict.  Can be one of "self", "future", and "past".
+            Defaults to "future".
+
+    .. note::
+
+        The language modeling task is compatible with :mod:`fairseq-train`,
+        :mod:`fairseq-generate`, :mod:`fairseq-interactive` and
+        :mod:`fairseq-eval-lm`.
+
+    The language modeling task provides the following additional command-line
+    arguments:
+
+    .. argparse::
+        :ref: fairseq.tasks.language_modeling_parser
+        :prog:
     """
 
     def __init__(self, args, dictionaries, output_dictionaries=None, targets=None):
         super().__init__(args)
         self.n_seq_type = args.n_sequence_type
-        print('Number of sequence types: ', self.n_seq_type) # XXX
+        print('Number of sequence types: ', self.n_seq_type)
         self.dictionaries = dictionaries
         self.output_dictionaries = output_dictionaries or dictionaries
 
@@ -124,18 +151,17 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
         dictionaries = []
         output_dictionaries = []
         if args.data:
-            paths = utils.split_paths(args.data)
+            paths = args.data.split(":")
             assert len(paths) > 0
             for i in range(args.n_sequence_type):
-                dictionary = Dictionary.load(os.path.join(paths[0], str(i), "dict.txt")) # TODO
-                logger.info("dictionary: {} types".format(len(dictionary)))
+                dictionary = Dictionary.load(os.path.join(paths[0], str(i), "dict.txt"))
                 output_dictionary = dictionary
                 if args.output_dictionary_size >= 0:
                     output_dictionary = TruncatedDictionary(
                         dictionary, args.output_dictionary_size
                     )
                 dictionaries.append(dictionary)
-                output_dictionaries.append(output_dictionaries)
+                output_dictionaries.append(output_dictionary)
         return (dictionaries, output_dictionaries)
 
     @classmethod
@@ -173,9 +199,7 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
                 )
 
         return model
-
-    def build_criterion(self, args): # TODO
-
+    
     def load_dataset(
         self, split: str, epoch=1, combine=False, **kwargs
     ) -> CombinedMonolingualDataset:
@@ -189,7 +213,7 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
         data_path = paths[(epoch - 1) % len(paths)]
         datasets = []
         for i in range(self.n_seq_type):
-          split_path = os.path.join(data_path, split, str(i))
+          split_path = os.path.join(data_path, str(i), split)
 
           # each process has its own copy of the raw data (likely to be an np.memmap)
           dataset = data_utils.load_indexed_dataset(
@@ -198,28 +222,30 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
           if dataset is None:
               raise FileNotFoundError(f"Dataset not found: {split} ({split_path})")
 
-          datasets.append(dataset)
-        dataset = self.combine_dataset(datasets)
-      
-        dataset = maybe_shorten_dataset(
+          dataset = maybe_shorten_dataset(
             dataset,
             split,
             self.args.shorten_data_split_list,
             self.args.shorten_method,
             self.args.tokens_per_sample,
             self.args.seed,
-        )
-        dataset = TokenBlockDataset(
+          )
+          dataset = TokenBlockDataset(
             dataset,
             dataset.sizes,
             self.args.tokens_per_sample,
-            pad=self.dictionary.pad(),
-            eos=self.dictionary.eos(),
+            pad=self.dictionaries[0].pad(),
+            eos=self.dictionaries[0].eos(),
             break_mode=self.args.sample_break_mode,
             include_targets=True,
-            use_plasma_view=self.args.use_plasma_view,
-            split_path=split_path,
-            plasma_path=self.args.plasma_path,
+          )
+          datasets.append(dataset)
+
+        sizes = datasets[0].sizes
+        # XXX dataset = self.combine_dataset(datasets)
+        add_eos_for_other_targets = (
+            self.args.sample_break_mode is not None
+            and self.args.sample_break_mode != "none"
         )
 
         add_eos_for_other_targets = (
@@ -232,15 +258,13 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
 
         pad_to_bsz = None
         if self.args.pad_to_fixed_bsz:
-            pad_to_bsz = (
-                self.args.batch_size_valid if "valid" in split else self.args.batch_size
-            )
-
+            pad_to_bsz = self.args.batch_size_valid if 'valid' in split else self.args.batch_size
+        
         self.datasets[split] = CombinedMonolingualDataset(
-            dataset=dataset,
-            sizes=dataset.sizes,
-            src_vocab=self.dictionary,
-            tgt_vocab=self.output_dictionary,
+            dataset=datasets,
+            sizes=sizes,
+            src_vocabs=self.dictionaries,
+            tgt_vocabs=self.output_dictionaries,
             add_eos_for_other_targets=add_eos_for_other_targets,
             shuffle=True,
             targets=self.targets,
@@ -249,15 +273,24 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
             pad_to_bsz=pad_to_bsz,
         )
 
+    '''XXX
     def combine_dataset(self, datasets):
+        """Return a dataset with each field storing the list of elements 
+        from each dataset."""
         dataset = []
-        for i in range(len(datasets[0])):
-            dataset.append([[] for _ in range(len(datasets[0][0]))])
-            for j in range(len(datasets)):
-                for k in range(len(datasets[j][i]))
-                    dataset[-1][k].append(datasets[j][i][k])
+        n_examples = len(datasets[0])
+        n_fields = len(datasets[0][0])
+        dataset = [[[v] for v in ex] for ex in datasets[0]] # XXX
+        """ XXX
+        for i in range(n_examples):
+            dataset.append([[] for _ in range(n_fields)])
+            for j in range(self.n_seq_type):
+                for k in range(n_fields):
+                    dataset[-1][k].append(deepcopy(datasets[j][i][k]))
+        """
         return dataset
-
+    '''
+    
     @property
     def source_dictionary(self):
         """Return the :class:`~fairseq.data.Dictionary` for the language

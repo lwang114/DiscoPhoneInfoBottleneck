@@ -1,0 +1,5 @@
+{
+  "iq_ckpt_dir": "/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/VIB-pytorch/checkpoints/phone_discovery_librispeech_1000class_segment_cpc_iq_mlp_39clusters", 
+  "cpc_ckpt_dir": "/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/VIB-pytorch/checkpoints/phone_discovery_librispeech_imagenet_1000class_segment_cpc",
+  "ckpt_dir": "/ws/ifp-53_2/hasegawa/lwang114/spring2021/DiscoPhoneInfoBottleneck/PhonemeLM/checkpoints/phoneme_lm_librispeech"
+}

@@ -1,19 +1,25 @@
+import math
+from dataclasses import dataclass
+
 import torch
+import torch.nn.functional as F
 from fairseq import metrics, utils
-from fairseq.criterions import (
-    CrossEntropyCriterionConfig, 
-    CrossEntropyCriterion,
-    FairseqCriterion, 
-    register_criterion
-)
+from fairseq.criterions import FairseqCriterion, register_criterion
+from fairseq.dataclass import FairseqDataclass
+from .cross_entropy import CrossEntropyCriterion
+from omegaconf import II
 
 
+@dataclass
+class CrossEntropyCriterionConfig(FairseqDataclass):
+    sentence_avg: bool = II("optimization.sentence_avg")
+
+    
 @register_criterion("combined_cross_entropy", dataclass=CrossEntropyCriterionConfig)
 class CombinedCrossEntropyCriterion(FairseqCriterion):
     def __init__(self, task, sentence_avg):
         super().__init__(task)
         self.sentence_avg = sentence_avg
-        self.criterion = CrossEntropyCriterion(task, sentence_avg)
 
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
@@ -23,17 +29,16 @@ class CombinedCrossEntropyCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample["net_input"])
-        assert net_output.ndim == 3 # XXX
-        net_output_list = torch.split(net_output, 1, dim=-1)
-        losses = []
-        for out in net_output_list:
-            losses.append(
-              self.criterion.compute_loss(
-                  model, out.squeeze(-1), 
-                  sample, reduce=reduce
-              )[0]
+        assert isinstance(net_output, list)
+        loss = torch.tensor(0.0, device=net_output[0].device)
+        for i, out in enumerate(net_output):
+            #losses.append(
+            loss = loss + self.compute_loss(
+                model, out, 
+                {'target': sample['target'][:, :, i].contiguous()}, reduce=reduce
             )
-        loss = torch.cat(loss).sum()
+            #)
+        # loss = torch.stack(losses).sum()
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else sample["ntokens"]
         )
@@ -45,6 +50,19 @@ class CombinedCrossEntropyCriterion(FairseqCriterion):
         }
         return loss, sample_size, logging_output
 
+    def compute_loss(self, model, net_output, sample, reduce=True):
+        lprobs = model.get_normalized_probs(net_output, log_probs=True)
+        lprobs = lprobs.view(-1, lprobs.size(-1))
+        target = sample["target"].view(-1)
+        
+        loss = F.nll_loss(
+            lprobs,
+            target,
+            ignore_index=self.padding_idx,
+            reduction="sum" if reduce else "none",
+        )
+        return loss
+    
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
         """Aggregate logging outputs from data parallel training."""

@@ -1,15 +1,23 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from fairseq.models import (
+    register_model,
+    register_model_architecture,
+    FairseqLanguageModel,
+    BaseFairseqModel,
+)
 from .lstm_lm import LSTMLanguageModel
+from .lstm import LSTMDecoder
 
 
 DEFAULT_MAX_TARGET_POSITIONS = 1e5
 
 
 @register_model("combined_lstm_lm")
-class CombinedLSTMLanguageModel(BaseFairseqModel):
-
-   @staticmethod
+class CombinedLSTMLanguageModel(FairseqLanguageModel):
+   
+    @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
         # fmt: off
@@ -67,7 +75,7 @@ class CombinedLSTMLanguageModel(BaseFairseqModel):
             return utils.load_embedding(embed_dict, dictionary, embed_tokens)
 
         decoders = [LSTMDecoder(
-            dictionary=task.dictionary,
+            dictionary=task.dictionaries[i],
             embed_dim=args.decoder_embed_dim,
             hidden_size=args.decoder_hidden_size,
             out_embed_dim=args.decoder_out_embed_dim,
@@ -85,7 +93,7 @@ class CombinedLSTMLanguageModel(BaseFairseqModel):
             ),
             max_target_positions=max_target_positions,
             residuals=args.residuals,
-            ) for i in range(args.n_sequence_type)]
+        ) for i in range(args.n_sequence_type)]
             
         return cls(decoders)
 
@@ -94,12 +102,12 @@ class CombinedLSTMLanguageModel(BaseFairseqModel):
         Args:
             decoders: 
         """
-        super().__init__()
-        self.decoders = decoders
-        out_embed_dim = sum(decoder.embed_tokens.embedding.weight.size(1) for decoder in decoders)    
-        nums_embeddings = [decoder.embed_tokens.embedding.weight.size(0) for decoder in decoders]  
-        self.fc_outs = [nn.Linear(out_embed_dim, num_embeddings) for num_embeddings in nums_embeddings]
-
+        super().__init__(decoders[0])
+        self.decoders = nn.ModuleList(decoders)
+        out_embed_dim = sum(decoder.embed_tokens.weight.size(1) for decoder in decoders) 
+        nums_embeddings = [decoder.embed_tokens.weight.size(0) for decoder in decoders]
+        self.fc_outs = nn.ModuleList([nn.Linear(out_embed_dim, num_embeddings) for num_embeddings in nums_embeddings])        
+        
     def forward(self, src_tokens, src_lengths):
         """
         Args:
@@ -110,17 +118,24 @@ class CombinedLSTMLanguageModel(BaseFairseqModel):
             out:
                 - the decoder's output of shape `(batch, seq_len, vocab, n_sequence_type)`
         """
-        return self.output_layer(self.extract_features(src_tokens, src_lengths))
+        return self.output_layer(self.extract_features(src_tokens))
 
-    def extract_features(self, src_tokens, src_lengths):
+    def extract_features(self, src_tokens):
         src_tokens_list = torch.split(src_tokens, 1, dim=-1)
-        features = [decoder.extract_features(src.squeeze(-1), src_lengths=src_lengths) for decoder, src in zip(self.decoders, src_tokens_list)]
+        features = [decoder.extract_features(src.squeeze(-1))[0] for decoder, src in zip(self.decoders, src_tokens_list)]
         return torch.cat(features, dim=-1)
     
     def output_layer(self, features):
         outs = [fc_out(features) for fc_out in self.fc_outs]
-        return torch.stack(outs, dim=-1)
+        return outs
 
+    def get_normalized_probs(self, net_output, log_probs=True):
+        logits = net_output.float()
+        if log_probs:
+            return F.log_softmax(logits, dim=-1)
+        else:
+            return F.softmax(logits, dim=-1)
+        
 
 @register_model_architecture("combined_lstm_lm", "combined_lstm_lm")
 def base_architecture(args):
