@@ -81,11 +81,12 @@ def return_data(args):
                                            use_segment=args.use_segment,
                                            ds_method=args.downsample_method,
                                            debug=args.debug) 
-    elif args.dataset in ['librispeech', 'mboshi']:
+    elif args.dataset in ['librispeech', 'mboshi', 'TIMIT']:
       if args.audio_feature == 'mfcc':
         wav2vec_path = None
       else:
         wav2vec_path = args.wav2vec_path 
+
       preprocessor = LibriSpeechPreprocessor(
                        dset_dir, 80,
                        splits=args.splits,
@@ -151,13 +152,13 @@ def return_data(args):
     train_loader = DataLoader(train_data,
                               batch_size=batch_size,
                               shuffle=True,
-                              num_workers=1,
-                              drop_last=True)
+                              num_workers=4,
+                              drop_last=False)
 
     test_loader = DataLoader(test_data,
                              batch_size=batch_size,
                              shuffle=False,
-                             num_workers=1,
+                             num_workers=4,
                              drop_last=False)
 
     data_loader = dict()
