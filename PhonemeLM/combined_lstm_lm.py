@@ -108,7 +108,7 @@ class CombinedLSTMLanguageModel(FairseqLanguageModel):
         nums_embeddings = [decoder.embed_tokens.weight.size(0) for decoder in decoders]
         self.fc_outs = nn.ModuleList([nn.Linear(out_embed_dim, num_embeddings) for num_embeddings in nums_embeddings])        
         
-    def forward(self, src_tokens, src_lengths):
+    def forward(self, src_tokens, src_lengths=None):
         """
         Args:
             src_tokens: LongTensor of shape `(batch, tgt_len, n_sequence_type)` 

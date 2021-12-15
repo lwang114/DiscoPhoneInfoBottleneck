@@ -19,6 +19,7 @@ from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
 from utils.utils import cuda, str2bool
+from utils.loss_meter import JSCentroidLossMeter, KLCentroidLossMeter
 from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
@@ -89,6 +90,9 @@ class Solver(object):
     self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
+    self.phoneme_itos = None
+    if config.get('phoneme_itos', None):
+      self.phoneme_itos = json.load(open(config['phoneme_itos']))
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
     self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
@@ -127,7 +131,7 @@ class Solver(object):
     if config.downsample_method == 'resample':
       self.input_size *= 5
     self.embed_type = self.config.get('embed_type', 'proba')
-    print(f'Embedding type: {self.embed_type}') # XXX
+    print(f'Embedding type: {self.embed_type}')
 
   def get_model_config(self, config):
     self.use_segment = config.get('use_segment', False)
@@ -153,7 +157,8 @@ class Solver(object):
       self.optim = optim.Adam(trainables,
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
-  
+    self.loss_meter = KLCentroidLossMeter() #JSCentroidLossMeter()
+    
   def extract_wav2vec2(self, x, mask):
     B = x.size(0)
     T = x.size(1)
@@ -161,7 +166,7 @@ class Solver(object):
     out = out.view(B, T, out.size(-2), out.size(-1))
     out = (out * mask.unsqueeze(-1)).sum(-2) / (mask.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
     out_mask = (mask.sum(-1) > 0).float()
-    return out, out_mask 
+    return out, out_mask
 
   def train(self, save_embedding=False):
     self.set_mode('train')
@@ -255,6 +260,7 @@ class Solver(object):
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
+    self.loss_meter.reset()
     testset = self.data_loader['test'].dataset
     preprocessor = testset.preprocessor
 
@@ -277,7 +283,7 @@ class Solver(object):
 
     with torch.no_grad():
       B = 0
-      for b_idx, batch in enumerate(self.data_loader['test']):        
+      for b_idx, batch in tqdm(enumerate(self.data_loader['test'])):        
         if b_idx > 2 and self.debug:
           break
         audios = batch[0]
@@ -340,9 +346,12 @@ class Solver(object):
           pred_phone_label = phone_indices[idx]
           if self.use_segment:
             pred_phone_label = testset.unsegment(phone_indices[idx] + 1, segments).long()
+          
+          embed = F.softmax(word_logits[idx, :len(segments)], dim=-1)
+          self.loss_meter.update(embed, quantized[idx, :len(segments)], segments) 
           if save_embedding and global_idx < 1000:
             embed_id = f'{audio_id}_{global_idx}'
-            embeds[embed_id] = F.softmax(word_logits[idx, :len(segments)], dim=-1).detach().cpu().numpy()
+            embeds[embed_id] = embed.cpu().numpy()
             embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
                                       'word_text': [word_labels[idx].detach().cpu().numpy().tolist()]*len(segments)}
 
@@ -362,8 +371,8 @@ class Solver(object):
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
           pred_word_labels_quantized.append(pred_word_label_quantized)
-          pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
-          pred_word_name_quantized = preprocessor.to_word_text([pred_word_label_quantized])[0]
+          pred_word_name = '' # XXX preprocessor.to_word_text([pred_word_label])[0]
+          pred_word_name_quantized = '' # XXX preprocessor.to_word_text([pred_word_label_quantized])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
@@ -376,6 +385,17 @@ class Solver(object):
         json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
 
       avg_loss = total_loss / total_step
+      label_counts, kl_losses = self.loss_meter.loss()
+      if self.phoneme_itos is not None:
+        label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
+      info = f'Label counts: {label_counts}\n'\
+             f'Average KL diveregences: {kl_losses}'  
+      print(info)
+      # XXX np.savez(embed_file, **embeds) 
+      json.dump({'label_counts': label_counts,
+                 'kl_losses': kl_losses}, 
+                open(self.ckpt_dir / f'{self.dataset_name}_quantized_kl_losses_{self.config.seed}.json', 'w'), indent=2)
+ 
       # Compute word accuracy and word token F1
       print('[TEST RESULT]')
       word_acc = compute_accuracy(gold_word_labels, pred_word_labels)
@@ -421,6 +441,7 @@ class Solver(object):
  
   def test_out_of_sample(self, save_embedding=False):
     self.set_mode('eval')
+    self.loss_meter.reset()
     test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
@@ -440,7 +461,7 @@ class Solver(object):
 
     phone_f = open(phone_file, 'w')
     with torch.no_grad():
-      for b_idx, batch in enumerate(test_loader):
+      for b_idx, batch in tqdm(enumerate(test_loader)):
         audios = batch[0]
         input_mask = batch[3]
         
@@ -455,18 +476,12 @@ class Solver(object):
           global_idx = b_idx * batch_size + idx
           audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
           audio_id = os.path.basename(audio_path).split('.')[0]
+          embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
+          self.loss_meter.update(embedding, quantized_word_proba[idx, :len(phonemes)], phonemes) 
+          
           if save_embedding:
-            embed_id = f'{audio_id}_{global_idx}'
-            if self.embed_type == 'proba': 
-              embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
-            elif self.embed_type == 'quantized_proba':
-              embedding = quantized_word_proba[idx, :len(phonemes)]
-            elif self.embed_type == 'continuous':
-              embedding = word_logits[idx, :len(phonemes)]
-            elif self.embed_type == 'continuous_cpc':
-              embedding = torch.cat([x[idx], word_logits[idx]], dim=-1)
-
-            embeds[embed_id] = embedding.detach().cpu().numpy()
+            embed_id = f'{audio_id}_{global_idx}' 
+            # XXX embeds[embed_id] = embedding.detach().cpu().numpy()
             embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
                                       'word_text': [NULL]*len(phonemes)}
             embedding_frame = testset.unsegment(embedding, phonemes)
@@ -489,8 +504,18 @@ class Solver(object):
       phone_f.close()
 
       # Save embeddings
+      label_counts, kl_losses = self.loss_meter.loss()
+      if self.phoneme_itos is not None:
+        label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
+      info = f'Label counts: {label_counts}\n'\
+             f'Average KL diveregences: {kl_losses}'  
+      print(info)
+      # XXX np.savez(embed_file, **embeds) 
+      json.dump({'label_counts': label_counts,
+                 'kl_losses': kl_losses}, 
+                open(self.ckpt_dir / f'{self.oos_dataset_name}_quantized_kl_losses_{self.config.seed}.json', 'w'), indent=2)
+
       if save_embedding:
-        # XXX np.savez(embed_file, **embeds)
         json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
 
     # Evaluation with token F1

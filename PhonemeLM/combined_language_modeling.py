@@ -304,3 +304,15 @@ class CombinedLanguageModelingTask(LegacyFairseqTask):
         model."""
         print('Warning: target_dictionary() is called') # XXX Need choice to select which sequence type 
         return self.output_dictionaries[0]
+
+    @property
+    def source_dictionaries(self):
+        """Return the list of :class:`~fairseq.data.Dictionary` for the language
+        model."""
+        return self.dictionaries
+
+    @property
+    def target_dictionaries(self):
+        """Return the list of :class:`~fairseq.data.Dictionary` for the language
+        model."""
+        return self.output_dictionaries
