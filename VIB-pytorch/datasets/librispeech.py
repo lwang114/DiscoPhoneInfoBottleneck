@@ -330,7 +330,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
            word_labels,\
            input_mask,\
            phone_mask,\
-           word_mask 
+           word_mask,\
+           idx 
   
   def __len__(self):
     return len(self.dataset)
