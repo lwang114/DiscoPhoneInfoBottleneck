@@ -11,7 +11,6 @@ import shutil
 import json
 import time
 import numpy as np
-import argparse
 from kaldiio import WriteHelper
 from copy import deepcopy
 from pyhocon import ConfigFactory
@@ -19,13 +18,12 @@ from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
 from utils.utils import cuda, str2bool
-from utils.loss_meter import JSCentroidLossMeter, KLCentroidLossMeter
-from model import GumbelBLSTM, GumbelMLP, InfoQuantizer
+from model import InfoQuantizer, masked_kl_div
 from datasets.datasets import return_data
-from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
+from utils.evaluate import compute_accuracy, compute_token_f1, compute_boundary_f1, compute_edit_distance
 
 EPS = 1e-10
-NULL = "###NULL###"
+BLANK = "###BLANK###"
 
 class Solver(object):
 
@@ -39,16 +37,19 @@ class Solver(object):
     self.n_layers = config.get('num_layers', 3)
     self.eps = 1e-9
     self.K = config.K
-    self.beta = config.beta # degree of compression
     self.global_iter = 0
     self.global_epoch = 0
     self.audio_feature = config.audio_feature
     self.image_feature = config.image_feature
     self.debug = config.debug
     self.dataset = config.dataset
+    
     self.ckpt_dir = Path(config.ckpt_dir)
     if not self.ckpt_dir.exists(): 
       self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(self.ckpt_dir / f'results_file_{self.config.seed}.txt', 'a') as f:
+      f.write(str(config)+'\n')
 
     self.get_feature_config(config)
     self.get_dataset_config(config)
@@ -56,7 +57,7 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster', 'test_zerospeech']: 
+    if not self.debug and (self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster', 'test_zerospeech']): 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
@@ -93,9 +94,6 @@ class Solver(object):
     self.phoneme_itos = None
     if config.get('phoneme_itos', None):
       self.phoneme_itos = json.load(open(config['phoneme_itos']))
-    self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
-    self.max_word_len = self.data_loader['train'].dataset.max_word_len
-    self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
     self.n_clusters = config.get("n_clusters", self.n_phone_class)
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
@@ -134,11 +132,9 @@ class Solver(object):
     print(f'Embedding type: {self.embed_type}')
 
   def get_model_config(self, config):
-    self.use_segment = config.get('use_segment', False)
     self.use_conv = config.get('use_conv', False) 
     self.conv_width = config.get('conv_width', 5)
-    self.use_logsoftmax = config.get('use_logsoftmax', False)
-    print(f'Use log softmax: {self.use_logsoftmax}')
+
     self.audio_net = cuda(InfoQuantizer(in_channels=self.input_size,
                                         channels=self.K,
                                         n_embeddings=self.n_clusters,
@@ -157,17 +153,7 @@ class Solver(object):
       self.optim = optim.Adam(trainables,
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
-    self.loss_meter = KLCentroidLossMeter() #JSCentroidLossMeter()
     
-  def extract_wav2vec2(self, x, mask):
-    B = x.size(0)
-    T = x.size(1)
-    out = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
-    out = out.view(B, T, out.size(-2), out.size(-1))
-    out = (out * mask.unsqueeze(-1)).sum(-2) / (mask.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
-    out_mask = (mask.sum(-1) > 0).float()
-    return out, out_mask
-
   def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
@@ -175,65 +161,76 @@ class Solver(object):
     total_step = 0.
     total_word_loss = 0.
     total_phone_loss = 0.
+    total_pair_loss = 0.
     n_merges = 0
 
     for e in range(self.epoch):
-      if e > 0 and self.debug:
+      if e > 1 and self.debug:
         break
       self.global_epoch += 1
-          
-      for idx, batch in tqdm(enumerate(self.data_loader['train'])):
+
+      progress = tqdm(total=len(self.data_loader['train']), ncols=80, desc=f'Training Epoch {e}')
+      for idx, batch in enumerate(self.data_loader['train']):
         if idx > 2 and self.debug:
           break
         self.global_iter += 1
         
-        audios = batch[0]
-        word_labels = batch[2].squeeze(-1)
-        audio_masks = batch[3]
-        data_indices = batch[-1]
+        if self.config.n_positives > 0:
+            assert(batch[0].ndim == 4)
+            audios = batch[0][:, 0]
+            pos_audios = batch[0][:, 1:]
+            spans_ids = batch[1][:, 0]
+            pos_spans_ids = batch[1][:, 1:]
+            span_masks = batch[4][:, 0]
+            pos_span_masks = batch[4][:, 1:]
+            x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
+            x_pos = torch.stack(
+                [torch.stack(
+                    [pos_audios[i, pos_id, pos_span_id] 
+                        for pos_id, pos_span_id in enumerate(pos_span_ids)]
+                ) 
+                for i, pos_span_ids in enumerate(pos_spans_ids)]
+            )
+            x_pos = cuda(x_pos, self.cuda)
+            pos_span_masks = cuda(pos_span_masks, self.cuda)
+        else:
+            audios = batch[0]
+            spans_ids = batch[1]
+            span_masks = batch[4]
+            # (batch size, segment num, feat dim)
+            x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
 
-        # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
-        x = cuda(audios, self.cuda)
+        x = cuda(x, self.cuda)
+
+        word_labels = batch[2].squeeze(-1)        
+        data_indices = batch[-1]
 
         # (batch size,)
         word_labels = cuda(word_labels, self.cuda)
         
-        # (batch size, max segment num) or (batch size, max segment num, max segment len)
-        audio_masks = cuda(audio_masks, self.cuda)
-        
-        if self.audio_feature == "wav2vec2":
-          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
-          
-        # (batch size, max segment num)
-        if audio_masks.dim() == 3:
-          segment_masks = torch.where(audio_masks.sum(-1) > 0,
-                                      torch.tensor(1., device=audio_masks.device),
-                                      torch.tensor(0., device=audio_masks.device))
-        else:
-          segment_masks = audio_masks.clone()
+        # (batch size, segment num)
+        span_masks = cuda(span_masks, self.cuda)
 
-        if self.audio_net.ds_ratio > 1:
-          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
+        # (batch size, segment num, n visual class)
+        word_logits, quantized, phone_loss = self.audio_net(x, masks=span_masks)
 
-        # (batch size, max segment num, n visual class)
-        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
-
-        # (batch size * max segment num, n visual class)
-        if self.use_logsoftmax:
-          segment_word_logits = word_logits.reshape(-1, self.n_visual_class) 
-          word_labels = word_labels.unsqueeze(-1).expand(-1, self.max_segment_num).flatten() * segment_masks.flatten()
-          word_labels = word_labels.long()
-          # (F.log_softmax(word_logits, dim=-1)\
-          # * segment_masks.unsqueeze(-1)).sum(-2)
-        else:
-          segment_word_logits = (word_logits\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-
+        # (batch size * segment num, n visual class)
+        segment_word_logits = (word_logits\
+                              * span_masks.unsqueeze(-1)).sum(-2)
         word_loss = F.cross_entropy(segment_word_logits,
-                               word_labels,
-                               ignore_index=self.ignore_index)
+                                    word_labels,
+                                    ignore_index=self.ignore_index)
+        if torch.isnan(word_loss):
+            print(f'word loss is nan for example of size {x.size()}, word_logits of size {word_logits.size()}')
+            print(torch.any(torch.isnan(x)))
         loss = phone_loss + word_loss
+        if self.config.n_positives > 0:
+            word_logits = word_logits * span_masks.unsqueeze(-1)
+            pos_word_logits, _, _ = self.audio_net(x_pos, masks=pos_span_masks)
+            pos_word_logits = pos_word_logits * pos_span_masks.unsqueeze(-1)
+            pair_loss = F.mse_loss(word_logits.unsqueeze(1), pos_word_logits)
+            loss += pair_loss
+            total_pair_loss += pair_loss.cpu().detach().numpy()
         total_phone_loss += phone_loss.cpu().detach().numpy()
         total_loss += loss.cpu().detach().numpy()
         total_step += 1.
@@ -248,31 +245,87 @@ class Solver(object):
           avg_loss = total_loss / total_step
           avg_phone_loss = total_phone_loss / total_step
           # print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})\tAvg Phone Loss:{avg_phone_loss:.2f}')
-        
-        # Refine segments
-        _, _, phone_indices = self.audio_net.encode(x, masks=input_mask)
-        B = phone_indices.size(0)
-        for idx, global_idx in enumerate(data_indices):
-          segments = train_loader.dataset.dataset[global_idx][2]
-          pred_phone_label = phone_indices[idx]
-          new_segments, n_merge = self.refine_segment(segments, pred_phone_label)
-          n_merges += n_merge
-          train_loader.dataset.dataset[global_idx][2] = deepcopy(new_segments)
-      print(f'Epoch {self.global_epoch}: {n_merges} segment merges for trainset')
-
+        progress.update(1)
+      progress.close()
       avg_loss = total_loss / total_step
       avg_phone_loss = total_phone_loss / total_step
-      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}')
+      avg_pair_loss = total_pair_loss / total_step
+      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}\tTraining Pairwise Phone Loss: {avg_pair_loss:.3f}')
 
+      # Refine segments
+      if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
+        self.train_segment('train')
+      
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
       self.test(save_embedding=save_embedding)
       if self.oos_dataset_name:
         self.test_out_of_sample(save_embedding=save_embedding)
 
-  def test(self, save_embedding=False, out_prefix='predictions'):
+  @torch.no_grad()
+  def train_segment(self, split):
+    dataset = self.data_loader[split].dataset
+    
+    segment_dir = Path(self.ckpt_dir / f'predicted_segmentations/{split}')
+    if not segment_dir.exists():
+      segment_dir.mkdir(parents=True, exist_ok=True)
+
+    progress = tqdm(total=len(self.data_loader[split]), ncols=80, desc=f'Segmenting {split} set')
+    for batch in self.data_loader[split]:
+      audios = cuda(batch[0], self.cuda)
+      audio_masks = cuda(batch[3], self.cuda)
+      word_labels = [None]*len(audios)
+      if split in ['train', 'test']:
+        word_labels = batch[2]
+      span_masks = cuda(batch[4], self.cuda)
+      phoneme_nums = batch[5]
+      segment_nums = batch[6]
+      data_indices = batch[-1]
+
+      pred_peaks = []
+      gold_peaks = []
+      word_logits, quantized, phone_indices = self.audio_net.encode(audios, masks=audio_masks)
+      for idx, global_idx in enumerate(data_indices):
+        audio_path = dataset.dataset[global_idx][0]
+        audio_id = os.path.basename(audio_path).split('.')[0]
+        new_spans = self.viterbi_segment(
+            word_logits[idx], 
+            quantized[idx],
+            audio_masks[idx],
+            phoneme_nums[idx],
+            segment_nums[idx],
+            word_label=word_labels[idx]
+        )
+        dataset.update_spans(global_idx, new_spans)
+        new_segments = dataset.span_to_segment(global_idx)
+        seed_segments = dataset.dataset[global_idx][3]
+        phonemes = dataset.dataset[global_idx][4]        
+        utt_begin = phonemes[0]['begin'] 
+        gold_peak = [round(phn['end']-utt_begin,3) for phn in phonemes]
+        gold_peak_str = ' '.join(['0']+[str(g) for g in gold_peak])
+        pred_peak = [segment['end'] for segment in new_segments]
+        pred_peak_str = ' '.join(['0']+[str(p) for p in pred_peak])
+        seed_peak_str = ' '.join([str(s['end']) for s in seed_segments])
+        with open(segment_dir / f'{audio_id}.txt', 'w') as f:
+          f.write(f'Pred: {pred_peak_str}\nGold: {gold_peak_str}\nSeed: {seed_peak_str}')
+        gold_peaks.append(gold_peak[:-1])
+        pred_peaks.append(pred_peak[:-1])
+        if self.debug:
+          print('seed_segments: ', seed_peak_str) # XXX
+          print('Gold peaks: ', gold_peak)
+          print('Pred peaks: ', pred_peak)
+      progress.update(1)
+    progress.close()
+    
+    boundary_prec, boundary_rec, boundary_f1 = compute_boundary_f1(pred_peaks, gold_peaks)
+    info = f'{split} set result\tBoundary precision: {boundary_prec*100:.2f}\tBoundary recall: {boundary_rec*100:.2f}\tBoundary F1: {boundary_f1*100:.2f}'
+    with open(self.ckpt_dir / f'results_file_{self.config.seed}.txt', 'a') as f_result:
+        f_result.write(info+'\n')
+    print(info)
+
+  @torch.no_grad()
+  def test(self, save_embedding=False, out_prefix='predictions'): 
     self.set_mode('eval')
-    self.loss_meter.reset()
     testset = self.data_loader['test'].dataset
     preprocessor = testset.preprocessor
 
@@ -286,180 +339,154 @@ class Solver(object):
     embed_labels = dict()
 
     gold_phone_file = os.path.join(testset.data_path, f'{testset.splits[0]}/{testset.splits[0]}_nonoverlap.item')
-    print('gold_phone_file: ', gold_phone_file)
-    word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word.{self.global_epoch}.readable'), 'w') 
-    phone_file = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt')
+    word_readable_f = open(self.ckpt_dir.joinpath(f'{out_prefix}_visual_word.readable'), 'w') 
+    phone_file = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.txt')
     embed_file = self.ckpt_dir.joinpath(f'{out_prefix}_embeddings.npz')
     embed_label_file = self.ckpt_dir.joinpath(f'{out_prefix}_embedding_labels.json')
+    print(f'gold_phone_file: {gold_phone_file}\npred_phone_file: {phone_file}')
     phone_f = open(phone_file, 'w')
-    n_merges = 0
-    with torch.no_grad():
-      B = 0
-      for b_idx, batch in tqdm(enumerate(self.data_loader['test'])):        
-        if b_idx > 2 and self.debug:
-          break
+    B = 0
+    progress = tqdm(total=len(self.data_loader['test']), ncols=80, desc=f'Testing on test set')
+    for b_idx, batch in enumerate(self.data_loader['test']):
+      if b_idx > 2 and self.debug:
+        break
+      audios = batch[0]
+      spans_ids = batch[1]
+      if self.config.n_positives > 0:
+        assert(batch[0].ndim == 4)
+        audios = batch[0][:, 0]
+        spans_ids = batch[1][:, 0]
+        span_masks = batch[4][:, 0]
+      else:
         audios = batch[0]
-        word_labels = batch[2].squeeze(-1)
-        audio_masks = batch[3]
-        word_masks = batch[5]
-        if b_idx == 0: 
-          B = audios.size(0)
- 
-        # (batch size, max segment num, feat dim) or (batch size, max segment num, max segment len, feat dim)
-        x = cuda(audios, self.cuda)
-
-        # (batch size,)
-        word_labels = cuda(word_labels, self.cuda)
-
-        # (batch size, max segment num) or (batch size, max segment num, max segment len)
-        audio_masks = cuda(audio_masks, self.cuda)
-
-        if self.audio_feature == "wav2vec2":
-          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
+        spans_ids = batch[1]
+        span_masks = batch[4]
+      
+      # (batch size, max segment num, feat dim)
+      x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
+      x = cuda(x, self.cuda)
           
-        # (batch size, max segment num)
-        if audio_masks.dim() == 3: 
-          segment_masks = torch.where(audio_masks.sum(-1) > 0,
-                                      torch.tensor(1., device=audio_masks.device),
-                                      torch.tensor(0., device=audio_masks.device))
-        else:
-          segment_masks = audio_masks.clone()
-             
-        if self.audio_net.ds_ratio > 1:
-          audio_masks = audio_masks[:, ::self.audio_net.ds_ratio]
-          segment_masks = segment_masks[:, ::self.audio_net.ds_ratio]
+      word_labels = batch[2].squeeze(-1)
+      data_indices = batch[-1]
+      if b_idx == 0: 
+        B = audios.size(0)
 
-        # (batch size, max segment num, n visual class)
-        word_logits, quantized, phone_loss = self.audio_net(x, masks=audio_masks)
+      # (batch size,)
+      word_labels = cuda(word_labels, self.cuda)
 
-        # segment_word_labels = word_labels.unsqueeze(-1)\
-        #                                  .expand(-1, self.max_segment_num)
-        # segment_word_labels = (segment_word_labels * segment_masks).flatten().long()
-        if self.use_logsoftmax:
-          segment_word_logits = (F.log_softmax(word_logits, dim=-1)\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-        else:
-          segment_word_logits = (word_logits\
-                                * segment_masks.unsqueeze(-1)).sum(-2)
-
-        word_loss = F.cross_entropy(segment_word_logits,
-                               word_labels,
-                               ignore_index=self.ignore_index)
-        loss = phone_loss + word_loss
-        total_loss += loss.cpu().detach().numpy()
-        total_step += 1.
+      # (batch size, max segment num) or (batch size, max segment num, max segment len)
+      span_masks = cuda(span_masks, self.cuda)
         
-        _, _, phone_indices = self.audio_net.encode(x, masks=audio_masks)
-        for idx in range(audios.size(0)):
-          global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
-          segments = testset.dataset[global_idx][-1]
-          pred_phone_label = phone_indices[idx]
-          if self.use_segment:
-            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, segments).long()
-          
-          embed = F.softmax(word_logits[idx, :len(segments)], dim=-1)
-          self.loss_meter.update(embed, quantized[idx, :len(segments)], segments) 
-          if save_embedding and global_idx < 1000:
-            embed_id = f'{audio_id}_{global_idx}'
-            embeds[embed_id] = embed.cpu().numpy()
-            embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
-                                      'word_text': [word_labels[idx].detach().cpu().numpy().tolist()]*len(segments)}
+      # (batch size, max segment num, n visual class)
+      word_logits, quantized, phone_loss = self.audio_net(x, masks=span_masks)
+      segment_word_logits = (word_logits\
+                            * span_masks.unsqueeze(-1)).sum(-2)
 
-          if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
-            us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
-            pred_phone_label = pred_phone_label.unsqueeze(-1)\
-                               .expand(-1, us_ratio).flatten()
+      word_loss = F.cross_entropy(segment_word_logits,
+                             word_labels,
+                             ignore_index=self.ignore_index)
+      loss = phone_loss + word_loss
+      total_loss += loss.cpu().detach().numpy()
+      total_step += 1.
+      
+      _, _, phone_indices = self.audio_net.encode(x, masks=span_masks)
+      for idx, global_idx in enumerate(data_indices):
+        audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
+        pred_phonemes = testset.span_to_segment(global_idx)
+        pred_phone_label = phone_indices[idx]
+        pred_phone_label = testset.unsegment(phone_indices[idx] + 1, pred_phonemes).long()
 
-          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
-          pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
-          phone_f.write(f'{audio_id} {pred_phone_names}\n')
-           
-          gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
-          pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
-          pred_word_label_quantized = quantized[idx, :len(segments)].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
-           
-          gold_word_labels.append(gold_word_label)
-          pred_word_labels.append(pred_word_label)
-          pred_word_labels_quantized.append(pred_word_label_quantized)
-          pred_word_name = '' # XXX preprocessor.to_word_text([pred_word_label])[0]
-          pred_word_name_quantized = '' # XXX preprocessor.to_word_text([pred_word_label_quantized])[0]
-          gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
-          word_readable_f.write(f'Utterance id: {audio_id}\n'
-                                f'Gold word label: {gold_word_name}\n'
-                                f'Pred word label: {pred_word_name}\n'
-                                f'Pred word label by quantizer: {pred_word_name_quantized}\n\n') 
-          
-          # Refine segments
-          new_segments, n_merge = self.refine_segment(segments, pred_phone_label)
-          n_merges += n_merge
-          testset.dataset[global_idx][-1] = deepcopy(new_segments)              
-      print(f'Epoch {self.global_epoch}: {n_merges} segment merges for testset')
+        embed = F.softmax(word_logits[idx, :len(pred_phonemes)], dim=-1)
+        if save_embedding and global_idx < 1000:
+          embed_id = f'{audio_id}_{global_idx}'
+          embeds[embed_id] = embed.cpu().numpy()
+          embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in pred_phonemes],
+                                    'word_text': [word_labels[idx].detach().cpu().numpy().tolist()]*len(pred_phonemes)}
 
-      phone_f.close()
-      word_readable_f.close()
-      if save_embedding:
-        np.savez(embed_file, **embeds)
-        json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
+        if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
+          us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
+          pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                             .expand(-1, us_ratio).flatten()
 
-      avg_loss = total_loss / total_step
-      label_counts, kl_losses = self.loss_meter.loss()
-      if self.phoneme_itos is not None:
-        label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
-      info = f'Label counts: {label_counts}\n'\
-             f'Average KL diveregences: {kl_losses}'  
-      print(info)
-      # XXX np.savez(embed_file, **embeds) 
-      json.dump({'label_counts': label_counts,
-                 'kl_losses': kl_losses}, 
-                open(self.ckpt_dir / f'{self.dataset_name}_quantized_kl_losses_{self.config.seed}.json', 'w'), indent=2)
- 
-      # Compute word accuracy and word token F1
-      print('[TEST RESULT]')
-      word_acc = compute_accuracy(gold_word_labels, pred_word_labels)
-      word_prec,\
-      word_rec,\
-      word_f1, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
-                                                   np.asarray(pred_word_labels),
-                                                   average='macro')
+        pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+        pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
+        phone_f.write(f'{audio_id} {pred_phone_names}\n')
+         
+        gold_word_label = word_labels[idx].cpu().detach().numpy().tolist()
+        pred_word_label = segment_word_logits[idx].max(-1)[1].cpu().detach().numpy().tolist()
+        pred_word_label_quantized = quantized[idx, :len(pred_phonemes)].prod(-2).max(-1)[1].cpu().detach().numpy().tolist()
+         
+        gold_word_labels.append(gold_word_label)
+        pred_word_labels.append(pred_word_label)
+        pred_word_labels_quantized.append(pred_word_label_quantized)
+        pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
+        pred_word_name_quantized = '' # XXX preprocessor.to_word_text([pred_word_label_quantized])[0]
+        gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
+        word_readable_f.write(f'Utterance id: {audio_id}\n'
+                              f'Gold word label: {gold_word_name}\n'
+                              f'Pred word label: {pred_word_name}\n'
+                              f'Pred word label by quantizer: {pred_word_name_quantized}\n\n')
+      progress.update(1)
+    progress.close()
+    phone_f.close()
+    word_readable_f.close()
+    if save_embedding:
+      np.savez(embed_file, **embeds)
+      json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
 
-      word_prec_quantized,\
-      word_rec_quantized,\
-      word_f1_quantized, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
-                                                             np.asarray(pred_word_labels_quantized),
-                                                             average='macro') 
+    avg_loss = total_loss / total_step
+    # Refine segments
+    if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
+      self.train_segment('test')
 
-      token_f1,\
-      token_prec,\
-      token_recall = compute_token_f1(phone_file,
-                                      gold_phone_file,
-                                      self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
-      info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
-             f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
-             f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
-             f'(By Quantizer) Word Precision: {word_prec_quantized:.3f}\tWord Recall: {word_rec_quantized:.3f}\tWord F1: {word_f1_quantized:.3f}\n'\
-             f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
-      print(info) 
+    # Compute word accuracy and word token F1
+    print('[TEST RESULT]')
+    word_acc = compute_accuracy(gold_word_labels, pred_word_labels)
+    word_prec,\
+    word_rec,\
+    word_f1, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
+                                                 np.asarray(pred_word_labels),
+                                                 average='macro',
+                                                 zero_division=0)
 
-      save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+    word_prec_quantized,\
+    word_rec_quantized,\
+    word_f1_quantized, _ = precision_recall_fscore_support(np.asarray(gold_word_labels),
+                                                           np.asarray(pred_word_labels_quantized),
+                                                           average='macro',
+                                                           zero_division=0) 
+
+    token_f1,\
+    token_prec,\
+    token_recall = compute_token_f1(phone_file,
+                                    gold_phone_file,
+                                    self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+    info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
+           f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
+           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}\n'\
+           f'(By Quantizer) Word Precision: {word_prec_quantized:.3f}\tWord Recall: {word_rec_quantized:.3f}\tWord F1: {word_f1_quantized:.3f}\n'\
+           f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
+    print(info) 
+
+    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+    if not self.debug:
       with open(save_path, 'a') as file:
         file.write(info)
 
-      if self.history['token_result'][-1] < token_f1:
-        self.history['token_result'] = [token_prec, token_recall, token_f1]
-        self.history['word_acc'] = word_acc
-        self.history['loss'] = avg_loss
-        self.history['iter'] = self.global_iter
-        self.history['epoch'] = self.global_epoch
-        self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
-        best_phone_file = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
-        shutil.copyfile(phone_file, best_phone_file)
+    if not self.debug and self.history['token_result'][-1] < token_f1:
+      self.history['token_result'] = [token_prec, token_recall, token_f1]
+      self.history['word_acc'] = word_acc
+      self.history['loss'] = avg_loss
+      self.history['iter'] = self.global_iter
+      self.history['epoch'] = self.global_epoch
+      self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
+      best_phone_file = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
+      shutil.copyfile(phone_file, best_phone_file)
+    self.set_mode('train') 
 
-      self.set_mode('train') 
- 
+  @torch.no_grad()
   def test_out_of_sample(self, save_embedding=False):
     self.set_mode('eval')
-    self.loss_meter.reset()
     test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
@@ -477,73 +504,62 @@ class Solver(object):
     embeds = dict()
     embed_labels = dict()
 
+    progress = tqdm(total=len(self.data_loader['test_oos']), ncols=80, desc=f'Testing on test oos set')
     phone_f = open(phone_file, 'w')
-    n_merges = 0
-    with torch.no_grad():
-      for b_idx, batch in tqdm(enumerate(test_loader)):
-        audios = batch[0]
-        input_mask = batch[3]
+    for b_idx, batch in tqdm(enumerate(test_loader)):
+      audios = batch[0]
+      spans_ids = batch[1]
+      span_masks = batch[4]
+      
+      x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
+      x = cuda(x, self.cuda)
+      span_masks = cuda(span_masks, self.cuda)
+
+      word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=span_masks) 
+      B = phone_indices.size(0)
+      for idx in range(B):
+        global_idx = b_idx * batch_size + idx
+        audio_path = test_loader.dataset.dataset[global_idx][0]
+        pred_phonemes = testset.span_to_segment(global_idx)
+        audio_id = os.path.basename(audio_path).split('.')[0]
+        embedding = F.softmax(word_logits[idx, :len(pred_phonemes)], dim=-1)
         
-        x = cuda(audios, self.cuda)
-        input_mask = cuda(input_mask, self.cuda)
-        if self.audio_feature == 'wav2vec2':
-          x, input_mask = self.extract_wav2vec2(audios, input_mask)
+        if save_embedding:
+          embed_id = f'{audio_id}_{global_idx}' 
+          # XXX embeds[embed_id] = embedding.detach().cpu().numpy()
+          embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in pred_phonemes],
+                                    'word_text': [BLANK]*len(pred_phonemes)}
+          embedding_frame = testset.unsegment(embedding, pred_phonemes)
+          embed_path = embed_zrc_dir.joinpath(f'{audio_id}.ark.gz')
+          with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
+            writer('arr_0', embedding_frame.detach().cpu().numpy())
 
-        word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=input_mask) 
-        B = phone_indices.size(0)
-        for idx in range(B):
-          global_idx = b_idx * batch_size + idx
-          audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
-          audio_id = os.path.basename(audio_path).split('.')[0]
-          embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
-          self.loss_meter.update(embedding, quantized_word_proba[idx, :len(phonemes)], phonemes) 
-          
-          if save_embedding:
-            embed_id = f'{audio_id}_{global_idx}' 
-            # XXX embeds[embed_id] = embedding.detach().cpu().numpy()
-            embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
-                                      'word_text': [NULL]*len(phonemes)}
-            embedding_frame = testset.unsegment(embedding, phonemes)
-            embed_path = embed_zrc_dir.joinpath(f'{audio_id}.ark.gz')
-            with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
-              writer('arr_0', embedding_frame.detach().cpu().numpy())
+        pred_phone_label = phone_indices[idx]
+        pred_phone_label = testset.unsegment(phone_indices[idx] + 1, pred_phonemes).long()
 
-          pred_phone_label = phone_indices[idx]
-          if self.use_segment:
-            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
+        us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
+        if us_ratio > 1:
+          pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                             .expand(-1, us_ratio).flatten()
+           
+        pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+        pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
+        phone_f.write(f'{audio_id} {pred_phone_names}\n')  
+      progress.update(1)
+    progress.close()
+    phone_f.close()
 
-          us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
-          if us_ratio > 1:
-            pred_phone_label = pred_phone_label.unsqueeze(-1)\
-                               .expand(-1, us_ratio).flatten()
-             
-          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
-          pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
-          phone_f.write(f'{audio_id} {pred_phone_names}\n')
+    # Save embeddings
+    if save_embedding:
+      json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
 
-          new_segments, n_merge = self.refine_segment(phonemes, phone_indices[idx])
-          n_merges += n_merge
-          test_loader.dataset.dataset[global_idx][-1] = deepcopy(new_segments)
-      phone_f.close()
-
-      # Save embeddings
-      label_counts, kl_losses = self.loss_meter.loss()
-      if self.phoneme_itos is not None:
-        label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
-      info = f'Label counts: {label_counts}\n'\
-             f'Average KL diveregences: {kl_losses}'  
-      print(info)
-      # XXX np.savez(embed_file, **embeds) 
-      json.dump({'label_counts': label_counts,
-                 'kl_losses': kl_losses}, 
-                open(self.ckpt_dir / f'{self.oos_dataset_name}_quantized_kl_losses_{self.config.seed}.json', 'w'), indent=2)
-      print(f'Epoch {self.global_epoch}: {n_merges} segment merges for oos testset')
-
-      if save_embedding:
-        json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
+    # Refine segments
+    if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
+      self.train_segment('test_oos')
 
     # Evaluation with token F1
     gold_phone_files = [os.path.join(testset.data_path, f'{split}/{split}_nonoverlap.item') for split in testset.splits]
+    print(f'gold_phone_files: {gold_phone_files}\npred_phone_file: {phone_file}')
     token_f1,\
     token_prec,\
     token_recall = compute_token_f1(phone_file,
@@ -559,14 +575,15 @@ class Solver(object):
       f.write(info)
     print(info)
      
-    if self.history['oos_token_result'][-1] < token_f1:
+    if not self.debug and self.history['oos_token_result'][-1] < token_f1:
       best_phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized_{self.config.seed}.txt')
       shutil.copyfile(phone_file, best_phone_file)
       self.history['oos_token_result'] = [token_prec, token_recall, token_f1]
       self.save_checkpoint(f'best_acc_oos_{self.config.seed}.tar')
     self.set_mode('train')
 
-  def test_zerospeech(self, save_embedding=False):
+  @torch.no_grad()
+  def test_zerospeech(self, save_embedding=False): # TODO
     self.set_mode('eval')
     test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
@@ -578,7 +595,7 @@ class Solver(object):
     print(f'{splits} for zerospeech task {task}')
 
     phone_file = zrc_dir / f'{task}/{splits}/quantized_outputs.txt'
-    print(phone_file) # XXX
+    print(phone_file)
     split = testset.splits[0]
    
     if not zrc_dir.exists():
@@ -587,91 +604,107 @@ class Solver(object):
     if not (zrc_dir / f'{task}/{splits}').exists():
       os.makedirs(zrc_dir / f'{task}/{splits}')
 
+    progress = tqdm(total=len(self.data_loader['test_oos']), ncols=80, desc=f'Testing on zerospeech test set')
     phone_f = open(phone_file, 'w')
-    with torch.no_grad():
-      for b_idx, batch in tqdm(enumerate(test_loader)):
-        audios = batch[0]
-        input_mask = batch[3]
-        
-        x = cuda(audios, self.cuda)
-        input_mask = cuda(input_mask, self.cuda)
+    for b_idx, batch in tqdm(enumerate(test_loader)):
+      audios = batch[0]
+      spans_ids = batch[1]
+      input_mask = batch[4]
+      x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
+      input_mask = cuda(input_mask, self.cuda)
+      x = cuda(x, self.cuda)
 
-        word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=input_mask) 
-        B = phone_indices.size(0)
-        for idx in range(B):
-          global_idx = b_idx * batch_size + idx
-          audio_path, _, phonemes = test_loader.dataset.dataset[global_idx]
-          audio_id = os.path.basename(audio_path).split('.')[0]
-          if save_embedding:
-            embed_id = f'{audio_id}_{global_idx}'
-            if self.embed_type == 'proba': 
-              embedding = F.softmax(word_logits[idx, :len(phonemes)], dim=-1)
-            elif self.embed_type == 'quantized_proba':
-              embedding = quantized_word_proba[idx, :len(phonemes)]
-            elif self.embed_type == 'continuous':
-              embedding = word_logits[idx, :len(phonemes)]
-            elif self.embed_type == 'continuous_cpc':
-              embedding = torch.cat([x[idx], word_logits[idx]], dim=-1)
+      word_logits, quantized_word_proba, phone_indices = self.audio_net.encode(x, masks=input_mask) 
+      B = phone_indices.size(0)
+      for idx in range(B):
+        global_idx = b_idx * batch_size + idx
+        audio_path = test_loader.dataset.dataset[global_idx][0]
+        pred_phonemes = test_loader.dataset.span_to_segment(global_idx)
+        audio_id = os.path.basename(audio_path).split('.')[0]
+        if save_embedding:
+          embed_id = f'{audio_id}_{global_idx}'
+          if self.embed_type == 'proba': 
+            embedding = F.softmax(word_logits[idx, :len(pred_phonemes)], dim=-1)
+          elif self.embed_type == 'quantized_proba':
+            embedding = quantized_word_proba[idx, :len(pred_phonemes)]
+          elif self.embed_type == 'continuous':
+            embedding = word_logits[idx, :len(pred_phonemes)]
+          elif self.embed_type == 'continuous_cpc':
+            embedding = torch.cat([x[idx], word_logits[idx]], dim=-1)
 
-            embedding_frame = testset.unsegment(embedding, phonemes)
-            embed_path = zrc_dir / f'{task}/{splits}/{audio_id}.ark.gz'
+          embedding_frame = testset.unsegment(embedding, pred_phonemes)
+          embed_path = zrc_dir / f'{task}/{splits}/{audio_id}.ark.gz'
 
-            with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
-              writer('arr_0', embedding_frame.detach().cpu().numpy())
+          with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
+            writer('arr_0', embedding_frame.detach().cpu().numpy())
 
-          pred_phone_label = phone_indices[idx]
-          if self.use_segment:
-            pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
+        pred_phone_label = phone_indices[idx]
+        pred_phone_label = testset.unsegment(phone_indices[idx] + 1, pred_phonemes).long()
 
-          us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
-          if us_ratio > 1:
-            pred_phone_label = pred_phone_label.unsqueeze(-1)\
-                               .expand(-1, us_ratio).flatten()
-             
-          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
-          pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
-          phone_f.write(f'{audio_id}\t{pred_phone_names}\n')
-      phone_f.close()
+        us_ratio = int(self.audio_net.ds_ratio * (self.hop_len_ms // 10))
+        if us_ratio > 1:
+          pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                             .expand(-1, us_ratio).flatten()
+           
+        pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+        pred_phone_names = ','.join([str(phn_idx) for phn_idx in pred_phone_label_list])
+        phone_f.write(f'{audio_id}\t{pred_phone_names}\n')
+      progress.update(1)
+    progress.close()
+    phone_f.close()
     self.set_mode('train') 
 
-  def refine_segment(self, segments, pred_phone_labels):
-    """Simple segmentation refinement by merging adjacent segments assigned to 
-    the same cluster. 
+  def viterbi_segment(self, word_logits, 
+                      quantized, audio_mask, 
+                      phoneme_num, segment_num, 
+                      word_label=None):
+    """Globally optimal segmentation by viterbi decoding
     
-      Args:
-          segments: list of dicts with fields
-              `phonemes`: dict with fields
-                  `begin`: float, in sec,
-                  `end`: float, in sec,
-                  `text`: str, 
-          pred_phone_labels: list of ints 
-         
-      Returns:
-          new_segments: list of dicts in the same format as segments
-          n_merge: int
+    Args :
+        word_logits : (num. of segments, num. of words) FloatTensor,
+        quantized : (num. of segments, num. of words) FloatTensor,
+        segment_mask : (num. of segments,) FloatTensor,
+        phoneme_num : int,
+        segment_num : int,
+        word_label (optional) : int,
+ 
+    Returns :
+        best_spans: list of [int, int] lists
     """
-    assert len(segments) == len(pred_phone_labels)
-    for segment, label in zip(segments, pred_phone_labels):
-      segment['text'] = str(label)
-       
-    new_segments = []
-    n_merge = 0
-    for segment, label in zip(segments, pred_phone_labels):
-      if not len(new_segments):
-        new_segments.append(deepcopy(segment))
-        continue
+    word_label = word_label.item() if word_label else word_label
+    phoneme_num = segment_num if phoneme_num > segment_num else phoneme_num  
+    I_ZY = self.mutual_information(word_logits, quantized, word_label=word_label) 
 
-      if str(label) == new_segments[-1]['text']:
-        new_segments[-1]['end'] = segment['end']
-        n_merge += 1
-      else:
-        new_segments.append(deepcopy(segment))
-        
-    if self.debug:
-      print('Old segments: ', segments)
-      print('New segments: ', new_segments) 
+    pointers = cuda(-1*torch.ones(phoneme_num+1, segment_num+1, dtype=torch.long), self.cuda)
+    scores = cuda(torch.zeros(phoneme_num+1, segment_num+1).log(), self.cuda)
+    scores[0, 0] = 0.0
+    for i in range(1, phoneme_num+1):
+      for end in range(i, segment_num+1):
+        new_scores = cuda(torch.zeros(end).log(), self.cuda)
+        for begin in range(1, end+1):
+          k = self.get_span_id(begin-1, end-1)
+          if audio_mask[k]:
+            new_scores[begin-1] = scores[i-1][begin-1] + I_ZY[k]
+        scores[i, end], pointers[i, end] = new_scores.max(-1)
       
-    return new_segments, n_merge 
+    end = segment_num
+    best_spans = []
+    for i in range(phoneme_num, 0, -1):
+      begin = pointers[i, end].data.cpu().item()
+      best_spans.append([begin, end-1])
+      end = begin
+      if end < 1 and i > 1:
+        print(f'Warning: back pointer stops at phoneme {i} > 1')
+    return best_spans[::-1]
+            
+  def mutual_information(self, word_logits, quantized, word_label=None):
+    KL = masked_kl_div(quantized, word_logits, mask=None, reduction=None) 
+    #if word_label is not None:
+    #  return word_logits[:, word_label] - KL
+    return -KL
+
+  def get_span_id(self, begin, end):
+    return self.data_loader['train'].dataset.get_span_id(begin, end)
 
   def set_mode(self, mode='train'): 
     if mode == 'train':
@@ -727,15 +760,23 @@ def main(argv):
   print(f'I am process {os.getpid()}')
   parser = argparse.ArgumentParser(description='Visual word information quantizer')
   parser.add_argument('CONFIG', type=str)
+  parser.add_argument('-s', '--setting', default='basic')
   args = parser.parse_args(argv)
 
   torch.backends.cudnn.enabled = True
   torch.backends.cudnn.benchmark = True
 
-  config = ConfigFactory.parse_file(args.CONFIG)
+  config = ConfigFactory.parse_file(args.CONFIG)[args.setting]
   if not config.dset_dir:
-    config.dset_dir = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic" 
+    config.dset_dir = '/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic' 
   
+  if config.debug:
+    ckpt_dir = 'checkpoints/debug'
+  else:
+    ckpt_dir = os.path.split(args.CONFIG)[-1].split('.')[0]
+    ckpt_dir = f'checkpoints/{ckpt_dir}_{config.model_type}_{args.setting}'
+  config['ckpt_dir'] = ckpt_dir
+  config.ckpt_dir = ckpt_dir
   word_accs = []
   token_precs = []
   token_recs = []
@@ -746,10 +787,8 @@ def main(argv):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
-
     np.set_printoptions(precision=4)
     torch.set_printoptions(precision=4)
-
     print()
     print('[CONFIGS]')
     print(config)
@@ -788,4 +827,4 @@ def main(argv):
 
 if __name__ == '__main__':
   argv = sys.argv[1:]
-  main(argv)    
+  main(argv)

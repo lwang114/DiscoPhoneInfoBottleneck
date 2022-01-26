@@ -210,7 +210,9 @@ class IQEmbeddingEMA(nn.Module):
   def forward(self, x, masks=None):
     M, D = self.embedding.size()
     x_flat = x.detach().reshape(-1, D)
-    mask_flat = masks.reshape(-1, 1)
+    mask_flat = None
+    if masks is not None:
+      mask_flat = masks.reshape(-1, 1)
 
     if self.div_type == "kl":
       divergences = masked_kl_div(self.embedding.unsqueeze(0),
@@ -224,7 +226,9 @@ class IQEmbeddingEMA(nn.Module):
                                   reduction=None)
 
     indices = torch.argmin(divergences.float(), -1)
-    encodings = F.one_hot(indices, M).float() * mask_flat
+    encodings = F.one_hot(indices, M).float()
+    if mask_flat is not None:
+      encodings = encodings * mask_flat
     quantized = F.embedding(indices, self.embedding)
     quantized = quantized.view_as(x)
     
