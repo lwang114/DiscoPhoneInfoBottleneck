@@ -19,6 +19,7 @@ from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
 from utils.utils import cuda, str2bool
 from model import InfoQuantizer, masked_kl_div
+from criterion import SegmentMutualInformationLoss 
 from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_boundary_f1, compute_edit_distance
 
@@ -32,6 +33,7 @@ class Solver(object):
 
     self.cuda = torch.cuda.is_available()
     self.epoch = config.epoch
+    self.segment_epoch = config.segment_epoch # TODO
     self.batch_size = config.batch_size
     self.lr = config.lr
     self.n_layers = config.get('num_layers', 3)
@@ -141,6 +143,10 @@ class Solver(object):
                                         z_dim=self.n_visual_class,
                                         use_conv=self.use_conv,
                                         conv_width=self.conv_width), self.cuda)
+    self.segment_criterion = SegmentMutualInformationLoss(
+      min_length=config.get('min_length', -1),
+      max_length=config.get('max_length', 40)
+    )
 
   def get_optim_config(self, config):
     trainables = [p for p in self.audio_net.parameters()]
@@ -173,7 +179,7 @@ class Solver(object):
       for idx, batch in enumerate(self.data_loader['train']):
         if idx > 2 and self.debug:
           break
-        self.global_iter += 1
+        self.global_iter += 1 
         
         if self.config.n_positives > 0:
             assert(batch[0].ndim == 4)
@@ -201,7 +207,6 @@ class Solver(object):
             x = torch.stack([audios[i, span_ids] for i, span_ids in enumerate(spans_ids)])
 
         x = cuda(x, self.cuda)
-
         word_labels = batch[2].squeeze(-1)        
         data_indices = batch[-1]
 
@@ -240,21 +245,12 @@ class Solver(object):
         self.optim.zero_grad()
         loss.backward()        
         self.optim.step()
-
-        if (self.global_iter-1) % 1000 == 0:
-          avg_loss = total_loss / total_step
-          avg_phone_loss = total_phone_loss / total_step
-          # print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})\tAvg Phone Loss:{avg_phone_loss:.2f}')
         progress.update(1)
       progress.close()
       avg_loss = total_loss / total_step
       avg_phone_loss = total_phone_loss / total_step
       avg_pair_loss = total_pair_loss / total_step
       print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}\tTraining Pairwise Phone Loss: {avg_pair_loss:.3f}')
-
-      # Refine segments
-      if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
-        self.train_segment('train')
       
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
@@ -262,8 +258,68 @@ class Solver(object):
       if self.oos_dataset_name:
         self.test_out_of_sample(save_embedding=save_embedding)
 
+  def train_segment(self):
+    self.set_mode('train')
+    preprocessor = self.data_loader['train'].dataset.preprocessor
+    total_loss = 0.
+    total_step = 0.
+
+    segment_dir = Path(self.ckpt_dir / f'predicted_segmentations/{split}')
+    for e in range(self.segment_epoch): # TODO
+      if e > 1 and self.debug:
+          break
+
+      progress = tqdm(total=len(self.data_loader['train']), ncols=80, desc=f'Segmentation Training Epoch {e}')
+      for idx, batch in enumerate(self.data_loader['train']):
+        if idx > 2 and self.debug:
+          break
+        self.global_iter += 1
+        audios = batch[0]
+        word_labels = batch[2].squeeze(-1)
+        input_masks = batch[3]
+        phoneme_nums = batch[5]
+        segment_nums = batch[6]
+        data_indices = batch[-1]
+
+        # (batch size, span num, feat dim)
+        x = cuda(x, self.cuda)
+
+        # (batch size,)
+        word_labels = cuda(word_labels, self.cuda)
+
+        # (batch size, span num)
+        input_masks = cuda(input_masks, self.cuda)
+
+        word_logits = self.audio_net.encoder(audios)
+        loss = self.segment_criterion(
+          word_logits, word_labels, 
+          input_masks, segment_nums, 
+          phoneme_nums
+        )
+        if torch.isnan(loss):
+          print(f'loss is nan; x has nan? {torch.isnan(x)}; word_logits have nan? {torch.isnan(word_logits)}')
+        elif loss == 0:
+          print(f'loss is 0; x.size() {x.size()}; word_logits.size() {word_logits.size()}')
+          continue
+
+        total_loss += loss.cpu().detach().numpy()
+        total_step += 1.
+        self.optim.zero_grad()
+        loss.backward()
+        self.optim.step() 
+        progress.update(1)
+      progress.close()
+      avg_loss = total_loss / total_step
+      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}')
+
+      if (self.global_epoch % 2) == 0:
+        self.schedule.step()
+      self.test_segment('train', use_quantized=False)
+      self.test_segment('test', use_quantized=False)
+      self.test()
+
   @torch.no_grad()
-  def train_segment(self, split):
+  def test_segment(self, split, use_quantized=False):
     dataset = self.data_loader[split].dataset
     
     segment_dir = Path(self.ckpt_dir / f'predicted_segmentations/{split}')
@@ -285,15 +341,17 @@ class Solver(object):
       pred_peaks = []
       gold_peaks = []
       word_logits, quantized, phone_indices = self.audio_net.encode(audios, masks=audio_masks)
+      if not use_quantized:
+        quantized = None
       for idx, global_idx in enumerate(data_indices):
         audio_path = dataset.dataset[global_idx][0]
         audio_id = os.path.basename(audio_path).split('.')[0]
         new_spans = self.viterbi_segment(
             word_logits[idx], 
-            quantized[idx],
             audio_masks[idx],
             phoneme_nums[idx],
             segment_nums[idx],
+            quantized=quantized[idx],
             word_label=word_labels[idx]
         )
         dataset.update_spans(global_idx, new_spans)
@@ -307,7 +365,7 @@ class Solver(object):
         pred_peak_str = ' '.join(['0']+[str(p) for p in pred_peak])
         seed_peak_str = ' '.join([str(s['end']) for s in seed_segments])
         with open(segment_dir / f'{audio_id}.txt', 'w') as f:
-          f.write(f'Pred: {pred_peak_str}\nGold: {gold_peak_str}\nSeed: {seed_peak_str}')
+          f.write(f'Predicted: {pred_peak_str}\nGold: {gold_peak_str}\nSeed: {seed_peak_str}')
         gold_peaks.append(gold_peak[:-1])
         pred_peaks.append(pred_peak[:-1])
         if self.debug:
@@ -382,9 +440,11 @@ class Solver(object):
       segment_word_logits = (word_logits\
                             * span_masks.unsqueeze(-1)).sum(-2)
 
-      word_loss = F.cross_entropy(segment_word_logits,
-                             word_labels,
-                             ignore_index=self.ignore_index)
+      word_loss = F.cross_entropy(
+        segment_word_logits,
+        word_labels,
+        ignore_index=self.ignore_index
+      )
       loss = phone_loss + word_loss
       total_loss += loss.cpu().detach().numpy()
       total_step += 1.
@@ -433,11 +493,7 @@ class Solver(object):
     if save_embedding:
       np.savez(embed_file, **embeds)
       json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
-
     avg_loss = total_loss / total_step
-    # Refine segments
-    if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
-      self.train_segment('test')
 
     # Compute word accuracy and word token F1
     print('[TEST RESULT]')
@@ -485,7 +541,7 @@ class Solver(object):
     self.set_mode('train') 
 
   @torch.no_grad()
-  def test_out_of_sample(self, save_embedding=False):
+  def test_out_of_sample(self, save_embedding=False): # TODO
     self.set_mode('eval')
     test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
@@ -555,7 +611,7 @@ class Solver(object):
 
     # Refine segments
     if (self.config.phone_label != 'groundtruth') and (self.debug or self.global_epoch >= 3):
-      self.train_segment('test_oos')
+      self.test_segment('test_oos')
 
     # Evaluation with token F1
     gold_phone_files = [os.path.join(testset.data_path, f'{split}/{split}_nonoverlap.item') for split in testset.splits]
@@ -655,25 +711,31 @@ class Solver(object):
     self.set_mode('train') 
 
   def viterbi_segment(self, word_logits, 
-                      quantized, audio_mask, 
+                      segment_mask, 
                       phoneme_num, segment_num, 
+                      quantized=None, 
                       word_label=None):
     """Globally optimal segmentation by viterbi decoding
     
     Args :
         word_logits : (num. of segments, num. of words) FloatTensor,
-        quantized : (num. of segments, num. of words) FloatTensor,
         segment_mask : (num. of segments,) FloatTensor,
         phoneme_num : int,
         segment_num : int,
+        quantized (optional) : (num. of segments, num. of words) FloatTensor,
         word_label (optional) : int,
  
     Returns :
         best_spans: list of [int, int] lists
     """
+    assert quantized is not None or word_label is not None
     word_label = word_label.item() if word_label else word_label
     phoneme_num = segment_num if phoneme_num > segment_num else phoneme_num  
-    I_ZY = self.mutual_information(word_logits, quantized, word_label=word_label) 
+    I_ZY = self.mutual_information(
+      word_logits, 
+      quantized=quantized, 
+      word_label=word_label
+    ) 
 
     pointers = cuda(-1*torch.ones(phoneme_num+1, segment_num+1, dtype=torch.long), self.cuda)
     scores = cuda(torch.zeros(phoneme_num+1, segment_num+1).log(), self.cuda)
@@ -683,7 +745,7 @@ class Solver(object):
         new_scores = cuda(torch.zeros(end).log(), self.cuda)
         for begin in range(1, end+1):
           k = self.get_span_id(begin-1, end-1)
-          if audio_mask[k]:
+          if segment_mask[k]:
             new_scores[begin-1] = scores[i-1][begin-1] + I_ZY[k]
         scores[i, end], pointers[i, end] = new_scores.max(-1)
       
@@ -697,11 +759,14 @@ class Solver(object):
         print(f'Warning: back pointer stops at phoneme {i} > 1')
     return best_spans[::-1]
             
-  def mutual_information(self, word_logits, quantized, word_label=None):
-    KL = masked_kl_div(quantized, word_logits, mask=None, reduction=None) 
-    #if word_label is not None:
-    #  return word_logits[:, word_label] - KL
-    return -KL
+  def mutual_information(self, word_logits, quantized=None, word_label=None):
+    KL = torch.zeros(word_logits.size()[:-1], device=word_logits.device)
+    log_probs = torch.zeros(word_logits.size()[:-1], device=word_logits.device)
+    if quantized is not None:
+      KL = masked_kl_div(quantized, word_logits, mask=None, reduction=None) 
+    if word_label is not None:
+      log_probs = F.log_softmax(word_logits, dim=-1)[:, word_label]
+    return log_probs - KL
 
   def get_span_id(self, begin, end):
     return self.data_loader['train'].dataset.get_span_id(begin, end)
@@ -797,6 +862,8 @@ def main(argv):
     net = Solver(config)
     save_embedding = config.get('save_embedding', False)
     if config.mode == 'train':
+      if self.config.phone_label != 'groundtruth':
+        net.train_segment()
       net.train(save_embedding=save_embedding)
     elif config.mode == 'test':
       net.test(save_embedding=save_embedding) 
