@@ -76,6 +76,27 @@ def process_wav(wav_path, sr=16000, preemph=0.97, n_fft=2048, n_mels=80, hop_len
     return logmel
 
 
+def sec_to_frame(t, feature_type='cpc'):
+    if feature_type in ["wav2vec2", "vq-wav2vec"]:
+        return int(round(t * 50, 3))
+    return int(round(t * 100, 3))
+
+
+def collate_fn_librispeech(batch):
+  audios = [t[0] for t in batch]
+  phoneme_labels = [t[1] for t in batch]
+  word_labels = [t[2] for t in batch]
+  input_masks = [t[3] for t in batch]
+  phone_masks = [t[4] for t in batch]
+  indices = [t[-1] for t in batch]
+  
+  audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True) 
+  phoneme_labels = torch.nn.utils.rnn.pad_sequence(phoneme_labels, batch_first=True)
+  word_labels = torch.nn.utils.rnn.pad_sequence(word_labels, batch_first=True)
+  input_masks = torch.nn.utils.rnn.pad_sequence(input_masks, batch_first=True)
+  phone_masks = torch.nn.utils.rnn.pad_sequence(phone_masks, batch_first=True)
+  return audios, phoneme_labels, word_labels, input_masks, phone_masks, indices 
+ 
 
 class LibriSpeechDataset(torch.utils.data.Dataset):
   
@@ -93,7 +114,6 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
       image_feature="image",
       phone_label="predicted",
       sample_rate=16000,
-      wav2vec_path=None,
       debug=False
   ):
     self.preprocessor = preprocessor
@@ -101,8 +121,6 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     self.data_path = data_path
     self.phone_label = phone_label
     self.use_segment = use_segment
-    self.max_segment_len = 10
-    self.max_segment_num = 200
    
     data = [] 
     for sp in self.splits:
@@ -140,7 +158,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     elif audio_feature == "fbank":
       self.audio_transforms = None
       self.hop_length = 10
-    elif audio_feature == "cpc":
+    elif audio_feature in ["cpc", "cpc_big"]:
       self.audio_transforms = None
       self.hop_length = 10
     elif audio_feature in ["wav2vec", "wav2vec2", "vq-wav2vec"]:
@@ -156,31 +174,25 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
     audio = [example["audio"] for example in data]
     visual_words = [example["visual_words"] for example in data]
     phonemes = [example["phonemes"] for example in data]
-    self.dataset = list(zip(audio, visual_words, phonemes))
+    true_phonemes = [example["true_phonemes"] for example in data]
+    self.dataset = [list(item) for item in zip(audio, visual_words, phonemes, true_phonemes)]
     self.audio_feature_type = audio_feature
-    if audio_feature in ["mfcc", "fbank", "cpc"]:
-      self.max_feat_len = 2048
-    else:
-      self.max_feat_len = 1024
-    self.max_phone_num = 200
-    self.max_word_num = 10
-    self.max_word_len = 100
 
   def segment(self, feat, segments,
               method="average"):
     sfeats = []
-    if self.audio_feature in ["wav2vec", "wav2vec2", "vq-wav2vec"]:
-      mask = torch.zeros((self.max_segment_num, self.max_feat_len))
+    if self.use_segment and self.audio_feature in ["wav2vec", "wav2vec2", "vq-wav2vec"]:
+        nframes = sec_to_frame(segments[-1]['end'], feature_type=self.audio_feature)
+        mask = torch.ones(nframes, feat.size(0))
     else:
-      mask = torch.zeros(self.max_segment_num)
-      mask[:len(segments)] = 1.
+        mask = torch.ones(feat.size(0))
 
     for i, s in enumerate(segments):
       begin_sec = s["begin"]
       if begin_sec < 0:
         continue
       end_sec = s["end"]
-      if self.audio_feature in ["cpc", "mfcc", "fbank", "bnf", "bnf+cpc"]:
+      if self.audio_feature in ["cpc", "cpc_big", "mfcc", "fbank", "bnf", "bnf+cpc"]:
         begin = int(round(begin_sec * 100, 3)) 
         end = int(round(end_sec * 100, 3))
         if begin >= self.max_feat_len:
@@ -198,27 +210,20 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
           end = min(max(begin+1, end), sfeat.size(0))
           t = torch.randint(begin, end, (1,)).squeeze(0)
           sfeat = sfeat[t]
-        elif method == "no-op":
-          sfeat = fix_embedding_length(sfeat, self.max_feat_len)
 
         if np.isnan(sfeat).any(): # XXX
           print('sfeat has NaN, begin, end', begin, end, sfeat)
         sfeats.append(sfeat)
       elif self.audio_feature in ["wav2vec", "wav2vec2", "vq-wav2vec"]:
-        sample_rate = 16000
-        if self.audio_feature == "wav2vec":
-          begin = int(round(begin_sec * 100, 3))
-          end = int(round(end_sec * 100, 3))
-        else:
-          begin = int(round(begin_sec * 50, 3))
-          end = int(round(end_sec * 50, 3))
-        mask[i, begin:end+1] = 1. / (end - begin + 1)
+        begin = sec_to_frame(begin_sec, self.audio_feature)
+        end = sec_to_frame(end_sec, self.audio_feature)
+        if self.use_segment:
+            mask[i, begin:end+1] = 1. / (end - begin + 1)
       else:
         raise ValueError(f"Unknown feature type: {self.audio_feature}") 
     
-    if self.audio_feature in ["cpc", "fbank", "mfcc", "bnf", "bnf+cpc"]:
+    if self.audio_feature in ["cpc", "cpc_big", "fbank", "mfcc", "bnf", "bnf+cpc"]:
       sfeat = torch.stack(sfeats)
-      sfeat = fix_embedding_length(sfeat, self.max_segment_num)
     elif self.audio_feature in ["wav2vec", "wav2vec2", "vq-wav2vec"]:
       sfeat = feat
     return sfeat, mask
@@ -226,40 +231,39 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
   def unsegment(self, sfeat, segments):
     if sfeat.ndim == 1:
       sfeat = sfeat.unsqueeze(-1)
-    
-    nframes = int(round(segments[-1]["end"] * 100, 3))
-    feat = torch.zeros((nframes, *sfeat.size()[1:]))
+    nframes = sec_to_frame(segments[-1]["end"])
+    feat = torch.zeros((nframes, *sfeat.size()[1:])) # use 10ms frames for all features
     for i, segment in enumerate(segments):
       if segment["begin"] < 0:
         continue
-      begin = int(round(segment["begin"] * 100, 3))
-      end = int(round(segment["end"] * 100, 3))
+      begin = sec_to_frame(segment["begin"]) 
+      end = sec_to_frame(segment["end"])
       if i >= sfeat.size(0):
         break
       feat[begin:end] = sfeat[i]
     return feat.squeeze(-1)
+
+  def update_segment(self, idx, new_segments):
+    self.dataset[idx][2] = None
+    self.dataset[idx][2] = [{k:v for k,v in s.items()} for s in new_segments]
 
   def load_audio(self, audio_file):
     if self.audio_feature == "mfcc":
       audio, _ = torchaudio.load(audio_file)
       inputs = self.audio_transforms(audio).squeeze(0) 
       nframes = inputs.size(-1)
-      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()      
     elif self.audio_feature == "fbank":
       inputs = process_wav(audio_file)
       inputs = torch.FloatTensor(inputs)
       nframes = inputs.size(-1)
-      inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
     elif self.audio_feature in ["wav2vec2", "vq-wav2vec", "wav2vec"]:
       audio, _ = torchaudio.load(audio_file)
       if self.audio_feature == "wav2vec":
         nframes = int(audio.size(-1) // 160)
-        inputs = fix_embedding_length(audio.t(), (self.max_feat_len+2)*160).t()
       else:
         nframes = int(audio.size(-1) // 320)
-        inputs = fix_embedding_length(audio.t(), (self.max_feat_len+1)*320).t()
       inputs = inputs.squeeze(0)
-    elif self.audio_feature == "cpc":
+    elif self.audio_feature in ["cpc", "cpc_big"]:
       if audio_file.split(".")[-1] == "txt":
         inputs = np.loadtxt(audio_file)
       else:
@@ -268,7 +272,6 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
             continue
       inputs = torch.FloatTensor(inputs)
       nframes = inputs.size(0)
-      inputs = fix_embedding_length(inputs, self.max_feat_len)
       inputs = inputs.t()
     elif self.audio_feature in ["bnf", "bnf+cpc"]:
       if audio_file.split('.')[-1] == "txt":
@@ -285,11 +288,9 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
 
       inputs = torch.FloatTensor(inputs)
       nframes = inputs.size(0)
-      inputs = fix_embedding_length(inputs, self.max_feat_len)
       inputs = inputs.t()
 
-    input_mask = torch.zeros(self.max_feat_len)
-    input_mask[:nframes] = 1.
+    input_mask = torch.ones(nframes)
     return inputs, input_mask
 
   def __getitem__(self, idx): 
@@ -301,28 +302,20 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
 
     sent = [phn["text"] for phn in phonemes]
     visual_sent = [w["text"] for w in visual_words]
+    n_phones = len(sent)
+    n_words = len(visual_sent)
+
     phoneme_labels = self.preprocessor.to_index(sent)
     word_labels = self.preprocessor.to_word_index(visual_sent)
-    phoneme_labels = fix_embedding_length(phoneme_labels,
-                                          self.max_phone_num,
-                                          padding=self.preprocessor.ignore_index)
-    word_labels = fix_embedding_length(word_labels, 
-                                       self.max_word_num,
-                                       padding=self.preprocessor.ignore_index)
-
-    phone_mask = torch.zeros(self.max_phone_num)
-    n_phones = len(sent)
-    phone_mask[:n_phones] = 1.
+    phone_mask = torch.ones(n_phones)
     
-    word_mask = torch.zeros(self.max_word_num, self.max_word_len, self.max_feat_len)
+    word_mask = torch.zeros(n_words, n_phones, audio_inputs.size(0))
     for i, w in enumerate(visual_words):
-      if i >= self.max_word_num:
-        break
-      begin_frame = int(round(w['begin']*1000/self.hop_length, 3))
-      end_frame = int(round(w['end']*1000/self.hop_length, 3))
+      begin_frame = sec_to_frame(w['begin'], feature_type=self.audio_feature) 
+      end_frame = sec_to_frame(w['end'], feature_type=self.audio_feature)
       for j, t in enumerate(range(begin_frame, end_frame+1)):
-        if (j >= self.max_word_len) or (t >= self.max_feat_len):
-          break
+        if t >= word_mask.size(-1):
+            break
         word_mask[i, j, t] = 1.
 
     return audio_inputs,\
@@ -455,7 +448,7 @@ def load_data_split(data_path, sp,
   examples = []
   absent_utt_ids = []
   for idx, line in enumerate(label_f):
-    if debug and idx > 20: # XXX
+    if debug and idx > 20:
       break
     label_dict = json.loads(line.rstrip("\n"))
     if "utterance_id" in label_dict:
@@ -465,16 +458,18 @@ def load_data_split(data_path, sp,
     visual_words = [label_dict["words"][i] for i in label_dict.get("visual_words", [])]
     
     phonemes_with_stress = [phn for w in label_dict["words"] for phn in w["phonemes"]]
-    
-    phonemes = []
-    if phone_label == "groundtruth":
-      for phn in phonemes_with_stress: # Remove stress label
+    true_phonemes = []
+    for phn in phonemes_with_stress: # Remove stress label
         if (phn["text"][0] == "+") or (phn["text"] in IGNORED_TOKENS):
           continue
       
         if not "phoneme" in phn["text"]:
           phn["text"] = re.sub(r"[0-9]", "", phn["text"])
-        phonemes.append(phn)
+        true_phonemes.append(phn)
+
+    phonemes = None
+    if phone_label == "groundtruth":
+      phonemes = deepcopy(true_phonemes)      
     elif phone_label == "multilingual": 
       phonemes = deepcopy(label_dict["predicted_segments_multilingual"])
       """
@@ -508,13 +503,13 @@ def load_data_split(data_path, sp,
         audio_path = f"{utt_id}.wav"
       else:
         audio_path = os.path.join(data_path, sp, f"{utt_id}.wav")
-    elif audio_feature == "cpc":
+    elif audio_feature in ["cpc", "cpc_big"]:
       utt_id = os.path.basename(utt_id)
       audio_file = f"{utt_id}.ark.gz"
-      audio_path = os.path.join(data_path, f"{sp}_cpc", audio_file)
+      audio_path = os.path.join(data_path, f"{sp}_{audio_feature}", audio_file)
       if not os.path.exists(audio_path):
         audio_file = f"{utt_id}.txt"
-        audio_path = os.path.join(data_path, f"{sp}_cpc_txt", audio_file)
+        audio_path = os.path.join(data_path, f"{sp}_{audio_feature}_txt", audio_file)
     elif audio_feature in ["bnf", "bnf+cpc"]:
       utt_id = os.path.basename(utt_id)
       audio_file = f"{utt_id}.txt"
@@ -529,7 +524,8 @@ def load_data_split(data_path, sp,
     if os.path.exists(audio_path):
       example = {"audio": audio_path,
                  "visual_words": visual_words,
-                 "phonemes": phonemes}
+                 "phonemes": phonemes,
+                 "true_phonemes": true_phonemes}
       examples.append(example)
     else:
       absent_utt_ids.append(utt_id)

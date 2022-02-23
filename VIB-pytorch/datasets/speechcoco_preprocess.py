@@ -2,13 +2,14 @@ from speechcoco.speechcoco import SpeechCoco
 import os
 import json
 
-def create_phone_info(data_path, out_file='mscoco_val_phone_info.json'):
+def create_phone_info(data_path, split):
   db = SpeechCoco(f'{data_path}/val2014/val_2014.sqlite3', verbose=False)
+  out_file='mscoco_{split}_phone_info.json'
 
-  segment_file = os.path.join(data_path, f"val2014/mscoco_val_word_segments.txt") # TODO Check name
+  segment_file = os.path.join(data_path, f"val2014/mscoco_{split}_word_segments.txt") # TODO Check name
   examples = []
   with open(segment_file, 'r') as segment_f,\
-       open(os.path.join(data_path, "val2014", out_file), 'w') as out_f:
+       open(os.path.join(data_path, f"{split}2014", out_file), 'w') as out_f:
     idx = 0
     for line in segment_f:
       idx += 1

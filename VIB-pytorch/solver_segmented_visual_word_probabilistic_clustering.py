@@ -9,8 +9,10 @@ import sys
 import os
 import json
 import time
+import shutil
 import numpy as np
 import argparse
+from copy import deepcopy
 from pyhocon import ConfigFactory
 from pathlib import Path
 from itertools import groupby
@@ -53,12 +55,12 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
     self.history = dict()
-    self.history['token_f1']=0.
+    self.history['token_result']=[0., 0., 0.] 
     self.history['word_acc']=0. 
     self.history['loss']=0.
     self.history['epoch']=0
@@ -72,6 +74,7 @@ class Solver(object):
     if self.oos_dataset_name:
       oos_config = deepcopy(config)
       oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['dset_dir'] = oos_config['oos_dset_dir']
       oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
                               'test': oos_config['splits']['test_oos']} 
       oos_data_loader = return_data(oos_config)
@@ -79,15 +82,22 @@ class Solver(object):
 
     self.ignore_index = config.get('ignore_index', -100)
 
-    self.n_visual_class = self.data_loader['train']\
-                          .dataset.preprocessor.num_visual_words
+    self.n_visual_class = config.get('n_visual_class', None)
+    self.n_clusters = config.get('n_clusters', None)
+    if not self.n_visual_class:
+      self.n_visual_class = self.data_loader['train']\
+                            .dataset.preprocessor.num_visual_words
+    if not self.n_clusters:
+      self.n_clusters = self.n_phone_class
+    
     self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
+
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
     self.max_word_len = self.data_loader['train'].dataset.max_word_len
     self.max_segment_num = self.data_loader['train'].dataset.max_segment_num
-    self.n_clusters = config.get("n_clusters", self.n_phone_class)
+    
     print(f'Number of visual label classes = {self.n_visual_class}')
     print(f'Number of phone classes = {self.n_phone_class}')
     print(f'Number of clusters = {self.n_clusters}')
@@ -108,6 +118,14 @@ class Solver(object):
       self.audio_feature_net = None
       self.input_size = 256
       self.hop_len_ms = 10
+    elif config.audio_feature == 'bnf':
+      self.audio_feature_net = None
+      self.input_size = 40
+      self.hop_len_ms = 10
+    elif config.audio_feature == 'bnf+cpc':
+      self.audio_feature_net = None
+      self.input_size = 296
+      self.hop_len_ms = 10
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
@@ -117,10 +135,10 @@ class Solver(object):
   def get_model_config(self, config):      
     self.audio_net = cuda(InfoQuantizer(in_channels=self.input_size,
                                         channels=self.K,
-                                        n_embeddings=self.n_clusters,
+                                        n_embeddings=44, # XXX self.n_clusters,
                                         z_dim=self.n_visual_class
                                         ), self.cuda)
-    self.use_logsoftmax = config.get('use_logsoftmax', True)
+    self.use_logsoftmax = config.get('use_logsoftmax', False)
     print(f'Use log softmax: {self.use_logsoftmax}')
     
     self.clustering_method = config.clustering_method
@@ -152,6 +170,9 @@ class Solver(object):
     total_phone_loss = 0.
         
     for e in range(self.epoch):
+      begin_time = time.time()
+      if self.debug and e > 1:
+        break
       self.global_epoch += 1
       pred_phone_labels = []
       gold_phone_labels = []
@@ -225,25 +246,29 @@ class Solver(object):
       
       avg_loss = total_loss / total_step
       avg_phone_loss = total_phone_loss / total_step
-      print(f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}')
+      info = f'Epoch {self.global_epoch}\tTraining Loss: {avg_loss:.3f}\tTraining Phone Loss: {avg_phone_loss:.3f}\tTime: {time.time()-begin_time:.2f}s'
+      print(info)
+      save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+      with open(save_path, 'a') as file:
+        file.write(info+'\n')
 
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
 
       self.test(save_embedding=save_embedding)
       if (self.global_epoch - 1) % 5 == 0:
-        self.cluster()
-        if self.oos_dataset_name:
+        if not self.oos_dataset_name:
+          self.cluster()
+        else:
           self.test_out_of_sample(save_embedding=save_embedding)
-
-        # self.test_quantized()
-
+          self.test_quantized()
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
     testset = self.data_loader['test'].dataset
     preprocessor = testset.preprocessor
 
+    begin_time = time.time()
     total_loss = 0.
     total_step = 0.
 
@@ -327,7 +352,7 @@ class Solver(object):
            
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
-          pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
+          pred_word_name = '' # XXX preprocessor.to_word_text([pred_word_label])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
@@ -344,14 +369,18 @@ class Solver(object):
                                                    np.asarray(pred_word_labels),
                                                    average='macro')
 
-      info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\n'\
-             f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
+      test_info = f'Epoch {self.global_epoch}\tLoss: {avg_loss:.4f}\tTime: {time.time()-begin_time:.2f}s'
+      info = f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
              f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}'
-      print(info) 
+      print(info)
 
       save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
       with open(save_path, 'a') as file:
         file.write(info+'\n')
+
+      save_test_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+      with open(save_test_path, 'a') as file:
+        file.write(test_info+'\n')
 
       if self.history['word_acc'] < word_acc:
         self.history['word_acc'] = word_acc
@@ -368,6 +397,7 @@ class Solver(object):
       testset = self.data_loader['test'].dataset
       preprocessor = testset.preprocessor
       save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+      save_test_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
 
       us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
       with torch.no_grad():
@@ -375,7 +405,7 @@ class Solver(object):
         utt_ids_dict = dict()
         X_dict = dict()
         segment_dict = dict()
-        for split in ['train',]:
+        for split in ['train', 'test']:
           X_dict[split] = []
           utt_ids_dict[split] = []
           segment_dict[split] = dict()
@@ -424,18 +454,18 @@ class Solver(object):
               segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
           X_dict[split] = np.asarray(X_dict[split])
         
-        X = np.concatenate([X_dict[split] for split in self.data_loader])
+        X = np.concatenate([X_dict[split] for split in ['train']])
         begin_time = time.time()
         self.clusterer.fit(X)
         info =  f'Epoch {self.global_epoch}\tClustering Time: {time.time()-begin_time:.2f} s'
         print(info)
-        with open(save_path, 'a') as file:
+        with open(save_test_path, 'a') as file:
           file.write(info+'\n')
 
         ys = self.clusterer.predict(X_dict['test'])
         utt_ids = utt_ids_dict['test']
         segments = segment_dict['test']
-        filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
+        filename = self.ckpt_dir.joinpath(f'{out_prefix}.{self.global_epoch}.txt')
         out_f = open(filename, 'w')
         for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
           y = torch.LongTensor([g[1] for g in group])
@@ -455,11 +485,14 @@ class Solver(object):
         with open(save_path, 'a') as file:
           file.write(info+'\n')
   
-        if self.history['token_f1'] < token_f1:
-          self.history['token_f1'] = token_f1
+        if self.history['token_result'][-1] < token_f1:
+          self.history['token_result'] = [token_prec, token_recall, token_f1]
           self.history['best_cluster_epoch'] = self.global_epoch
           self.history['best_cluster_iter'] = self.global_iter
           self.save_checkpoint(f'best_token_f1_{self.config.seed}.tar')
+          best_filename = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
+          shutil.copyfile(filename, best_filename)
+
         self.set_mode('train')
 
   def test_quantized(self, out_prefix='predictions'): # Compute quantized word F1 
@@ -520,7 +553,7 @@ class Solver(object):
         # (batch size, max segment num, n visual class)
         word_logits, _, phone_loss = self.audio_net(x, masks=audio_masks)
         word_probs = F.softmax(word_logits, dim=-1).detach().cpu().numpy().astype(np.float64)
-        cluster_labels = [self.clusterer.predict(word_probs[i]) for i in range(B)]
+        cluster_labels = [self.clusterer.predict(word_probs[i]) for i in range(x.size(0))]
         
         word_probs_quantized = [torch.FloatTensor(self.clusterer.cluster_centers_[labels]) for labels in cluster_labels]
         word_probs_quantized = torch.stack(word_probs_quantized).to(x.device)
@@ -542,7 +575,7 @@ class Solver(object):
            
           gold_word_labels.append(gold_word_label)
           pred_word_labels.append(pred_word_label)
-          pred_word_name = preprocessor.to_word_text([pred_word_label])[0]
+          pred_word_name = '' # XXX preprocessor.to_word_text([pred_word_label])[0]
           gold_word_name = preprocessor.to_word_text([gold_word_label])[0]
           word_readable_f.write(f'Utterance id: {audio_id}\n'
                                 f'Gold word label: {gold_word_name}\n'
@@ -557,7 +590,7 @@ class Solver(object):
     print('[TEST RESULTS AFTER CLUSTERING]')
     info = f'Epoch {self.global_epoch}\tClustering Method: {self.clustering_method}\n'\
            f'WER: {1-word_acc:.3f}\tWord Acc.: {word_acc:.3f}\n'\
-           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {ord_f1:.3f}'
+           f'Word Precision: {word_prec:.3f}\tWord Recall: {word_rec:.3f}\tWord F1: {word_f1:.3f}'
     print(info)
     save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
     with open(save_path, 'a') as file:
@@ -576,7 +609,7 @@ class Solver(object):
       utt_ids_dict = dict()
       X_dict = dict()
       segment_dict = dict()
-      for split in ['test_oos',]:
+      for split in ['train', 'test_oos',]:
         X_dict[split] = []
         utt_ids_dict[split] = []
         segment_dict[split] = dict()
@@ -625,7 +658,7 @@ class Solver(object):
             segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
         X_dict[split] = np.asarray(X_dict[split])
       
-      X = np.concatenate([X_dict[split] for split in self.data_loader])
+      X = np.concatenate([X_dict[split] for split in ['train']])
       begin_time = time.time()
       self.clusterer.fit(X)
       info =  f'Epoch {self.global_epoch}\tClustering Time: {time.time()-begin_time:.2f} s'
@@ -636,7 +669,7 @@ class Solver(object):
       ys = self.clusterer.predict(X_dict['test_oos'])
       utt_ids = utt_ids_dict['test_oos']
       segments = segment_dict['test_oos']
-      filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
+      filename = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized_{self.config.seed}.txt')
       out_f = open(filename, 'w')
       for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
         y = torch.LongTensor([g[1] for g in group])
@@ -656,8 +689,8 @@ class Solver(object):
       with open(save_path, 'a') as file:
         file.write(info+'\n')
 
-      if self.history['token_f1'] < token_f1:
-        self.history['token_f1'] = token_f1
+      if self.history['token_result'][-1] < token_f1:
+        self.history['token_result'] = [token_prec, token_recall, token_f1]
         self.history['best_cluster_epoch'] = self.global_epoch
         self.history['best_cluster_iter'] = self.global_iter
         self.save_checkpoint(f'best_token_f1_{self.config.seed}.tar')
@@ -676,8 +709,8 @@ class Solver(object):
     else:
       raise('mode error. It should be either train or eval')
 
-  def load_checkpoint(self, filename='best_acc.tar'):
-    filename = f'best_acc_{self.config.seed}.tar' 
+  def load_checkpoint(self, filename='best_token_f1.tar'):
+    filename = f'best_token_f1_{self.config.seed}.tar' 
     file_path = self.ckpt_dir.joinpath(filename)
     if file_path.is_file():
       print('=> loading checkpoint "{}"'.format(file_path))
@@ -685,7 +718,7 @@ class Solver(object):
       self.global_epoch = checkpoint['epoch']
       self.global_iter = checkpoint['iter']
       self.history = checkpoint['history']
-      self.audio_net.load_state_dict(checkpoint['model_states']['audio_net'])
+      self.audio_net.load_state_dict(checkpoint['model_states']['audio_net'], strict=False)
       print('=> loaded checkpoint "{} (iter {}, epoch {})"'.format(
                 file_path, self.global_iter, self.global_epoch))
     else:
@@ -735,6 +768,7 @@ def main(argv):
     torch.set_printoptions(precision=4)
 
     print()
+    print(f'I am process {os.getpid()}')
     print('[CONFIGS]')
     print(config)
     print()
@@ -745,10 +779,14 @@ def main(argv):
       net.train(save_embedding=save_embedding)
     elif config.mode == 'test':
       net.test(save_embedding=save_embedding) 
+    elif config.mode == 'test_oos':
+      net.test_out_of_sample(save_embedding=save_embedding)
+    elif config.mode == 'cluster':
+      net.cluster() 
     else:
       return 0
     avg_word_acc.append(net.history['word_acc'])
-    avg_token_f1.append(net.history['token_f1'])
+    avg_token_f1.append(net.history['token_result'][-1])
 
   avg_word_acc = np.asarray(avg_word_acc)
   avg_token_f1 = np.asarray(avg_token_f1)

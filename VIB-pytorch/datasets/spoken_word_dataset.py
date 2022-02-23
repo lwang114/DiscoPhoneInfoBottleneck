@@ -45,6 +45,22 @@ def fix_embedding_length(emb, L, padding=0):
     emb = emb[:L]
   return emb
 
+def collate_fn_spoken_word(batch):
+  audios = [t[0] for t in batch]
+  phone_labels = [t[1] for t in batch]
+  labels = [t[2] for t in batch]
+  input_masks = [t[3] for t in batch]
+  phone_masks = [t[4] for t in batch]
+  word_masks = [t[5] for t in batch] 
+  indices = [t[6] for t in batch]
+  
+  audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True)
+  phone_labels = torch.nn.utils.rnn.pad_sequence(phone_labels, batch_first=True)
+  labels = torch.stack(labels)
+  input_masks = torch.nn.utils.rnn.pad_sequence(input_masks, batch_first=True)
+  phone_masks = torch.nn.utils.rnn.pad_sequence(phone_masks, batch_first=True)
+  return audios, phone_labels, labels, input_masks, phone_masks, indices
+
 def embed(feat, method='average'):
   if method == 'average':
     return feat.mean(0)
@@ -71,16 +87,14 @@ class SpokenWordDataset(torch.utils.data.Dataset):
       debug=False
   ):
     self.preprocessor = preprocessor
+    if debug:
+      splits['train'] = [splits['train'][0]]
     self.splits = splits[split]
+
     self.data_path = data_path
     self.use_segment = use_segment
     self.ds_method = ds_method
     self.sample_rate = sample_rate
-    self.max_feat_len = 100
-    self.max_word_len = 100
-    self.max_phone_num = 20 
-    self.max_segment_num = 20
-    self.max_segment_len = 10
     self.debug = debug
     
     data = []
@@ -118,7 +132,8 @@ class SpokenWordDataset(torch.utils.data.Dataset):
     audio = [example["audio"] for example in data]
     text = [example["text"] for example in data]
     phonemes = [example["phonemes"] for example in data]
-    self.dataset = list(zip(audio, text, phonemes))
+    true_phonemes = [example["true_phonemes"] for example in data]
+    self.dataset = [list(item) for item in zip(audio, text, phonemes, true_phonemes)]
     self.audio_feature_type = audio_feature
 
   def load_audio(self, audio_file):
@@ -126,7 +141,7 @@ class SpokenWordDataset(torch.utils.data.Dataset):
       audio, _ = torchaudio.load(audio_file)
       inputs = self.audio_transforms(audio)
       inputs = inputs.squeeze(0)
-    elif self.audio_feature_type == "cpc":
+    elif self.audio_feature_type in ["cpc", "cpc_big"]:
       if audio_file.split('.')[-1] == "txt":
         audio = np.loadtxt(audio_file)
       else:
@@ -141,18 +156,17 @@ class SpokenWordDataset(torch.utils.data.Dataset):
         with ReadHelper(f"ark: gunzip -c {audio_file} |") as ark_f:
           for k, audio in ark_f:
             continue
-
       if self.audio_feature_type == "bnf+cpc":
         cpc_feat = np.loadtxt(audio_file.replace("bnf", "cpc"))
         feat_len = min(audio.shape[0], cpc_feat.shape[0])
         audio = np.concatenate([audio[:feat_len], cpc_feat[:feat_len]], axis=-1)
       inputs = torch.FloatTensor(audio).t()
+    elif self.audio_feature_type in ['vq-wav2vec', 'wav2vec', 'wav2vec2']:
+      audio, _ = torchaudio.load(audio_file)
+      inputs = audio.squeeze(0)
     else: Exception(f"Audio feature type {self.audio_feature_type} not supported")
 
-    nframes = inputs.size(-1)
-    input_mask = torch.zeros(self.max_feat_len)
-    input_mask[:nframes] = 1.
-    inputs = fix_embedding_length(inputs.t(), self.max_feat_len).t()
+    input_mask = torch.ones(inputs.size(0))
     return inputs, input_mask
 
   def segment(self, feat, segments, 
@@ -169,10 +183,9 @@ class SpokenWordDataset(torch.utils.data.Dataset):
     feat = feat
     sfeats = []
     if method == "no-op":
-      mask = torch.zeros((self.max_segment_num, self.max_segment_len))
+      mask = torch.zeros(len(feat), len(segments))
     else:
-      mask = torch.zeros(self.max_segment_num) 
-      mask[:len(segments)] = 1.
+      mask = torch.ones(len(segments)) 
 
     word_begin = segments[0]["begin"]
     for i, segment in enumerate(segments):
@@ -181,23 +194,22 @@ class SpokenWordDataset(torch.utils.data.Dataset):
       begin = int(round((segment["begin"]-word_begin)*100, 3))
       end = int(round((segment["end"]-word_begin)*100, 3))
       dur = max(end - begin, 1)
-      if (begin >= self.max_feat_len) or (i >= self.max_segment_num):
-        break
       if method == "sample":
         end = min(max(begin+1, end), feat.size(0)) 
         t = torch.randint(begin, end, (1,)).squeeze(0)
         segment_feat = feat[t]
       else:
-        if begin != end:
+        if begin >= feat.size(0):
+          print(f'Warning: begin idx {begin} >= feature size {feat.size(0)}')
+          segment_feat = feat[-1]
+        elif begin != end:
           segment_feat = embed(feat[begin:end], method=method)
         else:
           segment_feat = embed(feat[begin:end+1], method=method)
+      if torch.any(torch.isnan(segment_feat)):
+        print(f'Bad segment feature for feature of size {feat.size()}, begin {begin}, end {end}')
       sfeats.append(segment_feat)
-    if len(sfeats) == 0: # XXX
-      print(segments)
-     
     sfeat = torch.stack(sfeats)
-    sfeat = fix_embedding_length(sfeat, self.max_segment_num)
     return sfeat, mask
     
   def unsegment(self, sfeat, segments):
@@ -228,10 +240,15 @@ class SpokenWordDataset(torch.utils.data.Dataset):
         feat[begin:end+1] = sfeat[i]
     return feat.squeeze(-1)
 
+  def update_segment(self, idx, new_segments):
+    self.dataset[idx][2] = None
+    self.dataset[idx][2] = [{k:v for k,v in s.items()} for s in new_segments]
+
   def __getitem__(self, idx):
-    audio_file, label, phoneme_dicts = self.dataset[idx]
+    audio_file, label, phoneme_dicts, _ = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
     audio_inputs = audio_inputs.t()
+
     if self.use_segment:
       audio_inputs, input_mask = self.segment(audio_inputs, 
                                               phoneme_dicts,
@@ -239,23 +256,15 @@ class SpokenWordDataset(torch.utils.data.Dataset):
     phonemes = [phn_dict["text"] for phn_dict in phoneme_dicts]
     
     word_labels = self.preprocessor.to_word_index([label])
-
     phone_labels = self.preprocessor.to_index(phonemes)
-    phone_labels = fix_embedding_length(phone_labels,
-                                        self.max_phone_num,
-                                        padding=self.preprocessor.ignore_index) 
-
     if self.use_segment:
-      word_mask = torch.zeros((1, self.max_segment_num, self.max_segment_num))
+      word_mask = torch.zeros(1, len(phoneme_dicts), len(phoneme_dicts))
     else:
-      word_mask = torch.zeros((1, self.max_feat_len, self.max_feat_len))
+      word_mask = torch.zeros(1, len(audio_inputs), len(audio_inputs))
 
     for t in range(len(phoneme_dicts)):
-      if t >= self.max_segment_num:
-        break
       word_mask[0, t, t] = 1. 
-    phone_mask = torch.zeros(self.max_phone_num,)
-    phone_mask[:len(phonemes)] = 1.
+    phone_mask = torch.ones(len(phonemes))
 
     return audio_inputs,\
            phone_labels,\
@@ -300,9 +309,10 @@ class SpokenWordPreprocessor:
     self.use_blank = use_blank
     self.wordsep = " "
     self._prepend_wordsep = prepend_wordsep
+    if debug:
+      splits['train'] = [splits['train'][0]]
 
-    metadata_file = os.path.join(data_path, f"{dataset_name}.json")
-    
+    metadata_file = os.path.join(data_path, f"{dataset_name}.json")    
     data = []
     for split_type, spl in splits.items(): 
       if split_type == 'test_oos':
@@ -428,76 +438,73 @@ def load_data_split(dataset_name,
         continue
       
       audio_id = word["audio_id"]
-       
-
       audio_path = None
       word_id = word['word_id']
-      if audio_feature == "mfcc":
+      if audio_feature in ["mfcc", "vq-wav2vec", "wav2vec2", "wav2vec"]:
         audio_path = os.path.join(data_path, split, f"{audio_id}_{word_id}.wav")
         if not os.path.exists(audio_path):
           word_id = int(word_id)
           audio_file = f"{audio_id}_{word_id:04d}.wav"
           audio_path = os.path.join(data_path, split, audio_file)
-      elif audio_feature == "cpc":
-        audio_path = os.path.join(data_path, f"../{dataset_name}_cpc_txt/{audio_id}_{word_id}.txt")
+      elif audio_feature in ["cpc", "cpc_big"]:
+        audio_path = os.path.join(data_path, f"../{dataset_name}_{audio_feature}_txt/{audio_id}_{word_id}.txt")
         if not os.path.exists(audio_path):
-          audio_path = os.path.join(data_path, f"../{dataset_name}_cpc/{audio_id}_{word_id}.ark.gz")
+          audio_path = os.path.join(data_path, f"../{dataset_name}_{audio_feature}/{audio_id}_{word_id}.ark.gz")
         if not os.path.exists(audio_path):
           word_id = int(word_id)
           audio_file = f"{audio_id}_{word_id:04d}.txt"
-          audio_path = os.path.join(data_path, f"../{dataset_name}_cpc_txt", audio_file)
+          audio_path = os.path.join(data_path, f"../{dataset_name}_{audio_feature}_txt", audio_file)
       elif audio_feature in ["bnf", "bnf+cpc"]:
         audio_file = f"{audio_id}_{word_id}.txt"
         audio_path = os.path.join(data_path, f"../{dataset_name}_bnf_txt", audio_file)
       else: Exception(f"Audio feature type {audio_feature} not supported")
 
-      phonemes = []
+      true_phonemes = word["phonemes"]
+      if "children" in true_phonemes:
+        true_phonemes = [phn for phn in true_phonemes["children"] if phn["text"] != SIL]
+        if len(true_phonemes) == 0:
+          continue
+                 
+      for phn_idx in range(len(true_phonemes)):
+        if not "phoneme" in true_phonemes[phn_idx]["text"]:
+          true_phonemes[phn_idx]["text"] = re.sub(r"[0-9]", "", true_phonemes[phn_idx]["text"]) 
+
+      noisy = False
+      for phn in true_phonemes:
+        if phn["text"] in IGNORED_TOKENS or (phn["text"][0] == "+"):
+          noisy = True
+          break
+      if noisy:
+        continue
+
+      dur = round(true_phonemes[-1]['end'] - true_phonemes[0]['begin'], 3)
+      phonemes = None
       if phone_label == "groundtruth":
-          phonemes = word["phonemes"]
-          if "children" in phonemes:
-            phonemes = [phn for phn in phonemes["children"] if phn["text"] != SIL]
-            if len(phonemes) == 0:
-              continue
-                     
-          for phn_idx in range(len(phonemes)):
-            if not "phoneme" in phonemes[phn_idx]["text"]:
-              phonemes[phn_idx]["text"] = re.sub(r"[0-9]", "", phonemes[phn_idx]["text"]) 
-
-          noisy = False
-          for phn in phonemes:
-            if phn["text"] in IGNORED_TOKENS or (phn["text"][0] == "+"):
-              noisy = True
-              break
-
-          if noisy:
-            continue
+          phonemes = deepcopy(true_phonemes)
       elif phone_label == "multilingual":
           phonemes = [phn for phn in word["predicted_segments_multilingual"] if phn["text"] != SIL]
-          if not len(phonemes):
-            continue
-          """
-          phonemes = [{'text': BLANK,
-                       'begin': phone_info["begin"],
-                       'end': phone_info["end"]} for phone_info in word["phonemes"]["children"]]
-          for phn_idx, phn in enumerate(word["multilingual_phones"]):
-            phonemes[phn_idx]['text'] = phn 
-        
-          phonemes = [phn for phn in word["multilingual_phones"] if phn["text"] and (phn["text"][0] != "<")]
-          if len(phonemes) == 0:
-            continue
-          """
       elif phone_label == "multilingual_phones":
           phonemes = deepcopy(word["multilingual_phones"])
       elif phone_label == "predicted":
           phonemes = [phn for phn in word["predicted_segments"] if phn["text"] != SIL]
-          if not len(phonemes):
-            continue
+      elif phone_label == "predicted_wav2vec2":
+          if not "predicted_segments_wav2vec2" in word:
+              continue
+          phonemes = [phn for phn in word["predicted_segments_wav2vec2"] if phn["text"] != SIL]
       else:
           raise ValueError(f"Invalid phone label type: {phone_label}")
-      
+
+      phonemes = [phn for phn in phonemes if phn['end'] - phonemes[0]['begin'] <= dur]
+      if not len(phonemes):
+        print(f'Skip example without segments: {phonemes}')
+        continue
+
+      if phonemes[-1]['end'] - phonemes[0]['begin'] != dur:
+        phonemes[-1]['end'] = phonemes[0]['begin'] + dur 
       example = {"audio": audio_path,
                  "text": label,
-                 "phonemes": phonemes} 
+                 "phonemes": phonemes,
+                 "true_phonemes": true_phonemes} 
       examples.append(example)
     word_f.close()
   return examples

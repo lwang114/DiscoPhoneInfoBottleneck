@@ -17,11 +17,12 @@ plt.rc('ytick', labelsize=15)
 plt.rc('axes', labelsize=20)
 plt.rc('figure', titlesize=30)
 plt.rc('font', size=20)
+IGNORED_TOKENS = ["SIL", "GARBAGE", "+BREATH+", "+LAUGH+", "+NOISE+"]  
 
 def plot_tsne(feat_file, label_file, 
               ds_ratio=1, out_prefix='tsne', n_class=10):
   # Extract phoneme set, durations and phoneme labels
-  label_dicts = json.load(open(label_file))
+  label_dict = json.load(open(label_file))
   tokens = set()
   durations = []
   labels_all = []
@@ -29,6 +30,8 @@ def plot_tsne(feat_file, label_file,
   feat_npz = np.load(feat_file)
   feat_mat_all = [feat_npz[k] for i, k in\
                   enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))]
+  label_dicts = [label_dict[k] for i, k in\
+                 enumerate(sorted(feat_npz, key=lambda x:int(x.split('_')[-1])))]
   n_examples = len(feat_mat_all)
   for i in range(n_examples):
     label_dict = label_dicts[i]
@@ -47,7 +50,7 @@ def plot_tsne(feat_file, label_file,
     labels_all.extend(phone_label)
     word_labels_all.extend(word_label)
     tokens.update(phone_label)
-  tokens = [token for token in sorted(tokens) if token != '#' and token != '###UNK###' and not 'NULL' in token]
+  tokens = [token for token in sorted(tokens) if not token in IGNORED_TOKENS and (token[0] != '+')]
   
   # Load feature files 
   feat_mat_all = np.concatenate(feat_mat_all)
@@ -318,17 +321,16 @@ def plot_score_vs_compression(in_files, out_path):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('--exp_dir', '-e', type=str, required=True)
-  parser.add_argument('--data_dir', '-d', type=str, default='/ws/ifp-53_2/hasegawa/lwang114/data/mscoco/mscoco2k/')
-  parser.add_argument('--label_file', type=str, default='gold_units.json')
+  parser.add_argument('--config', '-e', type=str, required=True)
   parser.add_argument('--ds_ratio', type=int, default=1)
   parser.add_argument('--task', '-t', type=int, required=True)
   args = parser.parse_args()
-  data_dir = args.data_dir
-  exp_dir = args.exp_dir
+  config = json.load(open(args.config))
+  data_dir = config['dset_dir']
+  exp_dir = config['ckpt_dir']
 
-  feat_file = os.path.join(exp_dir, 'best_rnn_feats.npz')
-  label_file = os.path.join(data_dir, args.label_file)
+  feat_file = os.path.join(exp_dir, 'predictions_embeddings.npz')
+  label_file = os.path.join(exp_dir, 'predictions_embedding_labels.json')
   out_prefix = os.path.join(exp_dir, 'tsne')
 
   if not os.path.exists(exp_dir):

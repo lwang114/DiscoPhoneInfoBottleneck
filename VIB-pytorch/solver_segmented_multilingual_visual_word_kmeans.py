@@ -403,7 +403,7 @@ class Solver(object):
       filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
       out_f = open(filename, 'w')
       for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
-        y = torch.LongTensor([g[1] for g in group])
+        y = torch.LongTensor([g[1]+1 for g in group])
         y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
         y_str = ','.join([str(l) for l in y_unseg])
         out_f.write(f'{utt_id} {y_str}\n') 

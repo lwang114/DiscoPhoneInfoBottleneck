@@ -9,8 +9,11 @@ import sys
 import os
 import json
 import time
+import shutil
 import numpy as np
 import argparse
+from tqdm import tqdm
+from copy import deepcopy
 from pyhocon import ConfigFactory
 from pathlib import Path
 from itertools import groupby
@@ -23,6 +26,7 @@ from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
 EPS = 1e-10
+NULL = '###NULL###'
 class Solver(object):
 
   def __init__(self, config):
@@ -54,25 +58,43 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'test_oov', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'test_oos', 'cluster', 'test_zerospeech', 'cluster_zerospeech']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
     self.history = dict()
-    self.history['token_f1']=0.
+    self.history['token_result']=[0., 0., 0.]
+    self.history['oos_token_result']=[0., 0., 0.]
     self.history['word_acc']=0. 
     self.history['loss']=0.
     self.history['epoch']=0
     self.history['iter']=0
 
   def get_dataset_config(self, config):
-    self.data_loader = return_data(config)
+    traintest_config = deepcopy(config)
+    traintest_config['splits'] = {'train': traintest_config['splits']['train'],
+                                  'test': traintest_config['splits']['test']}  
+    self.data_loader = return_data(traintest_config)
     self.dataset_name = config.dataset
+    self.oos_dataset_name = config.get('oos_dataset', None)
+    if self.oos_dataset_name:
+      oos_config = deepcopy(config)
+      oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['dset_dir'] = oos_config['oos_dset_dir']
+      oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
+                              'test': oos_config['splits']['test_oos']} 
+      oos_data_loader = return_data(oos_config)
+      self.data_loader['test_oos'] = oos_data_loader['test']
     self.ignore_index = config.get('ignore_index', -100)
 
     self.n_visual_class = self.data_loader['train']\
                           .dataset.preprocessor.num_visual_words
     self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
+    if config.get('n_visual_class', None):
+      self.n_visual_class = config['n_visual_class']
+    if config.get('n_clusters', None):
+      self.n_phone_class = config['n_clusters']
+
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
@@ -98,10 +120,15 @@ class Solver(object):
       self.audio_feature_net = None
       self.input_size = 256
       self.hop_len_ms = 10
+    elif config.audio_feature == 'bnf':
+      self.audio_feature_net = None
+      self.input_size = 40
+      self.hop_len_ms = 10
     else:
       raise ValueError(f"Feature type {config.audio_feature} not supported")
 
     self.cluster_layer = config.get('cluster_layer', 'last')
+    print('Clustering layer: ', self.cluster_layer)
 
   def get_model_config(self, config):
     if config.model_type == 'blstm':
@@ -152,6 +179,8 @@ class Solver(object):
     total_word_loss = 0.
         
     for e in range(self.epoch):
+      if self.debug and e > 1:
+        break
       self.global_epoch += 1
       pred_phone_labels = []
       gold_phone_labels = []
@@ -214,7 +243,6 @@ class Solver(object):
           continue
         self.optim.zero_grad()
         loss.backward()        
-        # np.savetxt(f'decode_weight_grad_{self.config.model_type}_use_segment{self.config.use_segment}.txt', self.audio_net.decode.weight.grad.cpu().detach().numpy()) # XXX
         self.optim.step()
 
         if self.global_iter % 1000 == 0:
@@ -229,6 +257,8 @@ class Solver(object):
       self.test(save_embedding=save_embedding)
       if (self.global_epoch - 1) % 5 == 0:
         self.cluster(n_clusters=self.n_phone_class)
+      if self.oos_dataset_name:
+        self.test_out_of_sample(save_embedding=save_embedding)
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -298,7 +328,7 @@ class Solver(object):
         word_logits = word_logits.view(word_labels.size(0), -1, self.n_visual_class)
         for idx in range(audios.size(0)):
           global_idx = b_idx * B + idx
-          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0]
+          audio_id = os.path.split(testset.dataset[global_idx][0])[1].split('.')[0]
           
           if word_nums[idx] > 0:
             gold_word_label = word_labels[idx, :word_nums[idx]].cpu().detach().numpy().tolist()
@@ -308,7 +338,6 @@ class Solver(object):
             pred_word_names = preprocessor.to_word_text(pred_word_label)
             gold_word_names = preprocessor.to_word_text(gold_word_label)
             
-
             for word_idx in range(word_nums[idx]):
               pred_word_name = pred_word_names[word_idx]
               gold_word_name = gold_word_names[word_idx]
@@ -342,91 +371,273 @@ class Solver(object):
         self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
       self.set_mode('train') 
 
-  def test_out_of_sample(self, n_clusters=44, save_embedding=False):
+  def test_out_of_sample(self, n_clusters=39, save_embedding=False):
     self.set_mode('eval')
-    out_prefix = self.dataset_name
-    test_loader = self.data_loader['test']
+    out_prefix = self.oos_dataset_name
+    test_loader = self.data_loader['test_oos']
     testset = test_loader.dataset
     batch_size = test_loader.batch_size
 
-    phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized.txt')
-    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
-    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+    phone_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_outputs_quantized_{self.config.seed}.{self.global_epoch}.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.oos_dataset_name}_embedding_labels.json')
+    embeds = dict()
+    embed_labels = dict()
+    utt_ids_dict = dict()
+    X_dict = dict()
+    segment_dict = dict()
 
     phone_f = open(phone_file, 'w')
-    split = 'test'
+    for split in ['train', 'test_oos']:
+      cur_dataset = self.data_loader[split].dataset
+      with torch.no_grad():
+        X_dict[split] = []
+        utt_ids_dict[split] = []
+        segment_dict[split] = dict()
+
+        for b_idx, batch in tqdm(enumerate(self.data_loader[split])):
+          audios = batch[0]
+          input_mask = batch[3]
+          audio_lens = input_mask.sum(-1).long()
+
+          if self.audio_feature == 'wav2vec2':
+            x, input_mask = self.extract_wav2vec2(audios)
+          else:
+            x = cuda(audios, self.cuda)
+
+          if self.cluster_layer == 'last':
+            word_logits,\
+            embedding = self.audio_net(x,
+                                       masks=input_mask,
+                                       return_feat=True)
+          else:
+            embedding = x
+
+          for idx in range(audios.size(0)):
+            global_idx = b_idx * batch_size + idx
+            utt_id = os.path.basename(cur_dataset.dataset[global_idx][0]).split('.')[0]
+            segments = cur_dataset.dataset[global_idx][-1]
+            embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+            if np.isnan(embed).any() or np.isinf(embed).any():
+              print(f'NaN or inf detected for {utt_id}, audio_lens, np.isnan(embedding[idx])', audio_lens[idx], np.isnan(embedding[idx].detach().cpu().numpy()).any()) # XXX
+            X_dict[split].extend(embed.tolist())
+            utt_ids_dict[split].extend([utt_id]*embed.shape[0])
+            segment_dict[split][utt_id] = cur_dataset.dataset[global_idx][-1]
+            if save_embedding and global_idx < 1000:
+              embed_id = f'{utt_id}_{global_idx}'
+              embeds[embed_id] = deepcopy(embed)
+              embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
+                                        'word_text': [NULL]*len(segments)}
+        X_dict[split] = np.asarray(X_dict[split])
+   
+    X = X_dict['train']
+    begin_time = time.time()
+    clusterer = KMeans(n_clusters=n_clusters).fit(X)
+    print(f'KMeans training take {time.time()-begin_time}s to finish')
+    np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
+
+    begin_time = time.time()
+    ys = clusterer.predict(X_dict['test_oos'])
+    print(f'Clustering on OOS dataset takes {time.time()-begin_time}s to finish')
+    utt_ids = utt_ids_dict['test_oos']
+    segments = segment_dict['test_oos'] 
+
+    for utt_id, group in tqdm(groupby(list(zip(utt_ids, ys)), lambda x:x[0])):
+      y = torch.LongTensor([g[1]+1 for g in group])
+      y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
+      y_str = ','.join([str(l) for l in y_unseg])
+      phone_f.write(f'{utt_id} {y_str}\n') 
+    phone_f.close()
+    gold_paths = [os.path.join(os.path.join(testset.data_path, f'{split}')) for split in testset.splits]
+    token_f1, token_prec, token_recall = compute_token_f1(
+                                             phone_file,
+                                             gold_paths,
+                                             self.ckpt_dir.joinpath(f'confusion.png')) 
+    print('[OOS TEST RESULT]')
+    info = f'Out-of-Sample Dataset: {self.oos_dataset_name}\n'\
+           f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
+
+    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
+    with open(save_path, 'a') as file:
+      file.write(info)
+    print(info)
+
+    if save_embedding:
+      np.savez(embed_file, **embeds)
+      json.dump(embed_labels, open(embed_label_file, 'w'), indent=2)
+
+    if self.history['oos_token_result'][-1] < token_f1:
+      best_phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized_{self.config.seed}.txt')
+      shutil.copyfile(phone_file, best_phone_file)
+      self.history['oos_token_result'] = [token_prec, token_recall, token_f1] 
+    self.set_mode('train')
+
+  def test_zerospeech(self, n_clusters=39, save_embedding=False):
+    self.set_mode('eval')
+    out_prefix = self.oos_dataset_name
+    test_loader = self.data_loader['test_oos']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    zrc_dir = Path(self.ckpt_dir / f'outputs_zerospeech2021')
+    splits = '_'.join(testset.splits)
+    task = self.config['oos_dset_dir'].split('/')[-1]
+    print(f'{splits} for zerospeech task {task}')
+    
+    phone_file = zrc_dir / f'{task}/{splits}/quantized_outputs.txt'
+    print(phone_file)
+
+    if not (zrc_dir / f'{task}/{splits}').exists():
+      os.makedirs(zrc_dir / f'{task}/{splits}')
+      
+    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+    embeds = dict()
+    embed_labels = dict()
+    utt_ids_dict = dict()
+    X_dict = dict()
+    segment_dict = dict()
+
+    phone_f = open(phone_file, 'w')
+    for split in ['train', 'test_oos']:
+      cur_dataset = self.data_loader[split].dataset
+      with torch.no_grad():
+        X_dict[split] = []
+        utt_ids_dict[split] = []
+        segment_dict[split] = dict()
+
+        for b_idx, batch in enumerate(self.data_loader[split]):
+          audios = batch[0]
+          input_mask = batch[3]
+          audio_lens = input_mask.sum(-1).long()
+
+          if self.audio_feature == 'wav2vec2':
+            x, input_mask = self.extract_wav2vec2(audios)
+          else:
+            x = cuda(audios, self.cuda)
+
+          if self.cluster_layer == 'last':
+            word_logits,\
+            embedding = self.audio_net(x,
+                                       masks=input_mask,
+                                       return_feat=True)
+          else:
+            embedding = x
+
+          for idx in range(audios.size(0)):
+            global_idx = b_idx * batch_size + idx
+            utt_id = os.path.basename(cur_dataset.dataset[global_idx][0]).split('.')[0]
+            segments = cur_dataset.dataset[global_idx][-1]
+            embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+            if np.isnan(embed).any() or np.isinf(embed).any():
+              print(f'NaN or inf detected for {utt_id}, audio_lens, np.isnan(embedding[idx])', audio_lens[idx], np.isnan(embedding[idx].detach().cpu().numpy()).any()) # XXX
+            X_dict[split].extend(embed.tolist())
+            utt_ids_dict[split].extend([utt_id]*embed.shape[0])
+            segment_dict[split][utt_id] = cur_dataset.dataset[global_idx][-1]
+            if save_embedding and global_idx < 1000:
+              embed_id = f'{utt_id}_{global_idx}'
+              embeds[embed_id] = deepcopy(embed)
+              embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in segments],
+                                        'word_text': [NULL]*len(segments)}
+        X_dict[split] = np.asarray(X_dict[split])
+   
+    X = X_dict['train']
+    begin_time = time.time()
+    clusterer = KMeans(n_clusters=n_clusters).fit(X)
+    print(f'KMeans training take {time.time()-begin_time}s to finish')
+    np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
+
+    begin_time = time.time()
+    ys = clusterer.predict(X_dict['test_oos'])
+    print(f'Clustering on OOS dataset takes {time.time()-begin_time}s to finish')
+
+    utt_ids = utt_ids_dict['test_oos']
+    segments = segment_dict['test_oos'] 
+
+    for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
+      y = torch.LongTensor([g[1]+1 for g in group])
+      y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
+      y_str = ','.join([str(l) for l in y_unseg])
+      phone_f.write(f'{utt_id} {y_str}\n') 
+    phone_f.close()
+
+  def cluster_zerospeech(self, n_clusters=44):
+    self.set_mode('eval')
+    out_prefix = self.oos_dataset_name
+    test_loader = self.data_loader['test_oos']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    zrc_dir = Path(self.ckpt_dir / f'outputs_zerospeech2021')
+    splits = '_'.join(testset.splits)
+    task = self.config['oos_dset_dir'].split('/')[-1]
+    print(f'{splits} for zerospeech task {task}')
+    
+    phone_file = zrc_dir / f'{task}/{splits}/quantized_outputs.txt'
+    print(phone_file)
+
+    if not (zrc_dir / f'{task}/{splits}').exists():
+      os.makedirs(zrc_dir / f'{task}/{splits}')
+    
+    split = 'test_oos'
+    utt_ids_dict = {split: []}
+    X_dict = {split: []}
+    segment_dict = {split: dict()}
+
+    phone_f = open(phone_file, 'w')
     with torch.no_grad():
-      B = 0
-      utt_ids_dict = dict()
-      X_dict = dict()
-      segment_dict = dict()
-      X_dict[split] = []
-      utt_ids_dict[split] = []
-      segment_dict[split] = dict()
-      for b_idx, batch in enumerate(test_loader):
+      for b_idx, batch in enumerate(self.data_loader[split]):
         audios = batch[0]
         input_mask = batch[3]
         audio_lens = input_mask.sum(-1).long()
 
         if self.audio_feature == 'wav2vec2':
-          x = self.extract_wav2vec2(audios)
+          x, input_mask = self.extract_wav2vec2(audios)
         else:
           x = cuda(audios, self.cuda)
 
         if self.cluster_layer == 'last':
           word_logits,\
-          _, embedding = self.audio_net(x,
-                                       masks=input_mask,
-                                       return_feat=True)
+          embedding = self.audio_net(x,
+                                     masks=input_mask,
+                                     return_feat=True)
         else:
           embedding = x
 
         for idx in range(audios.size(0)):
-          global_idx = b_idx * B + idx
+          global_idx = b_idx * batch_size + idx
           utt_id = os.path.basename(testset.dataset[global_idx][0]).split('.')[0]
-          
+          segments = testset.dataset[global_idx][-1]
           embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
+          if np.isnan(embed).any() or np.isinf(embed).any():
+            print(f'NaN or inf detected for {utt_id}, audio_lens, np.isnan(embedding[idx])', audio_lens[idx], np.isnan(embedding[idx].detach().cpu().numpy()).any()) # XXX
           X_dict[split].extend(embed.tolist())
           utt_ids_dict[split].extend([utt_id]*embed.shape[0])
-          segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
+          segment_dict[split][utt_id] = testset.dataset[global_idx][-1]
       X_dict[split] = np.asarray(X_dict[split])
-   
-    X = X_dict[split]
-    begin_time = time.time()
-    clusterer = KMeans(n_clusters=n_clusters).fit(X)
-    print(f'KMeans take {time.time()-begin_time} s to finish')
-    np.save(self.ckpt_dir.joinpath('cluster_means.npy'), clusterer.cluster_centers_)
-      
-    ys = clusterer.predict(X_dict['test'])
-    utt_ids = utt_ids_dict['test']
-    segments = segment_dict['test'] 
-    filename = self.ckpt_dir.joinpath(out_prefix+'_quantized_outputs.txt')
-    out_f = open(filename, 'w')
+
+    begin_time = time.time()   
+    clusterer = KMeans(n_clusters=n_clusters).fit(X_dict[split][:100])
+    clusterer.cluster_centers_ = np.load(self.ckpt_dir / 'cluster_means.npy')
+    ys = clusterer.predict(X_dict[split])
+    print(f'Clustering on OOS dataset takes {time.time()-begin_time}s to finish')
+
+    utt_ids = utt_ids_dict[split]
+    segments = segment_dict[split] 
+
     for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
-      y = torch.LongTensor([g[1] for g in group])
+      y = torch.LongTensor([g[1]+1 for g in group])
       y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
       y_str = ','.join([str(l) for l in y_unseg])
-      out_f.write(f'{utt_id} {y_str}\n') 
-    out_f.close()
-    gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
-    token_f1, token_prec, token_recall = compute_token_f1(
-                                             filename,
-                                             gold_path,
-                                             self.ckpt_dir.joinpath(f'confusion.png'),
-                                           ) 
-    info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
-    save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
-    with open(save_path, 'a') as file:
-      file.write(info)
-
-      if self.history['token_f1'] < token_f1:
-        self.history['token_f1'] = token_f1 
-
+      phone_f.write(f'{utt_id} {y_str}\n') 
+    phone_f.close()
+         
+    
   def cluster(self,
               n_clusters=44,
               out_prefix='quantized_outputs'):
     self.set_mode('eval')
-    testset = self.data_loader['test'].dataset 
+    testset = self.data_loader['test'].dataset
 
     us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio 
     with torch.no_grad():
@@ -434,7 +645,7 @@ class Solver(object):
       utt_ids_dict = dict()
       X_dict = dict()
       segment_dict = dict()
-      for split in self.data_loader:
+      for split in ['train', 'test']:
         X_dict[split] = []
         utt_ids_dict[split] = []
         segment_dict[split] = dict()
@@ -464,7 +675,8 @@ class Solver(object):
           
           for idx in range(audios.size(0)): 
             global_idx = b_idx * B + idx
-            utt_id = os.path.basename(testset.dataset[global_idx][0]).split('.')[0]
+            utt_path = self.data_loader[split].dataset.dataset[global_idx][0]
+            utt_id = os.path.split(utt_path)[1].split('.')[0]
 
             embed = embedding[idx, :audio_lens[idx]].cpu().detach().numpy()
             X_dict[split].extend(embed.tolist())
@@ -472,7 +684,7 @@ class Solver(object):
             segment_dict[split][utt_id] = self.data_loader[split].dataset.dataset[global_idx][-1]
         X_dict[split] = np.asarray(X_dict[split])
 
-      X = np.concatenate([X_dict[split] for split in self.data_loader])
+      X = np.concatenate([X_dict[split] for split in ['train']])
       begin_time = time.time()
       clusterer = KMeans(n_clusters=n_clusters).fit(X)
       print(f'KMeans take {time.time()-begin_time} s to finish')
@@ -481,28 +693,34 @@ class Solver(object):
       ys = clusterer.predict(X_dict['test'])
       utt_ids = utt_ids_dict['test']
       segments = segment_dict['test'] 
-      filename = self.ckpt_dir.joinpath(out_prefix+'.txt')
+      filename = self.ckpt_dir.joinpath(f'{out_prefix}_phoneme.{self.global_epoch}.txt')
       out_f = open(filename, 'w')
       for utt_id, group in groupby(list(zip(utt_ids, ys)), lambda x:x[0]):
-        y = torch.LongTensor([g[1] for g in group])
+        y = torch.LongTensor([g[1]+1 for g in group])
         y_unseg = testset.unsegment(y, segments[utt_id]).long().cpu().detach().numpy().tolist()
         y_str = ','.join([str(l) for l in y_unseg])
         out_f.write(f'{utt_id} {y_str}\n') 
       out_f.close()
-      gold_path = os.path.join(os.path.join(testset.data_path, f'{testset.splits[0]}'))
+
+      gold_paths = [os.path.join(os.path.join(testset.data_path, f'{split}/{split}_nonoverlap.item')) for split in testset.splits]
+      print('Gold file: ', gold_paths) # XXX
       token_f1, token_prec, token_recall = compute_token_f1(
                                              filename,
-                                             gold_path,
+                                             gold_paths,
                                              self.ckpt_dir.joinpath(f'confusion.png'),
                                            ) 
+
       info = f'Token Precision: {token_prec:.3f}\tToken Recall: {token_recall:.3f}\tToken F1: {token_f1:.3f}\n'
       save_path = self.ckpt_dir.joinpath(f'results_file_{self.config.seed}.txt')
       with open(save_path, 'a') as file:
         file.write(info)
       print(info)
 
-      if self.history['token_f1'] < token_f1:
-        self.history['token_f1'] = token_f1
+      if self.history['token_result'][-1] < token_f1:
+        self.history['token_result'] = [token_prec, token_recall, token_f1]
+        best_filename = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
+        shutil.copyfile(filename, best_filename)
+        self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
 
 
   def set_mode(self, mode='train'): 
@@ -565,8 +783,10 @@ def main(argv):
   if not config.dset_dir:
     config.dset_dir = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic" 
   
-  avg_word_acc = []
-  avg_token_f1 = []
+  word_accs = []
+  token_precs = []
+  token_recs = []
+  token_f1s = []
   for seed in config.get('seeds', [config.seed]):
     config.seed = seed
     config['seed'] = seed
@@ -578,6 +798,7 @@ def main(argv):
     torch.set_printoptions(precision=4)
 
     print()
+    print(f'I am process {os.getpid()}')
     print('[CONFIGS]')
     print(config)
     print()
@@ -592,17 +813,32 @@ def main(argv):
       net.test_out_of_sample(n_clusters=config['n_clusters'], 
                              save_embedding=save_embedding)
     elif config.mode == 'cluster':
-      net.cluster(n_clusters=config['n_clusters']) 
+      net.cluster(n_clusters=config['n_clusters'])
+    elif config.mode == 'test_zerospeech':
+      net.test_zerospeech(n_clusters=config['n_clusters'],
+                          save_embedding=save_embedding)
+    elif config.mode == 'cluster_zerospeech':
+      net.cluster_zerospeech(n_clusters=config['n_clusters'])
     else:
       return 0
-    avg_word_acc.append(net.history['word_acc'])
-    avg_token_f1.append(net.history['token_f1'])
+    word_accs.append(net.history['word_acc'])
+    token_precs.append(net.history['token_result'][0])
+    token_recs.append(net.history['token_result'][1])
+    token_f1s.append(net.history['token_result'][2])
 
-  avg_word_acc = np.asarray(avg_word_acc)
-  avg_token_f1 = np.asarray(avg_token_f1)
-  print(f'Average Word Acc.: {np.mean(avg_word_acc)}+/-{np.std(avg_word_acc)}\n'
-        f'Average Token F1: {np.mean(avg_token_f1)}+/-{np.std(avg_token_f1)}') 
+  word_accs = np.asarray(word_accs)
+  token_precs = np.asarray(token_precs)
+  token_recs = np.asarray(token_recs)
+  token_f1s = np.asarray(token_f1s)
 
+  mean_word_acc, std_word_acc = np.mean(word_accs), np.std(word_accs)
+  mean_token_prec, std_token_prec = np.mean(token_precs), np.std(token_precs)
+  mean_token_rec, std_token_rec = np.mean(token_recs), np.std(token_recs)
+  mean_token_f1, std_token_f1 = np.mean(token_f1s), np.std(token_f1s) 
+  print(f'Average Word Acc.: {mean_word_acc:.4f}+/-{std_word_acc:.4f}\n'
+        f'Average Token Precision: {mean_token_prec:.4f}+/-{std_token_prec:.4f}\t'
+        f'Recall: {mean_token_rec:.4f}+/-{std_token_rec:.4f}\t'
+        f'F1: {mean_token_f1:.4f}+/-{std_token_f1:.4f}') 
 
 if __name__ == '__main__':
   argv = sys.argv[1:]

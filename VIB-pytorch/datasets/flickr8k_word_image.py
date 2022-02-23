@@ -77,7 +77,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     self.max_feat_len = 100
     self.max_word_len = 100
     self.max_phone_num = 50 
-    self.max_segment_num = 5 # XXX
+    self.max_segment_num = 10 # XXX
     self.max_segment_len = 10
     self.debug = debug
     
@@ -128,7 +128,7 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     text = [example["text"] for example in data]
     phonemes = [example["phonemes"] for example in data]
     feat_idxs = [example["box_idx"] for example in data]
-    self.dataset = list(zip(audio, image, text, phonemes, boxes, feat_idxs))
+    self.dataset = list(zip(audio, image, text, boxes, feat_idxs, phonemes))
 
     self.image_feature_type = image_feature 
     self.image_feats = np.load(os.path.join(data_path,
@@ -151,7 +151,6 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
         with ReadHelper(f"ark: gunzip -c {audio_file} |") as ark_f:
           for k, audio in ark_f:
             continue
-        print(audio.size()) # XXX
       inputs = torch.FloatTensor(audio).t()
     else: Exception(f"Audio feature type {self.audio_feature_type} not supported")
 
@@ -197,10 +196,10 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
 
     word_begin = segments[0]["begin"]
     for i, segment in enumerate(segments):
-      begin = int((segment["begin"]-word_begin)*100)
-      end = int((segment["end"]-word_begin)*100)
+      begin = int(round((segment["begin"]-word_begin)*100, 3))
+      end = int(round((segment["end"]-word_begin)*100, 3))
       dur = end - begin + 1
-      if (begin >= self.max_feat_len) or (i >= self.max_segment_num):
+      if (begin < 0) or (begin >= self.max_feat_len) or (i >= self.max_segment_num):
         break
       if method == "no-op":
         segment_feat = fix_embedding_length(feat[begin:end+1], self.max_segment_len)
@@ -229,15 +228,20 @@ class FlickrWordImageDataset(torch.utils.data.Dataset):
     nframes = int(dur * 100)
     feat = torch.zeros((nframes, *sfeat.size()[1:]))
     for i, segment in enumerate(segments):
-      begin = int((segment["begin"]-word_begin)*100)
-      end = int((segment["end"]-word_begin)*100)
+      if segment["begin"] < 0:
+        continue
+      begin = int(round((segment["begin"]-word_begin)*100, 3))
+      end = int(round((segment["end"]-word_begin)*100, 3))
       if i >= sfeat.size(0):
-        break
-      feat[begin:end+1] = sfeat[i]
+        break 
+      if begin != end:
+        feat[begin:end] = sfeat[i]
+      else:
+        feat[begin:end+1] = sfeat[i]
     return feat.squeeze(-1)
 
   def __getitem__(self, idx):
-    audio_file, image_file, label, phoneme_dicts, box, box_idx = self.dataset[idx]
+    audio_file, image_file, label, box, box_idx, phoneme_dicts = self.dataset[idx]
     audio_inputs, input_mask = self.load_audio(audio_file)
     audio_inputs = audio_inputs.t()
     if self.use_segment:
@@ -492,7 +496,12 @@ def load_data_split(data_path, split,
                      'begin': phone_info["begin"],
                      'end': phone_info["end"]} for phone_info in word["phonemes"]["children"]]
         for phn_idx, phn in enumerate(word["multilingual_phones"]):
-          phonemes[phn_idx]['text'] = phn 
+          if phn_idx >= len(phonemes):
+            phonemes.append({"text": phn["text"],
+                             "begin": -1,
+                             "end": phonemes[-1]['end']})
+          else:
+            phonemes[phn_idx]['text'] = phn["text"]
     else:
         raise ValueError(f"Invalid phone label type: {phone_label}")
         

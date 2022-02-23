@@ -117,6 +117,10 @@ class Solver(object):
       self.audio_feature_net = None
       self.input_size = 256
       self.hop_len_ms = 10
+    elif config.audio_feature == 'cpc_big':
+      self.audio_feature_net = None
+      self.input_size = 512
+      self.hop_len_ms = 10
     elif config.audio_feature == 'bnf':
       self.audio_feature_net = None
       self.input_size = 40
@@ -182,7 +186,7 @@ class Solver(object):
       self.global_epoch += 1
       pred_phone_labels = []
       gold_phone_labels = []
-      for idx, batch in enumerate(self.data_loader['train']):
+      for idx, batch in tqdm(enumerate(self.data_loader['train'])):
         if idx > 2 and self.debug:
           break
         self.global_iter += 1
@@ -246,7 +250,7 @@ class Solver(object):
         if (self.global_iter-1) % 1000 == 0:
           avg_loss = total_loss / total_step
           avg_phone_loss = total_phone_loss / total_step
-          print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})\tAvg Phone Loss:{avg_phone_loss:.2f}')
+          # print(f'Itr {self.global_iter:d}\tAvg Loss (Total Loss):{avg_loss:.2f} ({total_loss:.2f})\tAvg Phone Loss:{avg_phone_loss:.2f}')
       
       avg_loss = total_loss / total_step
       avg_phone_loss = total_phone_loss / total_step
@@ -388,9 +392,6 @@ class Solver(object):
       label_counts, kl_losses = self.loss_meter.loss()
       if self.phoneme_itos is not None:
         label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
-      info = f'Label counts: {label_counts}\n'\
-             f'Average KL diveregences: {kl_losses}'  
-      print(info)
       # XXX np.savez(embed_file, **embeds) 
       json.dump({'label_counts': label_counts,
                  'kl_losses': kl_losses}, 
@@ -489,7 +490,8 @@ class Solver(object):
             with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
               writer('arr_0', embedding_frame.detach().cpu().numpy())
 
-          pred_phone_label = phone_indices[idx]
+          nframes = int(round(phonemes[-1]['end'] * 100, 3))
+          pred_phone_label = phone_indices[idx, :nframes]
           if self.use_segment:
             pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
 
@@ -509,7 +511,6 @@ class Solver(object):
         label_counts = [(self.phoneme_itos[l], c) for l, c in label_counts]
       info = f'Label counts: {label_counts}\n'\
              f'Average KL diveregences: {kl_losses}'  
-      print(info)
       # XXX np.savez(embed_file, **embeds) 
       json.dump({'label_counts': label_counts,
                  'kl_losses': kl_losses}, 
@@ -550,10 +551,11 @@ class Solver(object):
     zrc_dir = Path(self.ckpt_dir / f'outputs_zerospeech2021_{self.embed_type}')
     splits = '_'.join(testset.splits)
     task = self.config['oos_dset_dir'].split('/')[-1]
+    if not task in ['phonetic', 'lexical', 'syntactic']:
+        task = '/'.join(self.config['oos_dset_dir'].split('/')[-2:])
     print(f'{splits} for zerospeech task {task}')
 
     phone_file = zrc_dir / f'{task}/{splits}/quantized_outputs.txt'
-    print(phone_file) # XXX
     split = testset.splits[0]
    
     if not zrc_dir.exists():
@@ -594,7 +596,8 @@ class Solver(object):
             with WriteHelper(f'ark:| gzip -c > {embed_path}') as writer:
               writer('arr_0', embedding_frame.detach().cpu().numpy())
 
-          pred_phone_label = phone_indices[idx]
+          nframes = int(round(phonemes[-1]['end'] * 100, 3))
+          pred_phone_label = phone_indices[idx, :nframes]
           if self.use_segment:
             pred_phone_label = testset.unsegment(phone_indices[idx] + 1, phonemes).long()
 

@@ -3,12 +3,14 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
+from copy import deepcopy
 import fairseq
 import argparse
 import sys
 import os
 import json
 import time
+import shutil
 import numpy as np
 import argparse
 from pyhocon import ConfigFactory
@@ -21,6 +23,7 @@ from datasets.datasets import return_data
 from utils.evaluate import compute_accuracy, compute_token_f1, compute_edit_distance
 
 EPS = 1e-10
+NULL = "###NULL###"
 class Solver(object):
 
   def __init__(self, config):
@@ -50,12 +53,12 @@ class Solver(object):
     self.get_optim_config(config)
 
     self.load_ckpt = config.load_ckpt
-    if self.load_ckpt or config.mode in ['test', 'cluster']: 
+    if self.load_ckpt or config.mode in ['test', 'cluster', 'test_oos']: 
       self.load_checkpoint(f'best_acc_{self.config.seed}.tar')
     
     # History
     self.history = dict()
-    self.history['token_f1']=0.
+    self.history['token_result']=[0., 0., 0.]
     self.history['word_acc']=0. 
     self.history['loss']=0.
     self.history['epoch']=0
@@ -63,11 +66,27 @@ class Solver(object):
 
   def get_dataset_config(self, config):
     self.data_loader = return_data(config)
+    self.oos_dataset_name = config.get('oos_dataset', None) 
+    if self.oos_dataset_name:
+      oos_config = deepcopy(config)
+      oos_config['dataset'] = oos_config['oos_dataset']
+      oos_config['dset_dir'] = oos_config['oos_dset_dir']
+      oos_config['splits'] = {'train': oos_config['splits']['test_oos'],
+                              'test': oos_config['splits']['test_oos']} 
+      oos_data_loader = return_data(oos_config)
+      self.data_loader['test_oos'] = oos_data_loader['test']
+    self.dataset_name = config.dataset
     self.ignore_index = config.get('ignore_index', -100)
 
-    self.n_visual_class = self.data_loader['train']\
-                          .dataset.preprocessor.num_visual_words
-    self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
+    if self.config.get('n_visual_class', None):
+      self.n_visual_class = self.config['n_visual_class']
+    else:
+      self.n_visual_class = self.data_loader['train']\
+                            .dataset.preprocessor.num_visual_words
+    if self.config.get('n_clusters', None):
+      self.n_phone_class = self.config['n_clusters']   
+    else:
+      self.n_phone_class = self.data_loader['train'].dataset.preprocessor.num_tokens
     self.visual_words = self.data_loader['train'].dataset.preprocessor.visual_words
     self.phone_set = self.data_loader['train'].dataset.preprocessor.tokens
     self.max_feat_len = self.data_loader['train'].dataset.max_feat_len
@@ -136,6 +155,15 @@ class Solver(object):
                               lr=self.lr, betas=(0.5, 0.999))
     self.scheduler = lr_scheduler.ExponentialLR(self.optim, gamma=0.97)
 
+  def extract_wav2vec2(self, x, mask):
+    B = x.size(0)
+    T = x.size(1)
+    out = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
+    out = out.view(B, T, out.size(-2), out.size(-1))
+    out = (out * mask.unsqueeze(-1)).sum(-2) / (mask.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
+    out_mask = (mask.sum(-1) > 0).float()
+    return out, out_mask 
+
   def train(self, save_embedding=False):
     self.set_mode('train')
     preprocessor = self.data_loader['train'].dataset.preprocessor
@@ -144,6 +172,8 @@ class Solver(object):
     total_word_loss = 0.
         
     for e in range(self.epoch):
+      if self.debug and e > 1:
+        break
       self.global_epoch += 1
       pred_phone_labels = []
       gold_phone_labels = []
@@ -166,15 +196,8 @@ class Solver(object):
         audio_masks = cuda(audio_masks, self.cuda)
         
         if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
-          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
-          audio_masks = torch.where(audio_masks.sum(-1) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
-          
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
+         
         # (batch size, max segment num)
         if audio_masks.dim() == 3:
           segment_masks = torch.where(audio_masks.sum(-1) > 0,
@@ -217,6 +240,8 @@ class Solver(object):
       if (self.global_epoch % 2) == 0:
         self.scheduler.step()
       self.test(save_embedding=save_embedding)
+      if self.oos_dataset_name:
+        self.test_out_of_sample(save_embedding=save_embedding)
 
   def test(self, save_embedding=False, out_prefix='predictions'):
     self.set_mode('eval')
@@ -258,14 +283,7 @@ class Solver(object):
         audio_masks = cuda(audio_masks, self.cuda)
 
         if self.audio_feature == "wav2vec2":
-          B = x.size(0)
-          T = x.size(1) 
-          x = self.audio_feature_net.feature_extractor(x.view(B*T, -1)).permute(0, 2, 1)
-          x = x.view(B, T, x.size(-2), x.size(-1))
-          x = (x * audio_masks.unsqueeze(-1)).sum(-2) / (audio_masks.sum(-1, keepdim=True) + torch.tensor(1e-10, device=x.device))
-          audio_masks = torch.where(audio_masks.sum(-1) > 0,
-                                    torch.tensor(1, device=x.device),
-                                    torch.tensor(0, device=x.device))
+          x, audio_masks = self.extract_wav2vec2(x, audio_masks)
           
         # (batch size, max segment num)
         if audio_masks.dim() == 3: 
@@ -346,14 +364,94 @@ class Solver(object):
       with open(save_path, 'a') as file:
         file.write(info)
 
-      if self.history['word_acc'] < word_acc:
-        self.history['token_f1'] = token_f1
+      if self.history['token_result'][-1] < token_f1:
+        self.history['token_result'] = [token_prec, token_recall, token_f1]
         self.history['word_acc'] = word_acc
         self.history['loss'] = avg_loss
         self.history['iter'] = self.global_iter
         self.history['epoch'] = self.global_epoch
+        best_phone_file = self.ckpt_dir.joinpath(f'outputs_quantized_{self.config.seed}.txt')
+        shutil.copyfile(phone_file, best_phone_file)
         self.save_checkpoint(f'best_acc_{self.config.seed}.tar')
       self.set_mode('train') 
+
+  def test_out_of_sample(self, save_embedding=False):
+    self.set_mode('eval')
+    test_loader = self.data_loader['test_oos']
+    testset = test_loader.dataset
+    batch_size = test_loader.batch_size
+
+    phone_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_outputs_quantized_{self.config.seed}.txt')
+    embed_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embeddings.npz')
+    embed_label_file = self.ckpt_dir.joinpath(f'{self.dataset_name}_embedding_labels.json')
+    embeds = dict()
+    embed_labels = dict()
+
+    phone_f = open(phone_file, 'w')
+    with torch.no_grad():
+      for b_idx, batch in enumerate(test_loader):
+        audios = batch[0]
+        input_mask = batch[3]
+        x = cuda(audios, self.cuda)
+        input_mask = cuda(input_mask, self.cuda)
+        if self.audio_feature == 'wav2vec2':
+          x, input_mask = self.extract_wav2vec2(audios, input_mask)
+
+        phone_logits,\
+        word_logits,\
+        _, embedding = self.audio_net(x, masks=input_mask,
+                                      return_feat=True)
+        
+        segment_word_logits = word_logits.sum(-2) # XXX word_logits.view(-1, self.n_visual_class)
+ 
+        for idx in range(audios.size(0)):
+          global_idx = b_idx * batch_size + idx
+          audio_id = os.path.splitext(os.path.split(testset.dataset[global_idx][0])[1])[0].split('.')[0]
+          if save_embedding:
+            embed_id = f'{audio_id}_{global_idx}'
+            embeds[embed_id] = F.softmax(word_logits[idx, :len(phonemes)], dim=-1).detach().cpu().numpy()
+            embed_labels[embed_id] = {'phoneme_text': [s['text'] for s in phonemes],
+                                      'word_text': [NULL]*len(phonemes)}
+
+          phone_logits = phone_logits.squeeze(1)
+          segments = testset.dataset[global_idx][-1]
+          phone_logit_frame_level = testset.unsegment(phone_logits[idx], segments)
+          pred_phone_label = phone_logit_frame_level.max(-1)[1]
+
+          if int(self.hop_len_ms / 10) * self.audio_net.ds_ratio > 1:
+            us_ratio = int(self.hop_len_ms / 10) * self.audio_net.ds_ratio
+            pred_phone_label = pred_phone_label.unsqueeze(-1)\
+                               .expand(-1, us_ratio).flatten()
+
+          pred_phone_label_list = pred_phone_label.cpu().detach().numpy().tolist()
+          pred_phone_names = ','.join([str(p) for p in pred_phone_label_list])
+          phone_f.write(f'{audio_id} {pred_phone_names}\n')
+      phone_f.close()
+
+      # Save embeddings
+      if save_embedding:
+        np.savez(embed_file, **embeds)
+        json.dump(embed_labels, open(embed_label_file, 'w') ,indent=2)
+
+    # Evaluation with token F1
+    gold_phone_files = [os.path.join(testset.data_path, f'{split}/{split}_nonoverlap.item') for split in testset.splits]
+    token_f1,\
+    token_prec,\
+    token_recall = compute_token_f1(phone_file,
+                                    gold_phone_files,
+                                    self.ckpt_dir.joinpath(f'confusion.{self.global_epoch}.png'))
+    print('[OOS TEST RESULT]')
+    info = f'Out-of-Sample Dataset: {self.oos_dataset_name}\n'\
+           f'Token Precision: {token_prec:.4f}\tToken Recall: {token_recall:.4f}\tToken F1: {token_f1:.4f}\n'
+
+    save_path = os.path.join(self.ckpt_dir, f'results_file_{self.config.seed}.txt')
+    with open(save_path, 'a') as f:
+      f.write(info)
+    print(info)
+     
+    if self.history['token_result'][-1] < token_f1:
+      self.history['token_result'] = [token_prec, token_recall, token_f1]
+    self.set_mode('train') 
 
   def set_mode(self, mode='train'): 
     if mode == 'train':
@@ -413,8 +511,10 @@ def main(argv):
   if not config.dset_dir:
     config.dset_dir = "/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic" 
   
-  avg_word_acc = []
-  avg_token_f1 = []
+  word_accs = []
+  token_precs = []
+  token_recs = []
+  token_f1s = []
   for seed in config.get('seeds', [config.seed]):
     config.seed = seed
     config['seed'] = seed
@@ -426,6 +526,7 @@ def main(argv):
     torch.set_printoptions(precision=4)
 
     print()
+    print(f'I am process {os.getpid()}')
     print('[CONFIGS]')
     print(config)
     print()
@@ -436,15 +537,28 @@ def main(argv):
       net.train(save_embedding=save_embedding)
     elif config.mode == 'test':
       net.test(save_embedding=save_embedding) 
+    elif config.mode == 'test_oos':
+      net.test_out_of_sample(save_embedding=save_embedding) 
     else:
       return 0
-    avg_word_acc.append(net.history['word_acc'])
-    avg_token_f1.append(net.history['token_f1'])
+    word_accs.append(net.history['word_acc'])
+    token_precs.append(net.history['token_result'][0])
+    token_recs.append(net.history['token_result'][1])
+    token_f1s.append(net.history['token_result'][2])
 
-  avg_word_acc = np.asarray(avg_word_acc)
-  avg_token_f1 = np.asarray(avg_token_f1)
-  print(f'Average Word Acc.: {np.mean(avg_word_acc)}+/-{np.std(avg_word_acc)}\n'
-        f'Average Token F1: {np.mean(avg_token_f1)}+/-{np.std(avg_token_f1)}') 
+  word_accs = np.asarray(word_accs)
+  token_precs = np.asarray(token_precs)
+  token_recs = np.asarray(token_recs)
+  token_f1s = np.asarray(token_f1s)
+
+  mean_word_acc, std_word_acc = np.mean(word_accs), np.std(word_accs)
+  mean_token_prec, std_token_prec = np.mean(token_precs), np.std(token_precs)
+  mean_token_rec, std_token_rec = np.mean(token_recs), np.std(token_recs)
+  mean_token_f1, std_token_f1 = np.mean(token_f1s), np.std(token_f1s) 
+  print(f'Average Word Acc.: {mean_word_acc:.4f}+/-{std_word_acc:.4f}\n'
+        f'Average Token Precision: {mean_token_prec:.4f}+/-{std_token_prec:.4f}\t'
+        f'Recall: {mean_token_rec:.4f}+/-{std_token_rec:.4f}\t'
+        f'F1: {mean_token_f1:.4f}+/-{std_token_f1:.4f}') 
 
 
 if __name__ == '__main__':

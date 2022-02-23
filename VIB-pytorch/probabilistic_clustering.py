@@ -13,7 +13,7 @@ class DIB:
     self.cluster_centers_ = None
 
   def fit(self, X,
-          max_iters=50,
+          max_iters=80,
           tol=1e-2):
     EPS = 1e-10
     centers, _ = self.dib_plusplus_(X) 

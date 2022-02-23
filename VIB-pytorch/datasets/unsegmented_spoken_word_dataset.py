@@ -8,6 +8,7 @@ import numpy as np
 import re
 import os
 import json
+from collections import defaultdict
 from kaldiio import ReadHelper
 from copy import deepcopy
 from scipy import signal
@@ -105,6 +106,9 @@ class UnsegmentedSpokenWordDataset(torch.utils.data.Dataset):
         segments = [example['segments'] for example in data]
         phonemes = [example['phonemes'] for example in data]
         self.dataset = [list(item) for item in zip(audio, text, spans, segments, phonemes)]
+        self.class_to_indices = defaultdict(list)
+        for idx, item in enumerate(self.dataset):
+            self.class_to_indices[item[1]].append(idx)
         self.audio_feature_type = audio_feature
 
     def __getitem__(self, idx):        
@@ -126,13 +130,12 @@ class UnsegmentedSpokenWordDataset(torch.utils.data.Dataset):
         return audio_inputs, span_ids, word_labels, input_mask, span_mask, phoneme_num, segment_num, idx 
 
     def sample_positives(self, idx, label, n):
-        random_idxs = np.random.permutation(len(self.dataset))
-        pos_idxs = []
+        random_idxs = np.random.permutation(self.class_to_indices[label])
+        os_idxs = []
         for i in random_idxs:
             if i == idx:
                 continue
-            if self.dataset[i][1] == label:
-                pos_idxs.append(i)
+            pos_idxs.append(i)
             if len(pos_idxs) == n:
                 break
         if not len(pos_idxs):
@@ -349,7 +352,7 @@ class UnsegmentedSpokenWordPreprocessor:
         return text
 
     def to_word_text(self, indices):
-        return [self.visual_words[i] for i in indices]
+        return [self.visual_words[i] if i in self.visual_words else BLANK for i in indices]
 
     def tokens_to_word_text(self, indices):
         T = len(indices)
@@ -472,6 +475,10 @@ def load_data_split(dataset_name,
                         continue
                 elif phone_label == 'predicted_wav2vec2':
                     segments = [phn for phn in word_dict['predicted_segments_wav2vec2'] if phn['text'] != SIL]
+                    if not len(segments):
+                        continue
+                elif phone_label == 'predicted_unsup_seg':
+                    segments = [phn for phn in word_dict['predicted_segments_unsup_seg'] if phn['text'] != SIL]
                     if not len(segments):
                         continue
                 elif phone_label == 'groundtruth':
