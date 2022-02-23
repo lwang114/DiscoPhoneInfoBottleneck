@@ -166,9 +166,9 @@ def extract_meta_data(data_path,
   abx_f.close()
   print(f'Number of audios: {num_files}')
 
-def extract_noun(data_path, out_file):
+def extract_vocab(data_path, out_file, pos='noun'):
   lemmatizer = WordNetLemmatizer() 
-  nouns = dict()
+  vocab = dict()
   for split in ["TRAIN"]:
     sent_file = os.path.join(data_path, split, f'{split}.json')
     with open(sent_file, 'r') as f:
@@ -178,14 +178,18 @@ def extract_noun(data_path, out_file):
         postags = [token[1] for token in nltk.pos_tag(sent)]
         for w_idx, w in enumerate(sent):
           w = lemmatizer.lemmatize(w.lower())
-          if postags[w_idx][0] == 'N':
-            if not w in nouns:
-              nouns[w] = 0
-            nouns[w] += 1 
-  print(f'Number of distinct nouns: {len(nouns)}')
-  json.dump(nouns, open(out_file, 'w'), indent=2)
+          if pos == 'noun' and postags[w_idx][0] == 'N':
+            if not w in vocab:
+              vocab[w] = 0
+            vocab[w] += 1 
+          elif pos == 'any':
+            if not w in vocab:
+              vocab[w] = 0
+            vocab[w] += 1
+  print(f'Number of distinct vocab: {len(vocab)}')
+  json.dump(vocab, open(out_file, 'w'), indent=2)
 
-def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='train_timit', debug=False):
+def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='train_timit', pos='noun', debug=False):
   lemmatizer = WordNetLemmatizer()
   dataset_name = dataset_name
   out_path = os.path.join(out_path, dataset_name)
@@ -199,8 +203,8 @@ def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='tra
           top_words.add(lemma)
     print(f'Number of chosen words: {len(top_words)}')
   else:
-    vocab_path = os.path.join(data_path, 'TIMIT_nouns.json')
-    extract_noun(data_path, vocab_path)
+    vocab_path = os.path.join(data_path, f'TIMIT_{pos}s.json')
+    extract_vocab(data_path, vocab_path, pos=pos)
     vocab = json.load(open(vocab_path))
     top_words = sorted(vocab, key=lambda x:vocab[x], reverse=True)[:300]
     top_words = set([lemmatizer.lemmatize(w.lower()) for w in top_words])
@@ -267,14 +271,13 @@ def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='tra
               next_phn = word['phonemes'][phn_idx+1]['text']
             abx_f.write(f'{word_audio_id} {phn["begin"]} {phn["end"]} {phn["text"]} {prev_phn} {next_phn} {spk}\n')         
     sent_f.close()
-
   for w in top_words:
     if not w in counts:
       print(w) # XXX
-
   print(f'Number of audio files: {global_idx+1}, number of chosen words used: {len(counts)}')
   word_f.close()
   abx_f.close()
+
 
 def remove_SA_files(in_path, out_path):
   with open(in_path, 'r') as f_in, \
@@ -331,4 +334,12 @@ if __name__ == '__main__':
                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
                          vocab_file='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_visual_nouns.json',
                          dataset_name='train_timit_visual',
+                         debug=False)
+  if args.TASK == 8:
+    pos = 'any'
+    extract_word_dataset(data_path,
+                         out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
+                         vocab_file=None,
+                         dataset_name=f'train_timit_{pos}_top300',
+                         pos=pos,
                          debug=False) 
