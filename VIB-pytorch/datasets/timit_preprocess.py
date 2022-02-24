@@ -166,49 +166,74 @@ def extract_meta_data(data_path,
   abx_f.close()
   print(f'Number of audios: {num_files}')
 
-def extract_vocab(data_path, out_file, pos='noun'):
+def extract_vocab(data_path, out_file, word_type='noun', splits=['TRAIN']):
   lemmatizer = WordNetLemmatizer() 
   vocab = dict()
-  for split in ["TRAIN"]:
+  word_dict = dict()
+  for split in splits:
     sent_file = os.path.join(data_path, split, f'{split}.json')
     with open(sent_file, 'r') as f:
       for line in f:
         sent_dict = json.loads(line.rstrip('\n'))
-        sent = [word['text'] for word in sent_dict['words']]
-        postags = [token[1] for token in nltk.pos_tag(sent)]
-        for w_idx, w in enumerate(sent):
-          w = lemmatizer.lemmatize(w.lower())
-          if pos == 'noun' and postags[w_idx][0] == 'N':
-            if not w in vocab:
-              vocab[w] = 0
-            vocab[w] += 1 
-          elif pos == 'any':
-            if not w in vocab:
-              vocab[w] = 0
-            vocab[w] += 1
-  print(f'Number of distinct vocab: {len(vocab)}')
+        word_dict[sent_dict['audio_id']] = []
+        if word_type.rfind('gram'):
+            for n in word_type.rstrip('gram'):
+                n = int(n)
+                for w in sent_dict['words']:
+                    phns = [(phn_idx, phn) for phn_idx, phn in enumerate(w['phonemes']) if phn['text'] != 'SIL']
+                    for i in range(len(phns)-n+1):
+                        ngram = ' '.join([phn['text'] for phn_idx, phn in phns[i:i+n]])
+                        word_dict[sent_dict['audio_id']].append(
+                            {'begin': w['phonemes'][phns[i][0]]['begin'],
+                             'end': w['phonemes'][phns[i+n-1][0]]['end'],
+                             'text': ngram,
+                             'phonemes': deepcopy(w['phonemes'][phns[i][0]:phns[i+n-1][0]+1])}
+                        )
+                        if not ngram in vocab:
+                            vocab[ngram] = 0
+                        vocab[ngram] += 1 
+        else:
+            sent = [word['text'] for word in sent_dict['words']]
+            postags = [token[1] for token in nltk.pos_tag(sent)]
+            for w_idx, w in enumerate(sent):
+              w = lemmatizer.lemmatize(w.lower())
+              if word_type == 'noun' and postags[w_idx][0] == 'N':
+                if not w in vocab:
+                  vocab[w] = 0
+                vocab[w] += 1
+                word_dict[sent_dict['audio_id']].append(deepcopy(w))
+              elif word_type == 'any':
+                if not w in vocab:
+                  vocab[w] = 0
+                vocab[w] += 1
+              else: raise ValueError(f'Unknown word type: {word_type}')
+  print(f'Number of distinct vocab: {len(vocab)} stored in {out_file}')
   json.dump(vocab, open(out_file, 'w'), indent=2)
+  return word_dict
 
-def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='train_timit', pos='noun', debug=False):
+def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='train_timit', word_type='noun', k=300, debug=False):
   lemmatizer = WordNetLemmatizer()
   dataset_name = dataset_name
   out_path = os.path.join(out_path, dataset_name)
+  splits = ["FULL"]
   if vocab_file:
     vocab = json.load(open(vocab_file))
     top_words = set()
     for w in sorted(vocab, key=lambda x:vocab[x], reverse=True):
-      lemma = lemmatizer.lemmatize(w.lower())
-      if lemma in vocab and not lemma in stop_words:
-        if vocab[lemma] > 50:
-          top_words.add(lemma)
+      if w in vocab and not w in stop_words:
+        if vocab[w] > 50:
+          top_words.add(w)
     print(f'Number of chosen words: {len(top_words)}')
   else:
-    vocab_path = os.path.join(data_path, f'TIMIT_{pos}s.json')
-    extract_vocab(data_path, vocab_path, pos=pos)
+    vocab_path = os.path.join(data_path, f'TIMIT_{word_type}s.json')
+    chosen_path = os.path.join(data_path, f'TIMIT_top{k}_{word_type}s.json')
+    extract_vocab(data_path, vocab_path, word_type=word_type, splits=splits)
     vocab = json.load(open(vocab_path))
-    top_words = sorted(vocab, key=lambda x:vocab[x], reverse=True)[:300]
-    top_words = set([lemmatizer.lemmatize(w.lower()) for w in top_words])
-    print(f'Number of chosen words: {len(top_words)}, {top_words}')
+    top_words = sorted(vocab, key=lambda x:vocab[x], reverse=True)[:k]
+    top_word_tuples = [(w, vocab[w]) for w in top_words]
+    top_words = set(top_words)
+    json.dump(top_word_tuples, open(chosen_path, 'w'), indent=2)
+    print(f'Number of chosen words: {len(top_words)} stored in {chosen_path}')
 
   if not os.path.exists(out_path):
     os.makedirs(out_path)
@@ -221,7 +246,7 @@ def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='tra
   abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
 
   global_idx = 0
-  for split in ['FULL']:         
+  for split in splits:         
     sent_file = os.path.join(data_path, split, f'{split}.json') 
     sent_f = open(sent_file, 'r')
     for line in sent_f:
@@ -271,9 +296,96 @@ def extract_word_dataset(data_path, out_path, vocab_file=None, dataset_name='tra
               next_phn = word['phonemes'][phn_idx+1]['text']
             abx_f.write(f'{word_audio_id} {phn["begin"]} {phn["end"]} {phn["text"]} {prev_phn} {next_phn} {spk}\n')         
     sent_f.close()
-  for w in top_words:
-    if not w in counts:
-      print(w) # XXX
+  print(f'Number of audio files: {global_idx+1}, number of chosen words used: {len(counts)}')
+  word_f.close()
+  abx_f.close()
+
+def extract_ngram_dataset(data_path, out_path, vocab_file=None, dataset_name='train_timit', word_type='3gram', k=300, debug=False):
+  lemmatizer = WordNetLemmatizer()
+  dataset_name = dataset_name
+  out_path = os.path.join(out_path, dataset_name)
+  splits = ["FULL"]
+  if vocab_file:
+    vocab = json.load(open(vocab_file))
+    top_words = set()
+    for w in sorted(vocab, key=lambda x:vocab[x], reverse=True):
+      if w in vocab and not w in stop_words:
+        if vocab[w] > 50:
+          top_words.add(w)
+    print(f'Number of chosen words: {len(top_words)}')
+  else:
+    vocab_path = os.path.join(data_path, f'TIMIT_{word_type}s.json')
+    chosen_path = os.path.join(data_path, f'TIMIT_top{k}_{word_type}s.json')
+    ngram_dict = extract_vocab(data_path, vocab_path, word_type=word_type, splits=splits)
+    vocab = json.load(open(vocab_path))
+    top_words = sorted(vocab, key=lambda x:vocab[x], reverse=True)[:k]
+    top_word_tuples = [(w, vocab[w]) for w in top_words]
+    top_words = set(top_words)
+    json.dump(top_word_tuples, open(chosen_path, 'w'), indent=2)
+    print(f'Number of chosen words: {len(top_words)} stored in {chosen_path}')
+
+  if not os.path.exists(out_path):
+    os.makedirs(out_path)
+  
+  word_file = os.path.join(out_path, f'../{dataset_name}.json')
+  abx_file = os.path.join(out_path, f'{dataset_name}_nonoverlap.item')
+  counts = dict()
+  word_f = open(word_file, 'w')
+  abx_f = open(abx_file, 'w')
+  abx_f.write("#file_ID onset offset #phone prev-phone next-phone speaker\n")
+
+  global_idx = 0
+  for split in splits:
+    sent_file = os.path.join(data_path, split, f'{split}.json') 
+    sent_f = open(sent_file, 'r')
+    for line in sent_f:
+      sent_dict = json.loads(line.rstrip('\n'))
+      audio_id = sent_dict['audio_id']
+      audio_path = os.path.join(data_path, split, f'{audio_id}.wav')
+      spk = sent_dict['spk']
+      if not os.path.exists(audio_path):
+        continue
+      fs, audio = wavfile.read(audio_path)
+      
+      # Extract ngrams in sentences
+      for word_idx, word in enumerate(ngram_dict[audio_id]):
+        if debug and global_idx > 20:
+          break 
+        if word['text'] in top_words:
+          global_idx += 1
+          if not word['text'] in counts:
+            counts[word['text']] = 1
+          elif counts[word['text']] >= 500:
+            continue
+          else:
+            counts[word['text']] += 1
+          
+          word_info = {'audio_id': audio_id,
+                       'word_id': str(word_idx),
+                       'label': word['text'],
+                       'begin': word['begin'],
+                       'end': word['end'],
+                       'spk': spk,
+                       'split': dataset_name,
+                       'phonemes': word['phonemes']}
+          word_f.write(json.dumps(word_info)+'\n')
+
+          # Extract wav file
+          word_audio = audio[int(word['begin']*fs):int(word['end']*fs)]
+          word_audio_id = f'{word_info["audio_id"]}_{word_info["word_id"]}'
+          word_audio_path = os.path.join(out_path, word_audio_id+'.wav')
+          wavfile.write(word_audio_path, fs, word_audio)
+          
+          # Extract ABX info
+          for phn_idx, phn in enumerate(word['phonemes']):
+            prev_phn = SIL
+            next_phn = SIL
+            if phn_idx > 0:
+              prev_phn = word['phonemes'][phn_idx-1]['text']
+            if phn_idx < len(word['phonemes']) - 1:
+              next_phn = word['phonemes'][phn_idx+1]['text']
+            abx_f.write(f'{word_audio_id} {phn["begin"]} {phn["end"]} {phn["text"]} {prev_phn} {next_phn} {spk}\n')         
+    sent_f.close()
   print(f'Number of audio files: {global_idx+1}, number of chosen words used: {len(counts)}')
   word_f.close()
   abx_f.close()
@@ -289,6 +401,7 @@ def remove_SA_files(in_path, out_path):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('TASK', type=int)
+  parser.add_argument('--debug', action='store_true')
   argv = sys.argv[1:]
   args, _ = parser.parse_known_args(argv)
   data_path = '/ws/ifp-53_2/hasegawa/lwang114/data/TIMIT'
@@ -322,24 +435,32 @@ if __name__ == '__main__':
                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
                          vocab_file='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_nouns_top0-200.json',
                          dataset_name='train_timit_top0-200',
-                         debug=False)
+                         debug=args.debug)
   if args.TASK == 6:
     extract_word_dataset(data_path,
                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
                          vocab_file='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_nouns_top200-600.json',
                          dataset_name='train_timit_top200-600',
-                         debug=False)
+                         debug=args.debug)
   if args.TASK == 7:
     extract_word_dataset(data_path,
                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
                          vocab_file='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_visual_nouns.json',
                          dataset_name='train_timit_visual',
-                         debug=False)
+                         debug=args.debug)
   if args.TASK == 8:
-    pos = 'any'
+    word_type = 'any'
     extract_word_dataset(data_path,
                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
                          vocab_file=None,
-                         dataset_name=f'train_timit_{pos}_top300',
-                         pos=pos,
-                         debug=False) 
+                         dataset_name=f'train_timit_{word_type}_top300',
+                         word_type=word_type,
+                         debug=args.debug)
+  if args.TASK == 9:
+    word_type = '3gram'
+    extract_ngram_dataset(data_path,
+                          out_path='/ws/ifp-53_2/hasegawa/lwang114/data/zerospeech2021-dataset/phonetic/librispeech_word',
+                          vocab_file=None,
+                          dataset_name=f'train_timit_{word_type}_top300',
+                          word_type=word_type,
+                          debug=args.debug)
